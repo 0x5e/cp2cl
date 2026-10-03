@@ -1,0 +1,10 @@
+target/
+Cargo.lock.orig
+
+# MFi credentials — a private key, never commit these.
+authentication/
+*.pk8
+*.p7b
+*.p12
+
+.DS_Store

@@ -1,0 +1,54 @@
+[package]
+name = "cp2aa"
+version = "0.1.0"
+edition = "2021"
+description = "Headless CarPlay receiver that forwards audio and video to go2rtc"
+license = "GPL-3.0-or-later"
+
+# NOTE: these are development-time path dependencies on a sibling checkout of
+# LIVI. When cp2aa grows up, replace each one with a git dependency pinned to a
+# tag on your own fork (see README "Depending on LIVI").
+
+[dependencies]
+livi-runtime = { path = "../LIVI/native/livi-helperd/crates/livi-runtime" }
+iap2-link = { path = "../LIVI/native/livi-helperd/crates/iap2-link" }
+iap2-wired = { path = "../LIVI/native/livi-helperd/crates/iap2-wired" }
+iap2-mfi = { path = "../LIVI/native/livi-helperd/crates/iap2-mfi" }
+iap2-csm = { path = "../LIVI/native/livi-helperd/crates/iap2-csm" }
+# Needed directly to name `usbmuxd::UsbmuxdDevice` in our own function
+# signatures. Same version LIVI resolves, so these unify into one build.
+idevice = { version = "0.1", features = ["usbmuxd"] }
+
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+
+# CarPlay airplay net audio/video is sealed with ChaCha20-Poly1305 and its keys
+# come from an X25519 + Ed25519 handshake (see src/airplay/pairing.rs).
+x25519-dalek = { version = "2", features = ["static_secrets", "getrandom"] }
+ed25519-dalek = "2"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+
+# pair-setup is SRP-6a over the RFC 5054 3072-bit group with SHA-512.
+num-bigint = "0.4"
+num-traits = "0.2"
+
+# /auth-setup (MFiSAP) returns the coprocessor signature sealed with AES-128-CTR,
+# and 2.0-class accessories digest the two public keys with SHA-1.
+aes = "0.8"
+ctr = "0.9"
+sha1 = "0.10"
+
+# GET /info has to be answered with a binary property list, and events are
+# bplist too.
+plist = "1"
+base64 = "0.22"
+hex = "0.4"
+
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_json = "1"
