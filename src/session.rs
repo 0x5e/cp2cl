@@ -119,32 +119,52 @@ async fn attach(
         start_again: None,
     };
 
-    let (tx, mut rx) = mpsc::channel(64);
+    let (tx, rx) = mpsc::channel(64);
     let vehicle = Vehicle::default().feed();
     tokio::spawn(async move { run_accessory(channel, auth, identity, cp, tx, vehicle).await });
 
+    run_bringup("[cp]", &short(&device.udid), airplay_port, None, rx).await;
+    Ok(())
+}
+
+/// Prints the progress of one iAP2 bringup, and returns when it ends.
+///
+/// Both transports run the same conversation, and differ only in their log
+/// prefix and in which events they can produce, so the loop lives here once.
+/// `ssid` is the network a wireless session tells the phone to join; the wired
+/// one never has that step and passes `None`.
+pub(crate) async fn run_bringup(
+    prefix: &str,
+    peer: &str,
+    airplay_port: u32,
+    ssid: Option<&str>,
+    mut rx: mpsc::Receiver<BringupEvent>,
+) {
     while let Some(event) = rx.recv().await {
         match event {
-            BringupEvent::Identified => println!("[cp] identified"),
-            BringupEvent::Authenticated => println!("[cp] MFi authentication passed"),
-            BringupEvent::Subscribed => println!("[cp] subscriptions sent"),
-            BringupEvent::CarPlayStartSent { ip } => {
-                println!(
-                    "[cp] CarPlayStartSession sent — the phone should knock on {ip}:{airplay_port}"
-                )
+            BringupEvent::Identified => println!("{prefix} {peer} identified"),
+            BringupEvent::Authenticated => println!("{prefix} {peer} MFi authentication passed"),
+            BringupEvent::Subscribed => println!("{prefix} {peer} subscriptions sent"),
+            BringupEvent::WifiConfigSent => {
+                if let Some(ssid) = ssid {
+                    println!("{prefix} {peer} told to join {ssid:?}");
+                }
             }
+            BringupEvent::CarPlayStartSent { ip } => println!(
+                "{prefix} {peer} CarPlayStartSession sent — the phone should knock on \
+                 {ip}:{airplay_port}"
+            ),
             BringupEvent::Failed(reason) => {
-                eprintln!("[cp] session failed: {reason}");
+                eprintln!("{prefix} {peer} session failed: {reason}");
                 break;
             }
             BringupEvent::Closed => {
-                println!("[cp] session closed");
+                println!("{prefix} {peer} session closed");
                 break;
             }
             _ => {}
         }
     }
-    Ok(())
 }
 
 /// Which interface carries CarPlay's own media, per platform.

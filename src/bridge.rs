@@ -239,46 +239,41 @@ impl Bridge {
             Some(s) => (s.width, s.height),
             None => (self.cfg.width, self.cfg.height),
         };
+        // The head unit reports in its own screen space, which is the space
+        // `/info` now asks the phone for, so the two agree — but clamp anyway
+        // rather than send an out-of-range position.
+        let clamp = |p: &Pointer| {
+            (
+                p.x.min(width.saturating_sub(1)) as u16,
+                p.y.min(height.saturating_sub(1)) as u16,
+            )
+        };
         for p in pointers {
-            // The head unit reports in its own screen space, which is the space
-            // `/info` now asks the phone for, so the two agree — but clamp
-            // anyway rather than send an out-of-range position.
-            let x = p.x.min(width.saturating_sub(1)) as u16;
-            let y = p.y.min(height.saturating_sub(1)) as u16;
+            let (x, y) = clamp(p);
+            // The slot an id already holds, which every action below needs.
+            let held = slots
+                .iter()
+                .position(|s| matches!(s, Some(s) if s.id == p.id));
             match action {
-                TouchAction::DOWN | TouchAction::POINTER_DOWN => {
-                    if let Some(slot) = slots
-                        .iter_mut()
-                        .find(|s| matches!(s, Some(s) if s.id == p.id))
-                    {
-                        slot.as_mut().map(|s| {
-                            s.x = x;
-                            s.y = y;
-                        });
-                    } else if let Some(free) = slots.iter_mut().find(|s| s.is_none()) {
-                        *free = Some(TouchSlot { id: p.id, x, y });
-                    }
+                TouchAction::DOWN | TouchAction::POINTER_DOWN => match held {
+                    Some(slot) => slots[slot] = Some(TouchSlot { id: p.id, x, y }),
                     // Every slot taken: the extra finger is dropped rather than
                     // stealing one from a finger that is already down.
-                }
+                    None => {
+                        if let Some(free) = slots.iter().position(|s| s.is_none()) {
+                            slots[free] = Some(TouchSlot { id: p.id, x, y });
+                        }
+                    }
+                },
                 TouchAction::UP | TouchAction::POINTER_UP => {
-                    if let Some(slot) = slots
-                        .iter_mut()
-                        .find(|s| matches!(s, Some(s) if s.id == p.id))
-                    {
-                        *slot = None;
+                    if let Some(slot) = held {
+                        slots[slot] = None;
                     }
                 }
                 // A move only updates the position; the finger keeps its slot.
                 _ => {
-                    if let Some(slot) = slots
-                        .iter_mut()
-                        .find(|s| matches!(s, Some(s) if s.id == p.id))
-                    {
-                        slot.as_mut().map(|s| {
-                            s.x = x;
-                            s.y = y;
-                        });
+                    if let Some(slot) = held {
+                        slots[slot] = Some(TouchSlot { id: p.id, x, y });
                     }
                 }
             }

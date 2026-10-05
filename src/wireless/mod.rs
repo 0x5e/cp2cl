@@ -20,7 +20,7 @@
 use std::sync::Arc;
 
 use iap2_csm::messages::wifi::SecurityType;
-use livi_runtime::bringup::{run_accessory, BringupEvent, CpConfig, OnCable};
+use livi_runtime::bringup::{run_accessory, CpConfig, OnCable};
 use livi_runtime::driver::LinkChannel;
 use livi_runtime::ident::{Identity, Transport};
 use livi_runtime::mfi_async::SharedCoprocessor;
@@ -87,34 +87,11 @@ pub(crate) async fn run_session(
         start_again: None,
     };
 
-    let (tx, mut rx) = mpsc::channel(64);
+    let (tx, rx) = mpsc::channel(64);
     let vehicle = Vehicle::default().feed();
     tokio::spawn(async move { run_accessory(channel, auth, identity, cp, tx, vehicle).await });
 
-    while let Some(event) = rx.recv().await {
-        match event {
-            BringupEvent::Identified => println!("[cp-wifi] {peer} identified"),
-            BringupEvent::Authenticated => {
-                println!("[cp-wifi] {peer} MFi authentication passed")
-            }
-            BringupEvent::Subscribed => println!("[cp-wifi] {peer} subscriptions sent"),
-            BringupEvent::WifiConfigSent => {
-                println!("[cp-wifi] {peer} told to join {:?}", cfg.ssid)
-            }
-            BringupEvent::CarPlayStartSent { ip } => println!(
-                "[cp-wifi] {peer} CarPlayStartSession sent — it should knock on {ip}:{airplay_port}"
-            ),
-            BringupEvent::Failed(reason) => {
-                eprintln!("[cp-wifi] {peer} session failed: {reason}");
-                break;
-            }
-            BringupEvent::Closed => {
-                println!("[cp-wifi] {peer} session closed");
-                break;
-            }
-            _ => {}
-        }
-    }
+    crate::session::run_bringup("[cp-wifi]", peer, airplay_port, Some(&cfg.ssid), rx).await;
 }
 
 /// `00:11:22:33:44:55` → bytes. Unparseable parts stay zero rather than

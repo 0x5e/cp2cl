@@ -1,25 +1,27 @@
 [package]
 name = "cp2aa"
-version = "0.1.0"
+version = "0.5.0"
 edition = "2021"
-description = "Headless CarPlay receiver that forwards audio and video to go2rtc"
+description = "Headless CarPlay receiver that bridges an Android Auto head unit and an iPhone"
 license = "GPL-3.0-or-later"
 
-# NOTE: these are development-time path dependencies on a sibling checkout of
-# LIVI. When cp2aa grows up, replace each one with a git dependency pinned to a
-# tag on your own fork (see README "Depending on LIVI").
+# The LIVI crates come from the fork's `feature/local-credential` branch. LIVI's
+# repository root is an Electron app with no top-level Cargo.toml, but cargo
+# searches the checkout for a package by name, so these resolve as written.
+# Cargo.lock pins the commit; `cargo update -p livi-runtime` follows the branch
+# again. See README "Depending on LIVI".
 
 [dependencies]
-livi-runtime = { path = "../LIVI/native/livi-helperd/crates/livi-runtime" }
-iap2-link = { path = "../LIVI/native/livi-helperd/crates/iap2-link" }
-iap2-wired = { path = "../LIVI/native/livi-helperd/crates/iap2-wired" }
-iap2-mfi = { path = "../LIVI/native/livi-helperd/crates/iap2-mfi" }
-iap2-csm = { path = "../LIVI/native/livi-helperd/crates/iap2-csm" }
+livi-runtime = { git = "https://github.com/0x5e/LIVI", branch = "feature/local-credential" }
+iap2-link = { git = "https://github.com/0x5e/LIVI", branch = "feature/local-credential" }
+iap2-wired = { git = "https://github.com/0x5e/LIVI", branch = "feature/local-credential" }
+iap2-mfi = { git = "https://github.com/0x5e/LIVI", branch = "feature/local-credential" }
+iap2-csm = { git = "https://github.com/0x5e/LIVI", branch = "feature/local-credential" }
 # LIVI's Android Auto implementation is the head-unit side; we are the phone.
 # Framing, the protobuf primitives and the channel constants know nothing about
 # which end they are on, so we take those from there instead of keeping a copy.
 # The TLS server and the session state machine are ours, in `src/aa-client`.
-livi-aa = { path = "../LIVI/native/livi-helperd/crates/livi-aa" }
+livi-aa = { git = "https://github.com/0x5e/LIVI", branch = "feature/local-credential" }
 # Needed directly to name `usbmuxd::UsbmuxdDevice` in our own function
 # signatures. Same version LIVI resolves, so these unify into one build.
 idevice = { version = "0.1", features = ["usbmuxd"] }

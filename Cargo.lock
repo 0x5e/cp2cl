@@ -389,7 +389,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cp2aa"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "aes",
  "anyhow",
@@ -405,6 +405,7 @@ dependencies = [
  "iap2-mfi",
  "iap2-wired",
  "idevice",
+ "livi-aa",
  "livi-runtime",
  "num-bigint",
  "num-traits",
@@ -923,14 +924,17 @@ dependencies = [
 [[package]]
 name = "iap2-csm"
 version = "0.1.0"
+source = "git+https://github.com/0x5e/LIVI?branch=feature%2Flocal-credential#2083da3b7ce390eb2c3ea9147de6ce151436bc8d"
 
 [[package]]
 name = "iap2-link"
 version = "0.1.0"
+source = "git+https://github.com/0x5e/LIVI?branch=feature%2Flocal-credential#2083da3b7ce390eb2c3ea9147de6ce151436bc8d"
 
 [[package]]
 name = "iap2-mfi"
 version = "0.1.0"
+source = "git+https://github.com/0x5e/LIVI?branch=feature%2Flocal-credential#2083da3b7ce390eb2c3ea9147de6ce151436bc8d"
 dependencies = [
  "libc",
  "livi-net",
@@ -940,6 +944,7 @@ dependencies = [
 [[package]]
 name = "iap2-usbmux"
 version = "0.1.0"
+source = "git+https://github.com/0x5e/LIVI?branch=feature%2Flocal-credential#2083da3b7ce390eb2c3ea9147de6ce151436bc8d"
 dependencies = [
  "libc",
  "nusb",
@@ -949,6 +954,7 @@ dependencies = [
 [[package]]
 name = "iap2-wired"
 version = "0.1.0"
+source = "git+https://github.com/0x5e/LIVI?branch=feature%2Flocal-credential#2083da3b7ce390eb2c3ea9147de6ce151436bc8d"
 dependencies = [
  "iap2-usbmux",
  "idevice",
@@ -1066,8 +1072,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
+name = "livi-aa"
+version = "0.1.0"
+source = "git+https://github.com/0x5e/LIVI?branch=feature%2Flocal-credential#2083da3b7ce390eb2c3ea9147de6ce151436bc8d"
+dependencies = [
+ "futures-util",
+ "livi-host-proto",
+ "livi-session-io",
+ "nusb",
+ "rustls",
+ "rustls-pemfile",
+ "rustls-pki-types",
+ "serde_json",
+ "socket2 0.5.10",
+ "tokio",
+]
+
+[[package]]
 name = "livi-btd"
 version = "0.1.0"
+source = "git+https://github.com/0x5e/LIVI?branch=feature%2Flocal-credential#2083da3b7ce390eb2c3ea9147de6ce151436bc8d"
 dependencies = [
  "libc",
  "livi-net",
@@ -1076,14 +1100,17 @@ dependencies = [
 [[package]]
 name = "livi-host-proto"
 version = "0.1.0"
+source = "git+https://github.com/0x5e/LIVI?branch=feature%2Flocal-credential#2083da3b7ce390eb2c3ea9147de6ce151436bc8d"
 
 [[package]]
 name = "livi-net"
 version = "0.1.0"
+source = "git+https://github.com/0x5e/LIVI?branch=feature%2Flocal-credential#2083da3b7ce390eb2c3ea9147de6ce151436bc8d"
 
 [[package]]
 name = "livi-runtime"
 version = "0.1.0"
+source = "git+https://github.com/0x5e/LIVI?branch=feature%2Flocal-credential#2083da3b7ce390eb2c3ea9147de6ce151436bc8d"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
@@ -1100,8 +1127,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "livi-session-io"
+version = "0.1.0"
+source = "git+https://github.com/0x5e/LIVI?branch=feature%2Flocal-credential#2083da3b7ce390eb2c3ea9147de6ce151436bc8d"
+dependencies = [
+ "nusb",
+ "tokio",
+]
+
+[[package]]
 name = "livi-wifi"
 version = "0.1.0"
+source = "git+https://github.com/0x5e/LIVI?branch=feature%2Flocal-credential#2083da3b7ce390eb2c3ea9147de6ce151436bc8d"
 dependencies = [
  "libc",
  "livi-btd",
@@ -1266,6 +1303,7 @@ dependencies = [
  "once_cell",
  "rustix",
  "slab",
+ "tokio",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

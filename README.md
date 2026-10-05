@@ -173,25 +173,34 @@ One command per line, echoed on start:
 | knob | `home` `back` `select` `left` `right` `up` `down` `wheel <n>` |
 | phone | `answer` `hangup` `mute` `key 0`…`key 9` `star` `pound` `del` |
 | session | `night [on\|off]` `siri` `keyframe` `quit` |
+| touch | `click <x> <y>` `swipe <x1> <y1> <x2> <y2>` |
 
-Touch is deliberately not implemented.
+Touch goes down the same HID path a head unit's touchscreen uses. A tap is a
+press report followed by a lift, and a swipe is a press, a run of moves, and a
+lift. Coordinates are in the pixel space `GET /info` asks the phone for:
+`CP2AA_WIDTH`×`CP2AA_HEIGHT` unless a head unit has declared its own.
 
 ## Depending on LIVI
 
-`Cargo.toml` points at a sibling checkout:
+`Cargo.toml` takes the LIVI crates from the `feature/local-credential` branch of
+the fork:
 
 ```toml
-livi-runtime = { path = "../LIVI/native/livi-helperd/crates/livi-runtime" }
+livi-runtime = { git = "https://github.com/0x5e/LIVI", branch = "feature/local-credential" }
 ```
 
-That is fine for now but will not survive sharing the project, because LIVI's
-repository root is an Electron app with no `Cargo.toml` at the top, so a plain
-`git = "..."` dependency cannot find the workspace. When you are ready:
+LIVI's repository root is an Electron app with no `Cargo.toml` at the top. That
+used to look like a blocker; it is not one — cargo searches the checkout for a
+package by name, so the crates under `native/livi-helperd/crates/` resolve as
+written, all from one checkout.
 
-1. fork LIVI,
-2. either add it as a submodule and keep the `path` dependencies, or build a
-   pure-Rust mirror repo containing only `native/livi-helperd` and depend on it
-   by tag.
+A branch is a moving target, so `Cargo.lock` records the commit it resolved to
+and that commit is what builds. To follow the branch, `cargo update -p
+livi-runtime` (and the other `livi-*` / `iap2-*` names). The first fetch is
+expensive — the repository carries ~540 MB of Electron assets, which cargo
+drags along with the branch's history — and every build after that works
+offline. To hack on a local LIVI checkout instead, point a
+`[patch."https://github.com/0x5e/LIVI"]` section at the sibling `path`s.
 
 Note the licence: LIVI is **GPL-3.0-or-later**, and linking its crates makes
 this a derivative work, so cp2aa inherits that.

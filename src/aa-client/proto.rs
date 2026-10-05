@@ -44,20 +44,26 @@ pub enum Field<'a> {
 ///
 /// Walk a nested message by calling this again on the returned slice: the
 /// depth is the caller's business, which keeps this file free of message
-/// definitions. Anything with a wire type we never emit (fixed-width) ends the
-/// walk rather than being guessed at.
+/// definitions. Fixed-width fields are stepped over rather than returned —
+/// nothing here decodes a double or a float — so a field we do want, sitting
+/// behind one, stays reachable. A group (wire type 3/4) ends the walk rather
+/// than being guessed at.
 pub fn next_field<'a>(buf: &'a [u8], i: &mut usize) -> Option<(u32, Field<'a>)> {
-    let tag = read_varint(buf, i)?;
-    match tag & 7 {
-        0 => Some(((tag >> 3) as u32, Field::Varint(read_varint(buf, i)?))),
-        2 => {
-            let len = read_varint(buf, i)? as usize;
-            let end = i.checked_add(len)?;
-            let bytes = buf.get(*i..end)?;
-            *i = end;
-            Some(((tag >> 3) as u32, Field::Bytes(bytes)))
+    loop {
+        let tag = read_varint(buf, i)?;
+        match tag & 7 {
+            0 => return Some(((tag >> 3) as u32, Field::Varint(read_varint(buf, i)?))),
+            2 => {
+                let len = read_varint(buf, i)? as usize;
+                let end = i.checked_add(len)?;
+                let bytes = buf.get(*i..end)?;
+                *i = end;
+                return Some(((tag >> 3) as u32, Field::Bytes(bytes)));
+            }
+            1 => *i = i.checked_add(8).filter(|end| *end <= buf.len())?,
+            5 => *i = i.checked_add(4).filter(|end| *end <= buf.len())?,
+            _ => return None,
         }
-        _ => None,
     }
 }
 
@@ -134,26 +140,14 @@ pub fn read_varint(buf: &[u8], i: &mut usize) -> Option<u64> {
 pub fn varint_field(buf: &[u8], field: u32) -> Option<u64> {
     let mut i = 0usize;
     while i < buf.len() {
-        let tag = read_varint(buf, &mut i)?;
-        let value = match tag & 7 {
-            0 => Some(read_varint(buf, &mut i)?),
-            1 => {
-                i += 8;
-                None
-            }
-            2 => {
-                let len = read_varint(buf, &mut i)? as usize;
-                i += len;
-                None
-            }
-            5 => {
-                i += 4;
-                None
-            }
-            _ => return None,
-        };
-        if (tag >> 3) as u32 == field {
-            return value;
+        let (n, value) = next_field(buf, &mut i)?;
+        if n == field {
+            // A length-delimited field wearing the same number is not a varint;
+            // whoever wants one of those reaches for `bytes_field`.
+            return match value {
+                Field::Varint(v) => Some(v),
+                Field::Bytes(_) => None,
+            };
         }
     }
     None

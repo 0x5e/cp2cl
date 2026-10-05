@@ -34,6 +34,14 @@ pub enum CryptoError {
     BadPublicKey,
 }
 
+/// Framing a failure reaches the same call sites a socket error does, so let it
+/// travel as one instead of being mapped at each of them.
+impl From<CryptoError> for std::io::Error {
+    fn from(e: CryptoError) -> Self {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+    }
+}
+
 /// A ChaCha20-Poly1305 key.
 #[derive(Clone)]
 pub struct SymKey(pub Key);
@@ -130,6 +138,62 @@ pub fn seal(
             },
         )
         .map_err(|_| CryptoError::Aead)
+}
+
+// -------------------------------------------------------------- framing ----
+
+/// The ChaCha20-Poly1305 tag that follows the ciphertext in every framed
+/// record, and is not counted by the two-byte length in front of it.
+pub const TAG_LEN: usize = 16;
+
+/// The largest plaintext the phone will take in one frame. The control channel
+/// and the event channel frame the same way, so they share the limit.
+const MAX_PAYLOAD: usize = 0x4000;
+
+/// Seals `plain` as one or more `[2B length][ciphertext][tag]` records,
+/// advancing `counter` once per record.
+///
+/// The length doubles as the additional authenticated data, so it has to be
+/// settled before the frame is sealed — which is the whole reason this lives
+/// here rather than being spelled out at each place that writes frames.
+pub fn seal_frames(key: &SymKey, counter: &mut u64, plain: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    let mut out = Vec::new();
+    for chunk in plain.chunks(MAX_PAYLOAD) {
+        let header = (chunk.len() as u16).to_le_bytes();
+        let sealed = seal(key, &nonce_counter(*counter), chunk, &header)?;
+        *counter += 1;
+        out.extend_from_slice(&header);
+        out.extend_from_slice(&sealed);
+    }
+    Ok(out)
+}
+
+/// The read direction: opens every complete record at the front of `buf` and
+/// appends the plaintext to `plain`, leaving a partial record behind for the
+/// next read.
+///
+/// The counter advances only on a successful open. One frame that does not
+/// open must not shift every frame after it.
+pub fn open_frames(
+    key: &SymKey,
+    counter: &mut u64,
+    buf: &mut Vec<u8>,
+    plain: &mut Vec<u8>,
+) -> Result<(), CryptoError> {
+    while buf.len() >= 2 {
+        let len = u16::from_le_bytes([buf[0], buf[1]]) as usize;
+        let total = 2 + len + TAG_LEN;
+        if buf.len() < total {
+            break;
+        }
+        let aad = buf[..2].to_vec();
+        let sealed = buf[2..total].to_vec();
+        buf.drain(..total);
+        let opened = open(key, &nonce_counter(*counter), &sealed, &aad)?;
+        *counter += 1;
+        plain.extend_from_slice(&opened);
+    }
+    Ok(())
 }
 
 pub fn sha1(data: &[u8]) -> [u8; 20] {

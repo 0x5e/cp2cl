@@ -40,6 +40,10 @@ pub enum Command {
     /// A multitouch report: one entry per slot the /info descriptor declares,
     /// whether or not a finger is on it.
     Touch([TouchContact; TOUCH_SLOTS]),
+    /// A tap at one point: press, then lift.
+    Click { x: u16, y: u16 },
+    /// A drag from one point to another.
+    Swipe { from: (u16, u16), to: (u16, u16) },
     // Telephony.
     Answer,
     Hangup,
@@ -75,6 +79,11 @@ pub const PHONE_MUTE: u8 = 4;
 /// key0..key9 start here, then star and pound and del follow.
 pub const PHONE_KEY0: u8 = 5;
 
+/// One touch coordinate. Unsigned because the only ones are pixel positions.
+fn coord(arg: Option<&str>) -> Option<u16> {
+    arg?.parse().ok()
+}
+
 pub fn parse(line: &str) -> Option<Command> {
     let mut parts = line.split_whitespace();
     let head = parts.next()?.to_ascii_lowercase();
@@ -94,6 +103,14 @@ pub fn parse(line: &str) -> Option<Command> {
         "up" => Command::Up,
         "down" => Command::Down,
         "wheel" => Command::Wheel(arg?.parse().ok()?),
+        "click" => Command::Click {
+            x: coord(arg)?,
+            y: coord(parts.next())?,
+        },
+        "swipe" => Command::Swipe {
+            from: (coord(arg)?, coord(parts.next())?),
+            to: (coord(parts.next())?, coord(parts.next())?),
+        },
         "answer" => Command::Answer,
         "hangup" => Command::Hangup,
         "mute" => Command::Mute,
@@ -114,5 +131,6 @@ commands (one per line):
   media      play | pause | playpause | next | prev | nav
   knob       home | back | select | left | right | up | down | wheel <n>
   phone      answer | hangup | mute | key <0-9> | star | pound | del
+  touch      click <x> <y> | swipe <x1> <y1> <x2> <y2>
   session    night [on|off] | siri | keyframe | quit
 ";

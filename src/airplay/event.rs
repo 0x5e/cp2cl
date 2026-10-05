@@ -13,14 +13,151 @@
 //!
 //! Its keys come from the same shared secret as everything else, but unlike the
 //! control channel they are *not* read/write swapped (see `VerifyKeys`).
+//!
+//! The channel runs both ways. `EventSink` is the half the rest of the program
+//! talks to — stdin and the Android Auto bridge both hand it commands — and
+//! `pump_events` is the half that reads what the phone posts back and answers
+//! it.
+
+use std::sync::Arc;
+use std::time::Duration;
 
 use plist::{dictionary::Dictionary, Value};
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::sync::Mutex;
 
 use super::bplist::to_binary;
-use super::crypto::{nonce_counter, seal, SymKey};
-use crate::airplay::MAX_PAYLOAD;
-use crate::commands::{self, Command, TouchContact};
+use super::crypto::{open_frames, seal_frames, SymKey};
+use super::info::{KNOB_HID_UID, MEDIA_HID_UID, TELEPHONY_HID_UID, TOUCH_HID_UID};
+use super::rtsp;
+use crate::commands::{self, Command, TouchContact, TOUCH_SLOTS};
+
+/// How long a synthetic tap holds before it lifts. Two reports arriving in the
+/// same instant read as one, and nothing gets tapped.
+const TAP_HOLD: Duration = Duration::from_millis(60);
+/// How many move reports a swipe is broken into, and the gap between them. The
+/// phone reads the gesture from the trail, so too few makes it a jump.
+const SWIPE_STEPS: u32 = 8;
+const SWIPE_STEP: Duration = Duration::from_millis(20);
+
+/// Input only becomes possible after pair-verify derives the keys, so the sink
+/// exists the whole time and fills itself in as pieces arrive.
+pub struct EventSink {
+    key: Mutex<Option<SymKey>>,
+    counter: Mutex<u64>,
+    writer: Mutex<Option<OwnedWriteHalf>>,
+}
+
+impl EventSink {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            key: Mutex::new(None),
+            counter: Mutex::new(0),
+            writer: Mutex::new(None),
+        })
+    }
+
+    /// Called once pair-verify has derived the keys. Until then every press is
+    /// dropped, with a line saying so.
+    pub(crate) async fn set_key(&self, raw: [u8; 32]) {
+        *self.key.lock().await = SymKey::from_bytes(&raw).ok();
+    }
+
+    /// Hands over the write half of the connection the phone opened. Until that
+    /// arrives there is nowhere to put a report.
+    pub(crate) async fn attach_writer(&self, writer: OwnedWriteHalf) {
+        *self.writer.lock().await = Some(writer);
+    }
+
+    pub async fn dispatch(self: &Arc<Self>, cmd: Command) -> std::io::Result<()> {
+        let key = self.key.lock().await.clone();
+        let Some(key) = key else {
+            eprintln!("[event] not paired yet — press ignored");
+            return Ok(());
+        };
+        let mut guard = self.writer.lock().await;
+        let Some(writer) = guard.as_mut() else {
+            eprintln!("[event] phone has not opened the event channel yet");
+            return Ok(());
+        };
+        let mut counter = self.counter.lock().await;
+        let mut ch = EventChannel::new(key, &mut *writer);
+        ch.set_counter(*counter);
+        let outcome = ch.key(cmd).await;
+        *counter = ch.counter();
+        outcome
+    }
+
+    /// Answers one request the phone posted us on the event channel.
+    ///
+    /// The channel runs both ways: alongside our HID reports the phone sends its
+    /// own requests, and each one needs a 200. Ignoring them is not neutral —
+    /// the phone concludes the accessory stopped listening and stops sending
+    /// video a couple of seconds later.
+    async fn reply(&self, cseq: u32) -> std::io::Result<()> {
+        let Some(key) = self.key.lock().await.clone() else {
+            return Ok(());
+        };
+        let mut guard = self.writer.lock().await;
+        let Some(writer) = guard.as_mut() else {
+            return Ok(());
+        };
+        let mut counter = self.counter.lock().await;
+        let out = seal_frames(&key, &mut counter, &rtsp::Response::new(200).encode(cseq))?;
+        writer.write_all(&out).await
+    }
+}
+
+/// Reads the phone's side of the event connection and answers every request.
+pub(crate) async fn pump_events(
+    mut read: OwnedReadHalf,
+    read_key: SymKey,
+    sink: Arc<EventSink>,
+) {
+    let mut buf = [0u8; 4096];
+    let mut enc: Vec<u8> = Vec::new();
+    let mut plain: Vec<u8> = Vec::new();
+    let mut ctr: u64 = 0;
+
+    loop {
+        let n = match read.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        enc.extend_from_slice(&buf[..n]);
+
+        // Same framing as the control channel: [2B length][ciphertext][tag].
+        if let Err(e) = open_frames(&read_key, &mut ctr, &mut enc, &mut plain) {
+            eprintln!("[event] frame failed to open: {e}");
+            return;
+        }
+
+        while let Ok(Some((req, used))) = rtsp::parse(&plain) {
+            plain.drain(..used);
+            // The phone answers our commands on this same connection. Those
+            // answers are chatter, and replying to one would make it answer
+            // back — a loop that drowns the log in identical lines.
+            if req.method.starts_with("RTSP/") || req.method.starts_with("HTTP/") {
+                if req.path != "200" {
+                    eprintln!("[event] response {} {}", req.path, req.version);
+                }
+                continue;
+            }
+            println!(
+                "[event] <- {} {} ({}B)",
+                req.method,
+                req.path,
+                req.body.len()
+            );
+            if let Err(e) = sink.reply(req.cseq()).await {
+                eprintln!("[event] reply failed: {e}");
+                return;
+            }
+        }
+    }
+    println!("[airplay] event channel closed");
+}
 
 pub struct EventChannel<W> {
     write: SymKey,
@@ -61,15 +198,7 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
 
         // Same framing as the control channel: the two-byte length is the AAD
         // and counts the ciphertext only, with the tag following it.
-        let mut frame = Vec::new();
-        for chunk in plain.chunks(MAX_PAYLOAD) {
-            let header = (chunk.len() as u16).to_le_bytes();
-            let sealed = seal(&self.write, &nonce_counter(self.counter), chunk, &header)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-            self.counter += 1;
-            frame.extend_from_slice(&header);
-            frame.extend_from_slice(&sealed);
-        }
+        let frame = seal_frames(&self.write, &mut self.counter, &plain)?;
         self.writer.write_all(&frame).await
     }
 
@@ -84,7 +213,6 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
 
     /// Runs one parsed key press, including the release the phone expects.
     pub async fn key(&mut self, cmd: Command) -> std::io::Result<()> {
-        use super::info::{MEDIA_HID_UID, TELEPHONY_HID_UID, TOUCH_HID_UID};
         use commands::*;
 
         match cmd {
@@ -121,36 +249,18 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
                 self.hid_report(TOUCH_HID_UID, touch_report(&contacts))
                     .await?
             }
-            Command::Answer => {
-                self.hid_report(TELEPHONY_HID_UID, vec![PHONE_HOOK_SWITCH])
-                    .await?;
-                self.hid_report(TELEPHONY_HID_UID, vec![0]).await?;
-            }
-            Command::Hangup => {
-                self.hid_report(TELEPHONY_HID_UID, vec![PHONE_DROP]).await?;
-                self.hid_report(TELEPHONY_HID_UID, vec![0]).await?;
-            }
-            Command::Mute => {
-                self.hid_report(TELEPHONY_HID_UID, vec![PHONE_MUTE]).await?;
-                self.hid_report(TELEPHONY_HID_UID, vec![0]).await?;
-            }
+            Command::Click { x, y } => self.tap(x, y).await?,
+            Command::Swipe { from, to } => self.drag(from, to).await?,
+            Command::Answer => self.telephony_momentary(PHONE_HOOK_SWITCH).await?,
+            Command::Hangup => self.telephony_momentary(PHONE_DROP).await?,
+            Command::Mute => self.telephony_momentary(PHONE_MUTE).await?,
             Command::Key(c) if c.is_ascii_digit() => {
                 let index = PHONE_KEY0 + (c as u8 - b'0');
-                self.hid_report(TELEPHONY_HID_UID, vec![index]).await?;
-                self.hid_report(TELEPHONY_HID_UID, vec![0]).await?;
+                self.telephony_momentary(index).await?
             }
-            Command::Star => {
-                self.hid_report(TELEPHONY_HID_UID, vec![15]).await?;
-                self.hid_report(TELEPHONY_HID_UID, vec![0]).await?;
-            }
-            Command::Pound => {
-                self.hid_report(TELEPHONY_HID_UID, vec![16]).await?;
-                self.hid_report(TELEPHONY_HID_UID, vec![0]).await?;
-            }
-            Command::Del => {
-                self.hid_report(TELEPHONY_HID_UID, vec![17]).await?;
-                self.hid_report(TELEPHONY_HID_UID, vec![0]).await?;
-            }
+            Command::Star => self.telephony_momentary(15).await?,
+            Command::Pound => self.telephony_momentary(16).await?,
+            Command::Del => self.telephony_momentary(17).await?,
             Command::Key(_) => {}
             Command::Night(on) => self.simple("setNightMode", Value::Boolean(on)).await?,
             Command::Siri => {
@@ -167,7 +277,6 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
     }
 
     async fn knob(&mut self, buttons: u8, x: i8, y: i8, wheel: i8) -> std::io::Result<()> {
-        use super::info::KNOB_HID_UID;
         self.hid_report(KNOB_HID_UID, vec![buttons, x as u8, y as u8, wheel as u8])
             .await
     }
@@ -182,6 +291,47 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
     async fn knob_axis(&mut self, x: i8, y: i8) -> std::io::Result<()> {
         self.knob(0x00, x, y, 0).await?;
         self.knob(0x00, 0, 0, 0).await
+    }
+
+    /// A telephony button: pressed report, then an all-zero one, the same
+    /// press-and-release every other momentary switch gets.
+    async fn telephony_momentary(&mut self, index: u8) -> std::io::Result<()> {
+        self.hid_report(TELEPHONY_HID_UID, vec![index]).await?;
+        self.hid_report(TELEPHONY_HID_UID, vec![0]).await
+    }
+
+    /// One touch report with slot 0 alone in use, or empty to lift that finger.
+    /// The remaining slots stay reported because the phone tracks a finger by
+    /// the slot it keeps arriving in, not by anything in the report.
+    async fn touch(&mut self, down: bool, x: u16, y: u16) -> std::io::Result<()> {
+        let mut contacts = [TouchContact::default(); TOUCH_SLOTS];
+        contacts[0] = TouchContact { down, x, y };
+        self.hid_report(TOUCH_HID_UID, touch_report(&contacts)).await
+    }
+
+    /// A tap at one point: press, hold, lift.
+    async fn tap(&mut self, x: u16, y: u16) -> std::io::Result<()> {
+        self.touch(true, x, y).await?;
+        tokio::time::sleep(TAP_HOLD).await;
+        self.touch(false, x, y).await
+    }
+
+    /// A drag from one point to another: press, walk there, lift. CarPlay has no
+    /// swipe message — the phone recognises the gesture from the trail of move
+    /// reports, so the intermediate steps are the gesture.
+    async fn drag(&mut self, from: (u16, u16), to: (u16, u16)) -> std::io::Result<()> {
+        // Linear in between: a swipe only needs to look like a finger moving,
+        // and the phone cares about direction far more than the exact curve.
+        let at = |start: u16, end: u16, n: u32| {
+            (start as f32 + (end as f32 - start as f32) * n as f32 / SWIPE_STEPS as f32) as u16
+        };
+        self.touch(true, from.0, from.1).await?;
+        for n in 1..=SWIPE_STEPS {
+            self.touch(true, at(from.0, to.0, n), at(from.1, to.1, n))
+                .await?;
+            tokio::time::sleep(SWIPE_STEP).await;
+        }
+        self.touch(false, to.0, to.1).await
     }
 
     async fn simple(&mut self, kind: &str, value: Value) -> std::io::Result<()> {

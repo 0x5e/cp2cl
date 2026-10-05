@@ -35,10 +35,9 @@ pub struct VideoReceiver {
     key: SymKey,
     counter: u64,
     sink: Arc<dyn MediaSink>,
-    codec: Option<Codec>,
+    codec: Codec,
     /// Bytes in front of each NAL unit; whatever the avcC record said.
     nal_length_size: usize,
-    saw_keyframe: bool,
 }
 
 impl VideoReceiver {
@@ -51,10 +50,9 @@ impl VideoReceiver {
             key,
             counter: 0,
             sink,
-            codec: Some(Codec::H264),
+            codec: Codec::H264,
             // Only a guess until the config arrives; four is the usual value.
             nal_length_size: 4,
-            saw_keyframe: false,
         }
     }
 
@@ -71,7 +69,7 @@ impl VideoReceiver {
                             config.parameters.len(),
                             config.nal_length_size
                         );
-                        self.codec = Some(config.codec);
+                        self.codec = config.codec;
                         self.nal_length_size = config.nal_length_size;
                         // Parameter sets must go out before any frame references
                         // them, otherwise the first frame is undecodable.
@@ -89,10 +87,6 @@ impl VideoReceiver {
                 }
             }
             0 => {
-                if self.codec.is_none() {
-                    // Nothing to do: we cannot even tell the decoder what it is.
-                    return;
-                }
                 match open(
                     &self.key,
                     &super::crypto::nonce_counter(self.counter),
@@ -103,15 +97,10 @@ impl VideoReceiver {
                         // Only advance on success — see the module note.
                         self.counter += 1;
                         let nal = self.nal_length_size;
-                        let Some(annex_b) = self
-                            .codec
-                            .and_then(|c| length_prefixed_to_annex_b(&plain, c, nal))
+                        let Some(annex_b) = length_prefixed_to_annex_b(&plain, self.codec, nal)
                         else {
                             return;
                         };
-                        if is_idr(&plain, self.nal_length_size) {
-                            self.saw_keyframe = true;
-                        }
                         if !annex_b.is_empty() {
                             self.sink.push(annex_b);
                         }
@@ -123,10 +112,6 @@ impl VideoReceiver {
             }
             other => tracing::warn!(opcode = other, "unknown video opcode"),
         }
-    }
-
-    pub fn is_streaming(&self) -> bool {
-        self.saw_keyframe
     }
 }
 
@@ -256,28 +241,6 @@ fn with_start_code(nal: &[u8]) -> Vec<u8> {
     let mut out = vec![0x00, 0x00, 0x00, 0x01];
     out.extend_from_slice(nal);
     out
-}
-
-/// Whether this frame can be decoded without anything before it.
-fn is_idr(payload: &[u8], nal_len: usize) -> bool {
-    // Same walk as the conversion, just looking at the NAL type.
-    let mut i = 0;
-    while i + nal_len <= payload.len() {
-        let mut len = 0usize;
-        for b in &payload[i..i + nal_len] {
-            len = (len << 8) | *b as usize;
-        }
-        let start = i + nal_len;
-        if start < payload.len() {
-            let hdr = payload[start];
-            let kind = hdr & 0x1f;
-            if kind == 5 {
-                return true;
-            }
-        }
-        i = start + len;
-    }
-    false
 }
 
 /// CarPlay's length-prefixed NAL run → annex-B, which is what a decoder eats.

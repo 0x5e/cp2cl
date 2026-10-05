@@ -32,7 +32,7 @@
 //! caller bridging to CarPlay can simply map all four directions to axis
 //! deflections and let the iPhone sort it out.
 
-use super::proto::{read_varint, varint_field};
+use super::proto::{bytes_field, bytes_fields, varint_field};
 
 pub const CH_INPUT: u8 = 8;
 
@@ -122,87 +122,20 @@ pub enum InputEvent {
 /// several keys at once (the head unit packs them into a single `KeyEvent`).
 pub fn parse_input_report(body: &[u8]) -> Vec<InputEvent> {
     let mut out = Vec::new();
-    if let Some(touch) = submessage(body, 3) {
+    if let Some(touch) = bytes_field(body, 3) {
         out.extend(parse_touch(touch));
     }
-    if let Some(keys) = submessage(body, 4) {
+    if let Some(keys) = bytes_field(body, 4) {
         out.extend(parse_keys(keys));
     }
-    if let Some(relative) = submessage(body, 6) {
+    if let Some(relative) = bytes_field(body, 6) {
         out.extend(parse_relative(relative));
     }
     out
 }
 
-/// The bytes of the first top-level length-delimited field with this number.
-fn submessage(buf: &[u8], want: u32) -> Option<&[u8]> {
-    let mut i = 0usize;
-    while i < buf.len() {
-        let tag = read_varint(buf, &mut i)?;
-        let field = (tag >> 3) as u32;
-        match tag & 7 {
-            0 => {
-                read_varint(buf, &mut i)?;
-            }
-            1 => i += 8,
-            2 => {
-                let len = read_varint(buf, &mut i)? as usize;
-                let end = i.checked_add(len)?;
-                if end > buf.len() {
-                    return None;
-                }
-                if field == want {
-                    return Some(&buf[i..end]);
-                }
-                i = end;
-            }
-            5 => i += 4,
-            _ => return None,
-        }
-    }
-    None
-}
-
-/// Every length-delimited field with this number — the repeated ones.
-fn submessages(buf: &[u8], want: u32) -> Vec<&[u8]> {
-    let mut out = Vec::new();
-    let mut i = 0usize;
-    while i < buf.len() {
-        let Some(tag) = read_varint(buf, &mut i) else {
-            break;
-        };
-        let field = (tag >> 3) as u32;
-        match tag & 7 {
-            0 => {
-                if read_varint(buf, &mut i).is_none() {
-                    break;
-                }
-            }
-            1 => i += 8,
-            2 => {
-                let Some(len) = read_varint(buf, &mut i) else {
-                    break;
-                };
-                let Some(end) = i.checked_add(len as usize) else {
-                    break;
-                };
-                if end > buf.len() {
-                    break;
-                }
-                if field == want {
-                    out.push(&buf[i..end]);
-                }
-                i = end;
-            }
-            5 => i += 4,
-            _ => break,
-        }
-    }
-    out
-}
-
 fn parse_touch(touch: &[u8]) -> Option<InputEvent> {
-    let pointers = submessages(touch, 1)
+    let pointers = bytes_fields(touch, 1)
         .iter()
         .map(|p| Pointer {
             x: varint_field(p, 1).unwrap_or(0) as u32,
@@ -221,7 +154,7 @@ fn parse_touch(touch: &[u8]) -> Option<InputEvent> {
 }
 
 fn parse_keys(keys: &[u8]) -> Vec<InputEvent> {
-    submessages(keys, 1)
+    bytes_fields(keys, 1)
         .iter()
         .map(|k| InputEvent::Key {
             keycode: varint_field(k, 1).unwrap_or(0) as u32,
@@ -232,7 +165,7 @@ fn parse_keys(keys: &[u8]) -> Vec<InputEvent> {
 }
 
 fn parse_relative(relative: &[u8]) -> Vec<InputEvent> {
-    submessages(relative, 1)
+    bytes_fields(relative, 1)
         .iter()
         .map(|r| InputEvent::Rotary {
             keycode: varint_field(r, 1).unwrap_or(0) as u32,
