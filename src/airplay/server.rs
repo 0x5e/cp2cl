@@ -724,6 +724,12 @@ impl Session {
                 return;
             };
             println!("[airplay] event channel from {peer}");
+            // Input is latency-sensitive and always written in pairs. With Nagle
+            // on, a Wi-Fi link holds the second report until the first is acked
+            // and then flushes whatever piled up as one segment, which the phone
+            // reads as a single tick — a d-pad nudge and its recentring cancel
+            // out. The Android Auto socket sets this for the same reason.
+            let _ = socket.set_nodelay(true);
             let (read, write) = socket.into_split();
             sink.attach_writer(write).await;
             pump_events(read, read_key, responder).await;

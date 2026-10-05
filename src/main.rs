@@ -222,6 +222,9 @@ async fn stdin_loop(sink: Arc<EventSink>) {
         match commands::parse(line) {
             Some(commands::Command::Quit) => {
                 println!("bye");
+                // The players are our children, and exiting does not signal
+                // them — left alone they outlive us and keep their windows up.
+                sink::kill_players();
                 std::process::exit(0);
             }
             Some(cmd) => {

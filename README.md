@@ -169,16 +169,16 @@ One command per line, echoed on start:
 
 | | |
 |---|---|
-| media | `play` `pause` `playpause` `next` `prev` `nav` |
-| knob | `home` `back` `select` `left` `right` `up` `down` `wheel <n>` |
-| phone | `answer` `hangup` `mute` `key 0`…`key 9` `star` `pound` `del` |
-| session | `night [on\|off]` `siri` `keyframe` `quit` |
-| touch | `click <x> <y>` `swipe <x1> <y1> <x2> <y2>` |
+| media | `play` `pause` `playpause` `next` `prev` |
+| knob | `home` `back` `select` `left` `right` `up` `down` |
+| session | `siri` |
+| local | `quit` |
 
-Touch goes down the same HID path a head unit's touchscreen uses. A tap is a
-press report followed by a lift, and a swipe is a press, a run of moves, and a
-lift. Coordinates are in the pixel space `GET /info` asks the phone for:
-`CP2AA_WIDTH`×`CP2AA_HEIGHT` unless a head unit has declared its own.
+The list stops there on purpose: it is the set a front end puts on keys.
+Night mode, the phone keypad and the touch surface are all real CarPlay
+features, but no front end — `playport`'s included — binds them, so neither
+does this. Where a head unit has the hardware for them the AA bridge drives
+them directly.
 
 ## Depending on LIVI
 

@@ -18,7 +18,7 @@
 
 use std::io::{Error as IoError, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -57,6 +57,36 @@ pub trait MediaSink: Send + Sync {
     fn push(&self, bytes: Vec<u8>);
 }
 
+/// A player this process started, shared between the task that feeds it and the
+/// registry below, so both can kill it.
+type Player = Arc<Mutex<Child>>;
+
+/// Every player started so far, so `quit` can take them down with us.
+///
+/// `std::process::exit` runs no destructors: the blocking task that owns the
+/// child never reaches its `kill`, and on Unix a child whose parent exits is
+/// reparented rather than signalled. Without this the ffplay windows stay on
+/// screen after `bye`, and the next run stacks a second pair in front of them.
+fn players() -> &'static Mutex<Vec<Player>> {
+    static PLAYERS: std::sync::OnceLock<Mutex<Vec<Player>>> = std::sync::OnceLock::new();
+    PLAYERS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// SIGKILLs every player this process started. Called on the way out of `main`.
+pub fn kill_players() {
+    for player in players().lock().unwrap().iter() {
+        kill(player);
+    }
+}
+
+/// `Child::kill` wants it mutable, and the lock is the same one the registry
+/// takes — held only for the call, never across a write.
+fn kill(player: &Player) {
+    if let Ok(mut player) = player.lock() {
+        let _ = player.kill();
+    }
+}
+
 /// A running ffplay, fed from a channel so a slow player never blocks parsing.
 pub struct PlayerSink {
     label: &'static str,
@@ -87,6 +117,8 @@ impl PlayerSink {
             .map_err(|e| IoError::new(e.kind(), format!("failed to start ffplay: {e}")))?;
 
         let mut stdin = child.stdin.take().expect("stdin was piped");
+        let child: Player = Arc::new(Mutex::new(child));
+        players().lock().unwrap().push(Arc::clone(&child));
         let capacity = if label == "video" {
             VIDEO_QUEUE
         } else {
@@ -98,7 +130,7 @@ impl PlayerSink {
             if let Some(h) = header {
                 if let Err(e) = stdin.write_all(&h).and_then(|_| stdin.flush()) {
                     eprintln!("[{label}] ffplay stdin closed on header: {e}");
-                    let _ = child.kill();
+                    kill(&child);
                     return;
                 }
             }
@@ -108,7 +140,7 @@ impl PlayerSink {
                     break;
                 }
             }
-            let _ = child.kill();
+            kill(&child);
         });
 
         Ok(Self {

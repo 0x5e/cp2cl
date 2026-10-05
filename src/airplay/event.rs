@@ -20,7 +20,6 @@
 //! it.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use plist::{dictionary::Dictionary, Value};
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -29,17 +28,14 @@ use tokio::sync::Mutex;
 
 use super::bplist::to_binary;
 use super::crypto::{open_frames, seal_frames, SymKey};
-use super::info::{KNOB_HID_UID, MEDIA_HID_UID, TELEPHONY_HID_UID, TOUCH_HID_UID};
+use super::info::{KNOB_HID_UID, MAIN_UUID, MEDIA_HID_UID, TELEPHONY_HID_UID, TOUCH_HID_UID};
 use super::rtsp;
-use crate::commands::{self, Command, TouchContact, TOUCH_SLOTS};
+use crate::commands::{self, Command, TouchContact};
 
-/// How long a synthetic tap holds before it lifts. Two reports arriving in the
-/// same instant read as one, and nothing gets tapped.
-const TAP_HOLD: Duration = Duration::from_millis(60);
-/// How many move reports a swipe is broken into, and the gap between them. The
-/// phone reads the gesture from the trail, so too few makes it a jump.
-const SWIPE_STEPS: u32 = 8;
-const SWIPE_STEP: Duration = Duration::from_millis(20);
+/// How far the absolute X/Y axes deflect: a full throw in one direction. The
+/// phone reads an absolute axis as a position, so a full throw scrolls many
+/// rows at once.
+const AXIS_DEFLECT: i8 = 127;
 
 /// Input only becomes possible after pair-verify derives the keys, so the sink
 /// exists the whole time and fills itself in as pieces arrive.
@@ -223,13 +219,18 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
     pub async fn key(&mut self, cmd: Command) -> std::io::Result<()> {
         use commands::*;
 
+        // A command that works otherwise leaves no trace: the phone's `200` is
+        // filtered out by `pump_events` as chatter, so only failures reach the
+        // log. One line here is the difference between "nothing happened" and
+        // "it worked".
+        println!("[event] -> {cmd:?}");
+
         match cmd {
             Command::Play => self.media_momentary(MEDIA_PLAY).await?,
             Command::Pause => self.media_momentary(MEDIA_PAUSE).await?,
             Command::PlayPause => self.media_momentary(MEDIA_PLAY_PAUSE).await?,
             Command::Next => self.media_momentary(MEDIA_NEXT).await?,
             Command::Prev => self.media_momentary(MEDIA_PREV).await?,
-            Command::NavGuidance => self.media_momentary(MEDIA_NAV_GUIDANCE).await?,
             // Every button is momentary: pressed report, then an all-zero one.
             // LIVI's `sendKnob` does this by default, and a button that is never
             // released does not register as a press at all — `home` doing
@@ -239,40 +240,35 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
             Command::Select => self.knob_momentary(0x01).await?,
             // A knob axis nudge is a press and a release, or the phone thinks the
             // finger never lifted.
-            Command::Left => self.knob_axis(-127, 0).await?,
-            Command::Right => self.knob_axis(127, 0).await?,
-            Command::Up => self.knob_axis(0, -127).await?,
-            Command::Down => self.knob_axis(0, 127).await?,
-            Command::Wheel(v) => {
-                self.knob(0x00, 0, 0, v).await?;
-                self.knob(0x00, 0, 0, 0).await?;
-            }
+            Command::Left => self.knob_axis(-AXIS_DEFLECT, 0).await?,
+            Command::Right => self.knob_axis(AXIS_DEFLECT, 0).await?,
+            // Up and down stay on the absolute Y axis. The wheel is *not* a
+            // vertical axis: it follows the UI's own scroll direction, which is
+            // horizontal on the app grid — routed through it, up/down came out
+            // as left/right there.
+            Command::Up => self.knob_axis(0, -AXIS_DEFLECT).await?,
+            Command::Down => self.knob_axis(0, AXIS_DEFLECT).await?,
+            Command::Wheel(v) => self.wheel(v).await?,
             Command::Touch(contacts) => {
                 self.hid_report(TOUCH_HID_UID, touch_report(&contacts))
                     .await?
             }
-            Command::Click { x, y } => self.tap(x, y).await?,
-            Command::Swipe { from, to } => self.drag(from, to).await?,
+            // The four below come from the AA bridge, off the head unit's own
+            // call and media keys — none of them has a stdin command.
             Command::Answer => self.telephony_momentary(PHONE_HOOK_SWITCH).await?,
             Command::Hangup => self.telephony_momentary(PHONE_DROP).await?,
             Command::Mute => self.telephony_momentary(PHONE_MUTE).await?,
-            Command::Key(c) if c.is_ascii_digit() => {
-                let index = PHONE_KEY0 + (c as u8 - b'0');
-                self.telephony_momentary(index).await?
+            Command::KeyFrame => {
+                self.command("forceKeyFrame", "uuid", Value::String(MAIN_UUID.into()))
+                    .await?
             }
-            Command::Star => self.telephony_momentary(15).await?,
-            Command::Pound => self.telephony_momentary(16).await?,
-            Command::Del => self.telephony_momentary(17).await?,
-            Command::Key(_) => {}
-            Command::Night(on) => self.simple("setNightMode", Value::Boolean(on)).await?,
             Command::Siri => {
                 // press then release; 2 = down, 3 = up
-                self.simple_with("requestSiri", "siriAction", Value::Integer(2.into()))
+                self.command("requestSiri", "siriAction", Value::Integer(2.into()))
                     .await?;
-                self.simple_with("requestSiri", "siriAction", Value::Integer(3.into()))
+                self.command("requestSiri", "siriAction", Value::Integer(3.into()))
                     .await?;
             }
-            Command::KeyFrame => self.simple("forceKeyFrame", Value::Boolean(true)).await?,
             Command::Quit => {}
         }
         Ok(())
@@ -306,6 +302,15 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
         self.knob(0x00, 0, 0, 0).await
     }
 
+    /// One wheel tick, press and release. A relative axis: the phone reads the
+    /// sign and ignores the magnitude, and it follows the UI's own scroll
+    /// direction — horizontal on the app grid. Only the AA bridge produces
+    /// these; there is no stdin command.
+    async fn wheel(&mut self, ticks: i8) -> std::io::Result<()> {
+        self.knob(0x00, 0, 0, ticks).await?;
+        self.knob(0x00, 0, 0, 0).await
+    }
+
     /// A telephony button: pressed report, then an all-zero one, the same
     /// press-and-release every other momentary switch gets.
     async fn telephony_momentary(&mut self, index: u8) -> std::io::Result<()> {
@@ -313,60 +318,18 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
         self.hid_report(TELEPHONY_HID_UID, vec![0]).await
     }
 
-    /// One touch report with slot 0 alone in use, or empty to lift that finger.
-    /// The remaining slots stay reported because the phone tracks a finger by
-    /// the slot it keeps arriving in, not by anything in the report.
-    async fn touch(&mut self, down: bool, x: u16, y: u16) -> std::io::Result<()> {
-        let mut contacts = [TouchContact::default(); TOUCH_SLOTS];
-        contacts[0] = TouchContact { down, x, y };
-        self.hid_report(TOUCH_HID_UID, touch_report(&contacts)).await
-    }
-
-    /// A tap at one point: press, hold, lift.
-    async fn tap(&mut self, x: u16, y: u16) -> std::io::Result<()> {
-        self.touch(true, x, y).await?;
-        tokio::time::sleep(TAP_HOLD).await;
-        self.touch(false, x, y).await
-    }
-
-    /// A drag from one point to another: press, walk there, lift. CarPlay has no
-    /// swipe message — the phone recognises the gesture from the trail of move
-    /// reports, so the intermediate steps are the gesture.
-    async fn drag(&mut self, from: (u16, u16), to: (u16, u16)) -> std::io::Result<()> {
-        // Linear in between: a swipe only needs to look like a finger moving,
-        // and the phone cares about direction far more than the exact curve.
-        let at = |start: u16, end: u16, n: u32| {
-            (start as f32 + (end as f32 - start as f32) * n as f32 / SWIPE_STEPS as f32) as u16
-        };
-        self.touch(true, from.0, from.1).await?;
-        for n in 1..=SWIPE_STEPS {
-            self.touch(true, at(from.0, to.0, n), at(from.1, to.1, n))
-                .await?;
-            tokio::time::sleep(SWIPE_STEP).await;
-        }
-        self.touch(false, to.0, to.1).await
-    }
-
-    async fn simple(&mut self, kind: &str, value: Value) -> std::io::Result<()> {
+    /// A session command.
+    ///
+    /// Unlike `hidSendReport`, whose fields sit at the top level, the phone
+    /// wants a command's arguments one level down in a `params` dictionary.
+    /// Sent flat it answers `400 Bad Request` and the press does nothing.
+    async fn command(&mut self, kind: &str, field: &str, value: Value) -> std::io::Result<()> {
+        let mut params = Dictionary::new();
+        params.insert(field.into(), value);
         let mut d = Dictionary::new();
         d.insert("type".into(), Value::String(kind.into()));
-        d.insert(Self::value_field(kind), value);
+        d.insert("params".into(), Value::Dictionary(params));
         self.send(d).await
-    }
-
-    async fn simple_with(&mut self, kind: &str, field: &str, value: Value) -> std::io::Result<()> {
-        let mut d = Dictionary::new();
-        d.insert("type".into(), Value::String(kind.into()));
-        d.insert(field.into(), value);
-        self.send(d).await
-    }
-
-    fn value_field(kind: &str) -> String {
-        match kind {
-            "setNightMode" => "nightMode".into(),
-            "forceKeyFrame" => "forced".into(),
-            other => other.to_ascii_lowercase(),
-        }
     }
 }
 
