@@ -15,9 +15,9 @@
 //! control channel they are *not* read/write swapped (see `VerifyKeys`).
 //!
 //! The channel runs both ways. `EventSink` is the half the rest of the program
-//! talks to — stdin and the Android Auto bridge both hand it commands — and
-//! `pump_events` is the half that reads what the phone posts back and answers
-//! it.
+//! talks to — the browser client and the Android Auto bridge both hand it
+//! commands — and `pump_events` is the half that reads what the phone posts back
+//! and answers it.
 
 use std::sync::Arc;
 
@@ -253,11 +253,12 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
                 self.hid_report(TOUCH_HID_UID, touch_report(&contacts))
                     .await?
             }
-            // The four below come from the AA bridge, off the head unit's own
-            // call and media keys — none of them has a stdin command.
+            // The three below come from the AA bridge, off the head unit's own
+            // call and media keys; the browser sends raw indices instead.
             Command::Answer => self.telephony_momentary(PHONE_HOOK_SWITCH).await?,
             Command::Hangup => self.telephony_momentary(PHONE_DROP).await?,
             Command::Mute => self.telephony_momentary(PHONE_MUTE).await?,
+            Command::Telephony(index) => self.telephony_momentary(index).await?,
             Command::KeyFrame => {
                 self.command("forceKeyFrame", "uuid", Value::String(MAIN_UUID.into()))
                     .await?
@@ -269,7 +270,13 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
                 self.command("requestSiri", "siriAction", Value::Integer(3.into()))
                     .await?;
             }
-            Command::Quit => {}
+            // `nightMode` is a boolean, not a number: the phone's own
+            // `AirPlayReceiverSessionSetNightMode` builds the value as a
+            // CFBoolean, and an integer there is a different property list.
+            Command::Night(on) => {
+                self.command("setNightMode", "nightMode", Value::Boolean(on))
+                    .await?
+            }
         }
         Ok(())
     }

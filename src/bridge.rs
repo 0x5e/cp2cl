@@ -200,7 +200,21 @@ impl Bridge {
         // Fed back into `GET /info`, which is the whole point: the phone renders
         // at a size the head unit asked for rather than one we guessed.
         if let Ok(mut guard) = self.screen.lock() {
-            *guard = Some(ScreenParams { width, height, fps });
+            *guard = Some(ScreenParams {
+                width,
+                height,
+                fps,
+                // A head unit has no UI-size concept; the browser panel is the
+                // only thing that asks for one.
+                ui_scale: 100,
+                // What the head unit says it can decode. Sending it HEVC it did
+                // not list is how the picture disappears entirely.
+                hevc: d
+                    .video
+                    .as_ref()
+                    .map(|offer| offer.codec as u64 == MEDIA_CODEC_VIDEO_H265)
+                    .unwrap_or(self.cfg.hevc),
+            });
         }
         println!("[aa] {label}: asking the phone for {width}x{height}@{fps}");
     }

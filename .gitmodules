@@ -1,0 +1,8 @@
+[submodule "vendor/playport"]
+	path = vendor/playport
+	url = https://github.com/youcci/playport.git
+	branch = main
+[submodule "vendor/LIVI"]
+	path = vendor/LIVI
+	url = https://github.com/0x5e/LIVI.git
+	branch = feature/local-credential

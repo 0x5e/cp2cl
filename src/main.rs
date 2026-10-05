@@ -1,12 +1,15 @@
-//! `cp2aa` — a headless CarPlay receiver that plays what the phone sends.
+//! `cp2aa` — a headless CarPlay receiver that hands what the phone sends to
+//! whoever is watching.
 //!
-//! Nothing here draws anything itself. Three pieces run concurrently:
+//! Nothing here draws anything itself. Four pieces run concurrently:
 //!
 //! * a session watcher that carries iAP2 over USB — or over Bluetooth, when
 //!   `CP2AA_WIRELESS` is set — and starts CarPlay,
 //! * an airplay receiver that accepts the phone's return call and decrypts its
-//!   media into two ffplay processes,
-//! * a stdin reader turning keyboard lines into HID reports.
+//!   media,
+//! * the browser client's server, which fans those streams out over one
+//!   WebSocket and takes input back — unless `CP2AA_SINK=aa`, in which case the
+//!   bridge below is the consumer instead.
 
 mod airplay;
 mod bridge;
@@ -14,6 +17,7 @@ mod commands;
 mod config;
 mod session;
 mod sink;
+mod web;
 mod wireless;
 
 // On disk this is `src/aa-client/`, which is not a legal module name, so the
@@ -29,27 +33,33 @@ use anyhow::{Context, Result};
 use iap2_mfi::local::LocalCoprocessor;
 use iap2_mfi::{AuthCoprocessor, NoCoprocessor};
 use livi_runtime::mfi_async::SharedCoprocessor;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
 use crate::aa_client::tls::PhoneIdentity;
 use crate::airplay::clock::SyncedClock;
 use crate::airplay::pairing::Pairings;
-use crate::airplay::{AudioClock, EventSink};
+use crate::airplay::{AudioClock, EventSink, MicSink, SharedScreen};
 use crate::bridge::Bridge;
 use crate::config::{Config, Sink};
-use crate::sink::{AaOutlet, AudioCodec, MediaSink, Pipelines, PlayerSink};
+use crate::sink::{AaOutlet, AudioCodec, MediaSink};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // rustls will not guess between two crypto providers, and more than one can
+    // be in the tree. There is only one here — `ring`, which the Android Auto
+    // half needs for its TLS 1.2 server — so name it before anything builds a
+    // TLS config. `axum-server` is built without a provider of its own for
+    // exactly this reason.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cfg = Arc::new(Config::from_env());
     tracing_subscriber::fmt()
         .with_env_filter(&cfg.log_filter)
         .with_target(false)
         .init();
 
-    println!("cp2aa — headless CarPlay to ffplay");
+    println!("cp2aa — headless CarPlay receiver");
 
     // Ask for a free port rather than picking one: whatever we get is what gets
     // advertised to the phone, so there is no way for the two to disagree.
@@ -61,59 +71,60 @@ async fn main() -> Result<()> {
 
     let codec = AudioCodec::default();
 
-    // Two ways out of here: played on this machine, or sent to a head unit
+    // What the phone is asked to render. Written by the browser's display panel
+    // — or, later, by a head unit saying what it can show — and read by
+    // `GET /info`, which is why one slot serves both.
+    let screen: SharedScreen = Arc::new(std::sync::Mutex::new(None));
+
+    // Input goes out through here whatever produced it. Built now and filled in
+    // later: the keys only exist once pair-verify has run.
+    let event_sink = EventSink::new();
+
+    // Fired when what the phone should render changes, which is the only way a
+    // display change lands — see `airplay::server::Shared::restart`.
+    let (restart, _) = tokio::sync::broadcast::channel(1);
+
+    // Two ways out of here: the browser client on this machine, or a head unit
     // that thinks we are an Android phone. The bytes are identical either way,
     // so nothing downstream knows which one it got.
     let outlet: Option<Arc<AaOutlet>> = (cfg.sink == Sink::Aa).then(|| Arc::new(AaOutlet::new()));
+    let mic = MicSink::new();
+    let hub: Option<Arc<web::Hub>> = (cfg.sink == Sink::Web).then(|| {
+        web::Hub::new(
+            &cfg,
+            screen.clone(),
+            event_sink.clone(),
+            mic.clone(),
+            restart.clone(),
+        )
+    });
+
     let (video_sink, audio_sink): (Arc<dyn MediaSink>, Arc<dyn MediaSink>) = match &outlet {
-        None => {
-            let pipelines = Pipelines::build(codec, cfg.fps, cfg.window, cfg.hevc);
-            println!("[cp2aa] playing with {}", cfg.player.program.display());
-            println!(
-                "[cp2aa] {}x{} as {} ({}) in a {}x{} window",
-                cfg.width,
-                cfg.height,
-                if cfg.hevc { "HEVC" } else { "H.264" },
-                if cfg.width_mm > 0 {
-                    format!("{}mm wide", cfg.width_mm)
-                } else {
-                    "default 200mm wide".into()
-                },
-                cfg.window.0,
-                cfg.window.1
-            );
-            // Independent on purpose: the phone may open the screen stream long
-            // before (or without) the audio one, and neither may hold the other
-            // back.
-            (
-                Arc::new(
-                    PlayerSink::spawn(&cfg.player.program, &pipelines.video, None, "video")
-                        .with_context(|| format!("start video player ({:?})", pipelines.video))?,
-                ),
-                Arc::new(
-                    PlayerSink::spawn(
-                        &cfg.player.program,
-                        &pipelines.audio,
-                        pipelines.audio_header.clone(),
-                        "audio",
-                    )
-                    .with_context(|| format!("start audio player ({:?})", pipelines.audio))?,
-                ),
-            )
-        }
         Some(outlet) => {
             println!(
-                "[cp2aa] CP2AA_SINK=aa: streams go to Android Auto instead of being played here"
+                "[cp2aa] CP2AA_SINK=aa: streams go to Android Auto instead of the browser"
             );
             (outlet.video(), outlet.audio())
         }
+        // One object, not two: a video event and an audio event differ only in
+        // what the hub converts them to.
+        None => {
+            let hub = hub.clone().expect("no sink was built");
+            (hub.clone(), hub)
+        }
     };
 
+    if let Some(hub) = &hub {
+        let hub = hub.clone();
+        let port = cfg.web_port;
+        tokio::spawn(async move {
+            if let Err(e) = web::serve(hub, port).await {
+                eprintln!("[web] {e}");
+            }
+        });
+    }
+
     let pairings = Arc::new(Mutex::new(Pairings::load_or_create(None)?));
-    let event_sink = EventSink::new();
-    // What the head unit asks for, once it asks. Read by `GET /info`, written by
-    // the bridge.
-    let screen = Arc::new(std::sync::Mutex::new(None));
 
     // Started before the iPhone is expected, because it is what tells the iPhone
     // what to render: a head unit has to be heard from first for its resolution
@@ -150,14 +161,14 @@ async fn main() -> Result<()> {
             audio_sink,
             audio_codec: Arc::new(Mutex::new(codec)),
             screen: screen.clone(),
+            restart: restart.clone(),
             event_sink: event_sink.clone(),
+            mic,
             mfi: auth.clone(),
             audio_clock: Arc::new(Mutex::new(AudioClock::default())),
             timing: Arc::new(Mutex::new(SyncedClock::new())),
         },
     ));
-
-    tokio::spawn(stdin_loop(event_sink.clone()));
 
     if cfg.wireless {
         println!(
@@ -165,9 +176,9 @@ async fn main() -> Result<()> {
              {} port {airplay_port}",
             cfg.ssid, cfg.wifi_iface
         );
-        wireless::watch(cfg, auth, airplay_port).await;
+        wireless::watch(cfg, auth, airplay_port, restart).await;
     } else {
-        session::watch(cfg, auth, airplay_port).await;
+        session::watch(cfg, auth, airplay_port, restart).await;
     }
     Ok(())
 }
@@ -199,40 +210,6 @@ fn mfi_signer(cfg: &Config) -> Result<Box<dyn AuthCoprocessor + Send>> {
                  or set CP2AA_AUTH_DIR."
             );
             Ok(Box::new(NoCoprocessor))
-        }
-    }
-}
-
-/// Turns typed lines into HID reports. Available even before the phone connects,
-/// with the presses going nowhere until then.
-async fn stdin_loop(sink: Arc<EventSink>) {
-    println!("{}", commands::HELP);
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    loop {
-        let Ok(line) = lines.next_line().await else {
-            break;
-        };
-        let Some(line) = line else {
-            break;
-        };
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        match commands::parse(line) {
-            Some(commands::Command::Quit) => {
-                println!("bye");
-                // The players are our children, and exiting does not signal
-                // them — left alone they outlive us and keep their windows up.
-                sink::kill_players();
-                std::process::exit(0);
-            }
-            Some(cmd) => {
-                if let Err(e) = sink.dispatch(cmd).await {
-                    eprintln!("[input] {e}");
-                }
-            }
-            None => println!("unknown command: {line}\n{}", commands::HELP),
         }
     }
 }

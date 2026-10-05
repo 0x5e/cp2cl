@@ -1,7 +1,7 @@
 //! Everything the operator can tune, read once from the environment.
 //!
-//! Nothing here is required: the defaults build a working wired session and play
-//! it with ffplay. See README for the full table.
+//! Nothing here is required: the defaults build a working wired session and serve
+//! it to the browser client. See README for the full table.
 
 use std::path::{Path, PathBuf};
 
@@ -20,40 +20,24 @@ fn env_num<T: std::str::FromStr>(key: &str, default: T) -> T {
     env(key).and_then(|s| s.parse().ok()).unwrap_or(default)
 }
 
-/// `1280x720` → `(1280, 720)`. Anything unparseable falls back to `fallback`.
-fn env_size(key: &str, fallback: (u32, u32)) -> (u32, u32) {
-    env(key)
-        .and_then(|s| {
-            let (w, h) = s.split_once(['x', 'X', '*'])?;
-            Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
-        })
-        .unwrap_or(fallback)
-}
-
-/// Where the media is played. Two ffplay processes, one per stream.
-#[derive(Debug, Clone)]
-pub struct Player {
-    /// `ffplay`
-    pub program: PathBuf,
-}
-
 /// Where a decoded stream goes, once CarPlay has handed it over.
 ///
-/// Both ends of this are the same bytes — annex-B video, PCM or AAC audio — so
-/// the choice is only about who consumes them: this machine, or a head unit
-/// that thinks we are an Android phone.
+/// Both ends of this are the same media, so the choice is only about who
+/// consumes it: the browser client on this machine, or a head unit that thinks
+/// we are an Android phone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sink {
-    /// Play locally with ffplay, one process per stream. The default.
-    Ffplay,
+    /// Serve PlayPort's browser client over HTTPS and push the streams to it.
+    /// The default.
+    Web,
     /// Send to a connected Android Auto head unit over `aa_client`.
     Aa,
 }
 
 impl Sink {
     fn parse(text: &str) -> Option<Self> {
-        if text.eq_ignore_ascii_case("ffplay") {
-            Some(Self::Ffplay)
+        if text.eq_ignore_ascii_case("web") {
+            Some(Self::Web)
         } else if text.eq_ignore_ascii_case("aa") {
             Some(Self::Aa)
         } else {
@@ -66,7 +50,6 @@ impl Sink {
 pub struct Config {
     /// Directory holding identity.pk8 + certificate.p7b (the MFi credentials).
     pub auth_dir: Option<PathBuf>,
-    pub player: Player,
     /// What the phone is asked to render. 1280x720 is the safe CarPlay default.
     pub width: u32,
     pub height: u32,
@@ -78,10 +61,6 @@ pub struct Config {
     /// ~162 and the phone quietly renders at 1×.
     pub width_mm: u32,
     pub height_mm: u32,
-    /// Video window size. SDL measures this in **points** on a HiDPI display, so
-    /// it defaults to half the logical size: one stream pixel per physical
-    /// pixel. `CP2AA_WINDOW` overrides it.
-    pub window: (u32, u32),
     /// Advertise HEVC. Video then arrives as hvcC / H.265 NALs.
     pub hevc: bool,
     /// Advertised as deviceID / bluetoothIDs. The phone only wants something
@@ -94,8 +73,11 @@ pub struct Config {
     /// Auto-detected when unset.
     pub av_iface: Option<String>,
     pub log_filter: String,
-    /// What consumes the streams: ffplay here, or an Android Auto head unit.
+    /// What consumes the streams: the browser client, or an Android Auto head unit.
     pub sink: Sink,
+    /// Where the browser client is served. HTTPS only; the port is the whole
+    /// address, since it listens on every interface.
+    pub web_port: u16,
     /// Android Auto over TCP. The wireless protocol is TCP on this port, so a
     /// head unit that connects over the network works without a gadget — which
     /// is also the only way to try any of this from a Mac.
@@ -142,14 +124,8 @@ impl Config {
         let width_mm = env_num("CP2AA_WIDTH_MM", 0);
         Self {
             auth_dir: Self::resolve_auth_dir(),
-            player: Player {
-                program: PathBuf::from(env_or("CP2AA_PLAYER", "ffplay")),
-            },
             width,
             height,
-            // Half, because the window is measured in points and the stream in
-            // pixels: that is what puts one stream pixel on each physical pixel.
-            window: env_size("CP2AA_WINDOW", (width / 2, height / 2)),
             fps: env_num("CP2AA_FPS", 60),
             width_mm,
             // Left to `info.rs` to derive from the aspect ratio when zero.
@@ -169,14 +145,13 @@ impl Config {
                 Some(text) => match Sink::parse(&text) {
                     Some(sink) => sink,
                     None => {
-                        eprintln!(
-                            "[cp2aa] CP2AA_SINK={text} is neither `ffplay` nor `aa`; playing here"
-                        );
-                        Sink::Ffplay
+                        eprintln!("[cp2aa] CP2AA_SINK={text} is neither `web` nor `aa`; using web");
+                        Sink::Web
                     }
                 },
-                None => Sink::Ffplay,
+                None => Sink::Web,
             },
+            web_port: env_num("CP2AA_WEB_PORT", 8080),
             // 5288 is the port Android Auto uses for wireless.
             aa_tcp_port: env_num("CP2AA_AA_TCP_PORT", 5288),
             #[cfg(target_os = "linux")]

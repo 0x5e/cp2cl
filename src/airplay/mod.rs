@@ -29,10 +29,12 @@ pub mod clock;
 pub mod crypto;
 pub mod event;
 pub mod info;
+pub mod mic;
 pub mod pairing;
 pub mod rtsp;
 pub mod screen;
 mod server;
 
 pub use self::event::EventSink;
+pub use self::mic::{MicConfig, MicSink};
 pub use self::server::{serve, AudioClock, ScreenParams, Shared, SharedScreen};

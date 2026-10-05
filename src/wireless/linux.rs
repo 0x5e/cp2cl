@@ -12,11 +12,17 @@ use iap2_link::LinkConfig;
 use livi_runtime::bt::IncomingConn;
 use livi_runtime::driver::spawn_link;
 use livi_runtime::mfi_async::SharedCoprocessor;
+use tokio::sync::broadcast;
 
 use super::{parse_mac, ready, run_session, short};
 use crate::config::Config;
 
-pub async fn watch(cfg: Arc<Config>, auth: SharedCoprocessor, airplay_port: u32) {
+pub async fn watch(
+    cfg: Arc<Config>,
+    auth: SharedCoprocessor,
+    airplay_port: u32,
+    restart: broadcast::Sender<()>,
+) {
     if let Err(e) = ready(&cfg) {
         eprintln!("[cp-wifi] {e}");
         return;
@@ -69,6 +75,7 @@ pub async fn watch(cfg: Arc<Config>, auth: SharedCoprocessor, airplay_port: u32)
             airplay_port,
             local_mac(&cfg),
             &peer,
+            &restart,
         )
         .await;
         println!("[cp-wifi] {peer} done, waiting for the next one");

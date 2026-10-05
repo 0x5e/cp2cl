@@ -1,18 +1,19 @@
 # cp2aa
 
 A headless CarPlay receiver: it presents itself to an iPhone as a wired CarPlay
-head unit, and plays whatever the phone sends with two `ffplay` processes.
+head unit, and hands whatever the phone sends to PlayPort's browser client,
+which decodes it with WebCodecs.
 
-No window of our own, no UI, no Electron. The phone plugs into USB, its picture
-and sound come out the other end directly, and you drive it from stdin.
+No window of our own, no UI, no Electron. The phone plugs into USB, you open one
+page, and you drive CarPlay from it — pointer, keyboard and all.
 
 The other half of the job — handing that picture on to an Android Auto head
 unit, which means being an Android phone — is under construction in
 `src/aa-client/`, see the end of this file.
 
 ```
-iPhone ──USB──▶ this process ──▶ ffplay (video)
-                             └─▶ ffplay (audio)
+iPhone ──USB──▶ this process ──HTTPS/WSS──▶ browser client
+                                        └─▶ (or an Android Auto head unit)
 ```
 
 ## What actually happens
@@ -29,15 +30,34 @@ Two unrelated conversations with the phone, in this order:
 Only step 1 uses LIVI. Step 2 is implemented here, because LIVI only has it in
 TypeScript.
 
+Nothing between them decodes anything: the sealed frames are opened and handed
+on as they are. The browser is the decoder, and so is the head unit.
+
 ## Build and run
 
 ```bash
+git submodule update --init --recursive
+
+# The browser client is PlayPort's, and is not committed — build it once.
+cd vendor/playport/web && npm install && npm run build && cd -
+
 cargo build --release
 
 export CP2AA_AUTH_DIR=./authentication         # identity.pk8 + certificate.p7b
-export CP2AA_PLAYER=ffplay                     # optional; any ffmpeg-family player
 ./target/release/cp2aa
 ```
+
+It prints the page to open — a token is minted per run, so the URL to use
+changes every time:
+
+```
+[cp2aa] airplay receiver listening on 52843
+[web] browser client: https://192.168.40.2:8080/?token=9f2c…
+[web] accept the certificate warning once; WebCodecs needs HTTPS
+```
+
+Run it from the repository root: the browser client is served out of
+`vendor/playport/web/dist`, relative to the working directory.
 
 Then plug the phone in and unlock it. You should see:
 
@@ -52,75 +72,98 @@ Then plug the phone in and unlock it. You should see:
 [airplay] video stream attached
 ```
 
-### Viewing it
+### Why HTTPS, and what to do about the certificate
 
-Two windows' worth of output appear on their own: ffplay opens one for the
-screen, and plays the audio without a window (`-nodisp`).
+WebCodecs — the browser's hardware decoder — only exists in a **secure context**.
+A LAN address over plain HTTP is not one, so the page would load and then refuse
+to decode anything. So the server is TLS, with a certificate it generates for
+this machine at startup.
 
-The video window is opened at `CP2AA_WIDTH` × `CP2AA_HEIGHT` regardless of the
-pixel count the phone renders, so it is the size you asked for rather than
-whatever SDL picks from the backing store.
+That certificate is self-signed by us, so the browser does not know it. Click
+through the warning once and the page works. The certificate is regenerated on
+every start, so nothing has to be stored or renewed.
 
-### Where the sharpness comes from — and where it stops
+The address printed is this machine's LAN address as the route to the phone sees
+it, which is the one to use from another device. `https://localhost:8080` works
+too, on the machine itself.
 
-The one thing that measurably improved it was the **codec**: MacPlay logs
-`SETUP screen ... codec=h265` while we were being handed H.264, and at the
-bitrate the phone allocates H.265 holds far more detail. So `CP2AA_HEVC` is on by
-default, and the player gets the matching demuxer (`-f hevc`) — an annex-B stream
-carries no header saying which codec it is.
+### The token
 
-Beyond that the picture is softer than MacPlay, and that is a **player limit, not
-a data problem**. `/info` was compared field by field against MacPlay and is
-identical (features `0x615653aee2`, display features `0x0a`, empty `hevcInfo`,
-same resolution, same physical size); the difference is that MacPlay renders
-through GStreamer + OpenGL with `contentsScale=2.0`, while ffplay renders through
-SDL, which scales bilinearly.
+Every start mints 16 random bytes and prints them in the URL. The page hands it
+back on the WebSocket and when changing the display, and anything without it is
+refused. The front end will not connect without one, so there is no
+token-less mode to fall back to — but this is a debug surface on a LAN, not
+something to expose, and the token is not a substitute for that.
 
-Things that were tried and do **not** help, so nobody repeats them:
+### What the browser is doing
 
-* `-sws_flags lanczos` and `SDL_RENDER_SCALE_QUALITY=best` — the final scale is
-  SDL's, and it ignores both.
-* Asking the phone for more pixels — it keeps the bitrate, so twice the pixels
-  means half the bits each and the picture gets *softer*.
-* Inflating the reported dpi — MacPlay's own works out near 200 mm, the value we
-  already default to; raising it only shrinks the UI.
+Three things, all in PlayPort's own front end — which is used unmodified, so the
+backend is written to it rather than the other way round:
 
-The way past it is a different player (`CP2AA_PLAYER`), not different numbers.
+* **One WebSocket, two protocols.** JSON control messages down (`hello`,
+  `session`, `mic`) and up (`touch`, `knob`, `media`, `siri`, `night`,
+  `telephony`, `keyframe`, `ping`); binary frames down for the media itself,
+  little-endian with one type byte up front, and binary frames up for captured
+  microphone audio.
+* **`GET /api/status` and `GET /api/display`.** Who we are, whether a session is
+  up, and what the display panel should show.
+* **`POST /api/display`.** A new size, frame rate, UI scale and codec — see the
+  display panel below.
 
-The window is separate again, because SDL measures it in **points** on a HiDPI
-display: it defaults to half the logical size, which is what puts one stream
-pixel on each physical pixel.
+### The display panel
 
-```bash
-export CP2AA_HEVC=0           # fall back to H.264
-export CP2AA_WINDOW=1280x720  # if your display is not HiDPI
-```
+Changing anything there restarts CarPlay. That is not a shortcut: the phone reads
+`/info` exactly once, at the start of a session, and never asks again, so a new
+size only reaches it on the next one.
 
-One process per stream, on purpose: audio and video open at different times and
-the phone may open only one of them, so neither may be allowed to hold the other
-up.
+Two things have to happen, and closing the connection is only the first:
 
-Feeding a player directly rather than an RTSP server also means there is no
-muxer, no server and no network hop in the way when something does not show
-up — the remaining suspects are only our decoding and the player itself.
+1. the AirPlay session is dropped, so the phone cannot keep rendering the old
+   size, and
+2. the phone is told to come back. It will not do that on its own — iAP2 is
+   still up, so as far as it is concerned nothing has ended — so
+   `CarPlayStartSession` is sent again over that same iAP2 session (LIVI's
+   `start_again`). The log line for it is `[cp] the phone hears the start once
+   more` (prefixed `[cp-wifi]` on a wireless session), followed by the usual
+   `CarPlayStartSession sent`.
+
+The start waits half a second after the session drops, because a phone still
+closing the old one cannot act on a start that arrives early. Both transports do
+this, and over Bluetooth it is the same conversation: the iAP2 session that
+carried the first start is still open when the AirPlay one ends, so the second
+start goes out on it and the phone merely re-reads `/info`. Wireless needs no
+Wi-Fi parameters for the re-send — `send_start` falls back to the configured
+network, which is the one the phone is already on. The shared helper is
+`src/session.rs::forward_restarts`.
+
+Asking for **more pixels and expecting a sharper picture does not work**: the
+phone keeps the bitrate, so twice the pixels means half the bits each and the
+picture gets *softer*. What measurably helps is the codec — H.265 at the same
+bitrate holds visibly more detail than H.264, which is why it is the default.
+
+`uiScale` is PlayPort's UI-size control, and it works by asking the phone for a
+larger canvas (`100/percent` of the size) and letting the browser fit it back to
+the same surface — so a bigger canvas draws proportionally *smaller* CarPlay
+controls. Touch is mapped through the canvas, not the panel size, for the same
+reason.
+
+The codec choice is real, and matters: it is what the browser has to be able to
+decode. `CP2AA_HEVC` sets the default, and the panel overrides it per session.
 
 ## Environment
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CP2AA_PLAYER` | `ffplay` | player binary fed over stdin (`-f h264` / `-f s16be`) |
 | `CP2AA_AUTH_DIR` | `./authentication` | MFi credentials |
-| `CP2AA_WIDTH` / `CP2AA_HEIGHT` | `1280` / `720` | what the phone renders |
+| `CP2AA_SINK` | `web` | where the streams go: `web` serves the browser client, `aa` sends them to a connected Android Auto head unit |
+| `CP2AA_WEB_PORT` | `8080` | where the browser client is served, on every interface |
+| `CP2AA_WIDTH` / `CP2AA_HEIGHT` | `1280` / `720` | what the phone renders, until the display panel says otherwise |
 | `CP2AA_FPS` | `60` | frame rate上限 |
 | `CP2AA_HEVC` | on | ask for H.265. At the bitrate the phone sends it is visibly sharper than H.264; set `0` to fall back |
-| `CP2AA_WINDOW` | half the logical size | video window, `1280x720` form. SDL measures it in **points** on HiDPI, hence the default |
 | `CP2AA_WIDTH_MM` / `CP2AA_HEIGHT_MM` | derived | physical size; drives UI scale |
-| `CP2AA_HEVC` | unset | advertise HEVC |
-| `CP2AA_FFMPEG` | `ffmpeg` | which ffmpeg |
 | `CP2AA_AV_IFACE` | auto | USB network interface carrying media |
 | `CP2AA_DEVICE_ID` / `CP2AA_BT_MAC` | `00:11:22:33:44:55` | identifiers in `/info` |
 | `CP2AA_LOG` | `info` | tracing filter |
-| `CP2AA_SINK` | `ffplay` | where the streams go: `ffplay` plays them here, `aa` sends them to a connected Android Auto head unit |
 | `CP2AA_WIRELESS` | off | take CarPlay over Bluetooth and Wi-Fi instead of USB |
 | `CP2AA_WIFI_SSID` / `CP2AA_WIFI_PASS` | — | the network the phone is told to join. Both are required once wireless is on |
 | `CP2AA_WIFI_IFACE` | `en0` on macOS, `wlan0` elsewhere | the interface facing that network; its IPv6 link-local address is what the phone connects back to |
@@ -136,8 +179,7 @@ paired in the operating system first — this program pairs nothing — and then
 finds the iAP2 service we publish. Bluetooth carries only that beginning: the
 moment we answer `CarPlayStartSession` with a Wi-Fi network and our link-local
 address, the phone hangs up and comes back over Wi-Fi, where the same airplay
-receiver takes over. Nothing about the media changes, and the same two ffplay
-processes play it.
+receiver takes over. Nothing about the media changes.
 
 What it needs:
 
@@ -163,44 +205,75 @@ stale, which the bridge recovers from by asking again.
 `CP2AA_TARGET_BT` narrows it to one phone when several are paired, and
 `CP2AA_LOG=debug` brings up the bridge's own lines.
 
-## Keyboard
+## Input
 
-One command per line, echoed on start:
+There is no keyboard grammar of our own any more: the browser client is the
+control surface, and its bindings are the ones that count.
 
-| | |
+| | In the browser |
 |---|---|
-| media | `play` `pause` `playpause` `next` `prev` |
-| knob | `home` `back` `select` `left` `right` `up` `down` |
-| session | `siri` |
-| local | `quit` |
+| touch | anywhere on the picture, two fingers at once |
+| arrows | the knob's absolute X/Y axes |
+| `Enter` | select |
+| `Escape` / `Backspace` | back |
+| `Home` | home |
+| `s` | Siri |
+| `Space` | play/pause |
+| `MediaTrackNext` / `MediaTrackPrevious` | next / previous |
 
-The list stops there on purpose: it is the set a front end puts on keys.
-Night mode, the phone keypad and the touch surface are all real CarPlay
-features, but no front end — `playport`'s included — binds them, so neither
-does this. Where a head unit has the hardware for them the AA bridge drives
-them directly.
+Buttons for the call keys and for day/night sit next to those. Day/night and the
+call keys go out as session commands rather than HID reports; everything else is
+a HID report on one of the four devices `/info` declares — touchscreen, knob,
+media and telephony.
+
+A press is always two reports, the press and an all-zero one. The phone tracks a
+button by whether it is still down, so a key that is never released does not
+register as a press at all; the same is true of the touchscreen, where a lifted
+finger has to leave its slot behind rather than disappear from the list.
+
+## The microphone
+
+CarPlay has no microphone stream. The phone asks for one by naming a *send* port
+in the SETUP of its main audio stream and labelling that stream `telephony` or
+`speechRecognition`; the browser then captures, encodes, and sends the payloads
+back up the same WebSocket, and this process seals them and puts them on that
+port.
+
+The codec follows the transport rather than being chosen: Opus over Wi-Fi, PCM
+over the cable, at the rate and channel count the phone's own audio stream
+arrived at.
+
+It is live only while the phone is listening — the browser is told when to start
+and stop, because holding a microphone open for nobody is a light that never
+goes out. Which means the way to test it is to start a call or invoke Siri.
 
 ## Depending on LIVI
 
-`Cargo.toml` takes the LIVI crates from the `feature/local-credential` branch of
-the fork:
+LIVI and the browser client are git submodules under `vendor/`, pinned to
+exact commits:
 
-```toml
-livi-runtime = { git = "https://github.com/0x5e/LIVI", branch = "feature/local-credential" }
+```bash
+git submodule update --init --recursive
 ```
 
-LIVI's repository root is an Electron app with no `Cargo.toml` at the top. That
-used to look like a blocker; it is not one — cargo searches the checkout for a
-package by name, so the crates under `native/livi-helperd/crates/` resolve as
-written, all from one checkout.
+| Submodule | Upstream | Pinned to |
+|---|---|---|
+| `vendor/LIVI` | `0x5e/LIVI` | `feature/local-credential` |
+| `vendor/playport` | `youcci/playport` | `main` |
 
-A branch is a moving target, so `Cargo.lock` records the commit it resolved to
-and that commit is what builds. To follow the branch, `cargo update -p
-livi-runtime` (and the other `livi-*` / `iap2-*` names). The first fetch is
-expensive — the repository carries ~540 MB of Electron assets, which cargo
-drags along with the branch's history — and every build after that works
-offline. To hack on a local LIVI checkout instead, point a
-`[patch."https://github.com/0x5e/LIVI"]` section at the sibling `path`s.
+`Cargo.toml` takes the LIVI crates by path from the submodule:
+
+```toml
+livi-runtime = { path = "vendor/LIVI/native/livi-helperd/crates/livi-runtime" }
+```
+
+LIVI's repository root is an Electron app with no top-level `Cargo.toml`; its
+Rust lives under `native/`, which is why every path spells that out.
+
+Because the submodule is pinned rather than tracking a branch, nothing moves on
+its own — `git submodule update --remote vendor/LIVI` and
+`git submodule update --remote vendor/playport` are the deliberate, manual steps
+that advance them.
 
 Note the licence: LIVI is **GPL-3.0-or-later**, and linking its crates makes
 this a derivative work, so cp2aa inherits that.
@@ -215,13 +288,15 @@ this a derivative work, so cp2aa inherits that.
 | `src/wireless/macos.rs` | the unix socket the IOBluetooth helper relays into |
 | `native/cp2aa-bluetooth/main.m` | macOS: SDP records, device class, RFCOMM → unix socket |
 | `src/airplay/mod.rs` | RTSP server: pairing, SETUP, `/info`, streams |
-| `src/airplay/pairing.rs` | SRP-6a pair-setup, X25519/Ed25519 pair-verify |
+| `src/airplay/pairing.rs` | SRP-6a pair-setup, X25519/Ed25519 pair-verify, every key HKDF derives |
 | `src/airplay/crypto.rs` | HKDF-SHA512, ChaCha20-Poly1305, the two nonce shapes |
-| `src/airplay/screen.rs` | video: sealed TCP frames → annex-B H.264 |
+| `src/airplay/screen.rs` | video: sealed TCP frames → annex-B H.264/H.265 |
 | `src/airplay/audio.rs` | audio: sealed UDP datagrams → PCM/AAC/Opus |
-| `src/airplay/event.rs` | input: HID reports over the event channel |
-| `src/sink.rs` | where streams go — ffplay command lines, the WAV header, stdin feeding, and the Android Auto outlet |
-| `src/commands.rs` | stdin grammar |
+| `src/airplay/event.rs` | input: HID reports and session commands, over the event channel |
+| `src/airplay/mic.rs` | the microphone uplink, sealed and sent back to the phone |
+| `src/sink.rs` | what a stream *is* — codec and description as well as bytes — and where the Android Auto outlet takes it |
+| `src/commands.rs` | the vocabulary of input, whichever client produced it |
+| `src/web/mod.rs` | the browser client's server: the wire framing, the API, the WebSocket, TLS |
 | `src/aa-client/` | the Android Auto *phone* side, see below |
 
 ## The Android Auto side
@@ -269,12 +344,14 @@ TLS verifiers accept anything on purpose.
 `src/bridge.rs` is the join. Three things cross it and none of them is decoded:
 
 * **Negotiation.** The head unit's own answer to service discovery — resolution,
-  frame rate, audio rate, which buttons it has — is written into `GET /info`, so
-  the iPhone renders for the screen actually at the far end. It only lands if the
-  head unit speaks first, because `/info` is read once per session.
+  frame rate, which codec it can decode, which buttons it has — is written into
+  `GET /info`, so the iPhone renders for the screen actually at the far end. It
+  only lands if the head unit speaks first, because `/info` is read once per
+  session.
 * **Media.** Encoded frames go out on the channels the head unit opened.
 * **Input.** Keys, the rotary controller and the touchscreen come back as
-  `InputEvent`s and leave as CarPlay HID reports — the same path stdin uses.
+  `InputEvent`s and leave as CarPlay HID reports — the same path the browser's
+  input takes.
 
 ### Transports
 
@@ -290,28 +367,35 @@ plugged in. Expect to fix the UDC name and the endpoint ordering first.
 ## Expected behaviour, not bugs
 
 * **Audio starts a few seconds after video.** The phone opens the screen stream
-  first and the audio stream several seconds later; the player is already waiting
-  on stdin, so playback is real time from the first sample onward.
+  first and the audio stream several seconds later.
 * **The phone stops sending video when nothing moves.** A still screen means no
-  frames — it is not a stall. Press a key (`home`, `select`, …) and the frame
-  count picks up again.
+  frames — it is not a stall. Touch the picture and it picks up again.
+* **The first picture waits for a keyframe.** A viewer that joins mid-stream has
+  nothing for the delta frames to refer back to, and the phone only sends a
+  keyframe when asked. One is requested on connect, so the picture appears within
+  a frame or two rather than immediately.
+* **Media keys do nothing until something has played.** With nothing playing,
+  iOS has no now-playing app for them to reach. Play something once and they work
+  for the rest of the session.
+* **A display change blanks the screen for a moment.** See the display panel
+  above: the session has to be rebuilt for the new size to reach the phone.
 
 ## Known gaps
 
-* Audio codec is announced as PCM and then guessed, so if the phone picks Opus or
-  AAC the player needs the matching `-f`. The negotiated codec is in the
-  stream-level SETUP and should replace the guess.
+* `up`/`down` overshoot. The knob's absolute Y axis is a *position* to the phone
+  rather than a step, so a full throw scrolls several rows. Wired it is reliable,
+  wireless it is intermittent. The knob's wheel axis cannot stand in for it: that
+  one follows the UI's own scroll direction, which is horizontal on the app grid.
+  The remaining knob is the throw itself — `AXIS_DEFLECT` in `event.rs` — and it
+  has not been measured.
 * Our clock is not steered onto the phone's. The offset is measured and printed
   but not applied, so `/feedback` reports our own time; wired sessions survive
   this, but it is not right.
-* `ffplay` on a pipe is deliberately run with no tuning at all (see `sink.rs`).
-  Latency options can be added back one at a time once there is a picture to
-  judge them against.
-* The picture is softer than MacPlay's because SDL scales bilinearly. Switching
-  `CP2AA_PLAYER` to a player with HiDPI-aware, high-quality scaling (mpv) is the
-  fix, and would need its own argument set (`--geometry` rather than `-x`/`-y`).
 * Single phone, no reconnect state machine beyond "is it still plugged in".
 * `/auth-setup` needs the same MFi credentials the iAP2 side uses. With
   `NoCoprocessor` it fails and the phone hangs up right after pair-verify.
 * The controller's long-term key from pair-setup is not stored, so pair-verify
   accepts any controller that can open a valid session.
+* The event channel's writer is held behind one lock and written without a
+  timeout, so a connection that has gone quiet can stall input until TCP gives
+  up. The same lock is what the next session has to take to attach its writer.

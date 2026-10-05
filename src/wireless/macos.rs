@@ -17,6 +17,7 @@ use livi_runtime::driver::spawn_link_stream;
 use livi_runtime::mfi_async::SharedCoprocessor;
 use tokio::io::AsyncReadExt;
 use tokio::net::UnixListener;
+use tokio::sync::broadcast;
 
 use super::{parse_mac, ready, run_session, short};
 use crate::config::Config;
@@ -25,7 +26,12 @@ use crate::config::Config;
 const HEADER_LIMIT: usize = 80;
 const HEADER_TIMEOUT: Duration = Duration::from_secs(3);
 
-pub async fn watch(cfg: Arc<Config>, auth: SharedCoprocessor, airplay_port: u32) {
+pub async fn watch(
+    cfg: Arc<Config>,
+    auth: SharedCoprocessor,
+    airplay_port: u32,
+    restart: broadcast::Sender<()>,
+) {
     if let Err(e) = ready(&cfg) {
         eprintln!("[cp-wifi] {e}");
         return;
@@ -107,7 +113,16 @@ pub async fn watch(cfg: Arc<Config>, auth: SharedCoprocessor, airplay_port: u32)
             ..LinkConfig::default()
         };
         let (channel, _artwork) = spawn_link_stream(stream, link, false);
-        run_session(&cfg, auth.clone(), channel, airplay_port, mac, &peer).await;
+        run_session(
+            &cfg,
+            auth.clone(),
+            channel,
+            airplay_port,
+            mac,
+            &peer,
+            &restart,
+        )
+        .await;
         println!("[cp-wifi] {} done, waiting for the next one", short(&peer));
     }
 

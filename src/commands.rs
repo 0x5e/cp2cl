@@ -1,8 +1,8 @@
-//! Keyboard input, parsed from stdin lines.
+//! The vocabulary of input, whichever client produced it.
 //!
-//! One command per line, no arguments. Anything unrecognised prints the
-//! available list rather than failing silently, because this is the only
-//! control surface the demo has.
+//! Nothing here parses text: the browser client sends JSON and the Android Auto
+//! bridge sends button codes. A `Command` is what the two have in common, and
+//! `event.rs` is the only place that knows how each one reaches the phone.
 
 /// One finger in a touch report, in the display's own pixel space.
 ///
@@ -34,24 +34,32 @@ pub enum Command {
     Right,
     Up,
     Down,
-    /// A wheel tick, produced by the AA bridge when its rotary knob turns.
-    /// No reference implementation exposes a wheel *key*, so there is no stdin
-    /// command for this — only the axis itself, which the HID descriptor keeps.
+    /// A wheel tick, produced by the AA bridge when its rotary knob turns, or by
+    /// the browser when it reads one off the knob state. No reference
+    /// implementation exposes a wheel *key*, so there is no named command for
+    /// this — only the axis, which the HID descriptor keeps.
     Wheel(i8),
     /// A multitouch report: one entry per slot the /info descriptor declares,
-    /// whether or not a finger is on it. The AA bridge is the only producer.
+    /// whether or not a finger is on it. The browser and the AA bridge both
+    /// produce these.
     Touch([TouchContact; TOUCH_SLOTS]),
-    // Telephony, plus the keyframe request below. None of these has a stdin
-    // command either: a front end exposes the call keys as buttons rather than
-    // as key bindings, and here it is the AA bridge that drives them, off the
-    // head unit's own call and media keys.
+    // Telephony. A front end exposes the call keys as buttons rather than as key
+    // bindings, so the AA bridge names the ones its head unit has and the
+    // browser passes an index straight through.
     Answer,
     Hangup,
     Mute,
+    /// A raw telephony index, straight from the browser client. Its call buttons
+    /// are indices into the telephony report rather than named keys, and passing
+    /// one through is the whole of the mapping the front end needs.
+    Telephony(u8),
     KeyFrame,
     // Session level.
     Siri,
-    Quit,
+    /// Day or night rendering, from the browser's toggle. A session command
+    /// rather than a HID report: the phone is told to redraw, not to press
+    /// anything.
+    Night(bool),
 }
 
 /// How many simultaneous fingers the touchscreen descriptor declares — and so
@@ -65,37 +73,9 @@ pub const MEDIA_PLAY_PAUSE: u8 = 3;
 pub const MEDIA_NEXT: u8 = 4;
 pub const MEDIA_PREV: u8 = 5;
 
-/// Telephony indices, mirroring LIVI's `TelephonyButton`.
+/// Telephony indices, mirroring LIVI's `TelephonyButton` — and the same numbers
+/// the browser client's call buttons send.
 pub const PHONE_HOOK_SWITCH: u8 = 1;
 pub const PHONE_FLASH: u8 = 2;
 pub const PHONE_DROP: u8 = 3;
 pub const PHONE_MUTE: u8 = 4;
-
-pub fn parse(line: &str) -> Option<Command> {
-    let head = line.split_whitespace().next()?.to_ascii_lowercase();
-    Some(match head.as_str() {
-        "play" => Command::Play,
-        "pause" => Command::Pause,
-        "playpause" | "pp" => Command::PlayPause,
-        "next" => Command::Next,
-        "prev" => Command::Prev,
-        "home" => Command::Home,
-        "back" => Command::Back,
-        "select" | "selectup" => Command::Select,
-        "left" => Command::Left,
-        "right" => Command::Right,
-        "up" => Command::Up,
-        "down" => Command::Down,
-        "siri" => Command::Siri,
-        "quit" | "exit" => Command::Quit,
-        _ => return None,
-    })
-}
-
-pub const HELP: &str = "\
-commands (one per line):
-  media      play | pause | playpause | next | prev
-  knob       home | back | select | left | right | up | down
-  session    siri
-  local      quit
-";

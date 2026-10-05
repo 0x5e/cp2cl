@@ -25,9 +25,10 @@ use livi_runtime::driver::LinkChannel;
 use livi_runtime::ident::{Identity, Transport};
 use livi_runtime::mfi_async::SharedCoprocessor;
 use livi_runtime::vehicle::Vehicle;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc, Notify};
 
 use crate::config::Config;
+use crate::session::{forward_restarts, run_bringup};
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -51,12 +52,19 @@ pub(crate) async fn run_session(
     airplay_port: u32,
     bt_mac: [u8; 6],
     peer: &str,
+    restart: &broadcast::Sender<()>,
 ) {
+    // Subscribed before anything goes out, so a display change made while the
+    // identification is still running is waiting for us rather than lost.
+    let changed = restart.subscribe();
+
     let identity = Identity {
         name: cfg.name.clone(),
         ssid: cfg.ssid.clone(),
         bt_mac,
     };
+
+    let start_again = Arc::new(Notify::new());
 
     let cp = CpConfig {
         wifi_iface: cfg.wifi_iface.clone(),
@@ -84,14 +92,23 @@ pub(crate) async fn run_session(
         // as a wireless one, and if it is plugged in as well the wired watcher
         // is the one that will pick it up.
         on_cable: Some(OnCable(Arc::new(|_bt_mac: &str| false))),
-        start_again: None,
+        // Same door as the wired half: a display change drops the AirPlay
+        // session, and this is what tells the phone to come back and read
+        // `/info` afresh. The start is re-sent over the iAP2 session already up,
+        // so Bluetooth is never reopened — and because nothing live is handed
+        // to `send_start`, the wireless attributes come from this config, which
+        // names the network the phone is already on.
+        start_again: Some(start_again.clone()),
     };
 
     let (tx, rx) = mpsc::channel(64);
     let vehicle = Vehicle::default().feed();
     tokio::spawn(async move { run_accessory(channel, auth, identity, cp, tx, vehicle).await });
 
-    crate::session::run_bringup("[cp-wifi]", peer, airplay_port, Some(&cfg.ssid), rx).await;
+    let forward = tokio::spawn(forward_restarts(changed, start_again));
+
+    run_bringup("[cp-wifi]", peer, airplay_port, Some(&cfg.ssid), rx).await;
+    forward.abort();
 }
 
 /// `00:11:22:33:44:55` → bytes. Unparseable parts stay zero rather than
@@ -136,7 +153,12 @@ pub(crate) fn ready(cfg: &Config) -> Result<(), String> {
 /// Neither platform pushes "a phone just paired", so both poll. A session that
 /// ends puts us back to waiting for the same phone to come again.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub async fn watch(cfg: Arc<Config>, _auth: SharedCoprocessor, _airplay_port: u32) {
+pub async fn watch(
+    cfg: Arc<Config>,
+    _auth: SharedCoprocessor,
+    _airplay_port: u32,
+    _restart: broadcast::Sender<()>,
+) {
     eprintln!(
         "[cp-wifi] wireless CarPlay needs Bluetooth, and this platform has no \
          backend for it: {}",

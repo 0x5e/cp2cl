@@ -13,7 +13,7 @@ use std::time::Duration;
 use plist::{dictionary::Dictionary, from_bytes, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 
 use livi_runtime::AsyncAuth;
 
@@ -23,11 +23,12 @@ use super::clock::{ntp_diff, SyncedClock};
 use super::crypto::{self, aes_ctr128, open_frames, seal_frames, sha1_all, sha256_all, SymKey};
 use super::event::{pump_events, EventSink};
 use super::info;
+use super::mic::{MicConfig, MicSink};
 use super::pairing::{PairSetup, PairVerify, Pairings, VerifyKeys};
 use super::rtsp::{self, Request, Response, OCTET_CONTENT_TYPE, PAIRING_CONTENT_TYPE};
 use super::screen::{self, VideoReceiver};
 use crate::config::Config;
-use crate::sink::{AudioCodec, MediaSink};
+use crate::sink::{AudioCodec, MediaSink, StreamEvent};
 
 /// Every /auth-setup request starts with this byte.
 const MFISAP_VERSION: u8 = 0x01;
@@ -163,16 +164,62 @@ impl AudioStream {
 }
 
 /// What the phone should render at, when something other than the configuration
-/// knows better — an Android Auto head unit's declared resolution, say.
+/// knows better — an Android Auto head unit's declared resolution, or a size the
+/// operator picked in the browser's display panel.
 ///
-/// `GET /info` prefers this to `Config` once it is set. It only lands if the
-/// head unit is heard from before the iPhone asks: the iPhone reads `/info` once
-/// at the start of a session and does not ask again.
+/// `GET /info` prefers this to `Config` once it is set. It only lands if it is
+/// written before the session starts, which is why changing it costs a session:
+/// the iPhone reads `/info` once and does not ask again.
 #[derive(Debug, Clone, Copy)]
 pub struct ScreenParams {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    /// Canvas scale in percent, the way PlayPort's "UI size" control means it:
+    /// the phone is asked for a canvas of `100/percent` the size, and the
+    /// browser fits the result back to its own surface, so a larger canvas
+    /// draws proportionally *smaller* CarPlay controls. 100 leaves it alone.
+    pub ui_scale: u32,
+    /// Whether to advertise HEVC. Part of the negotiated display rather than the
+    /// environment because it has to match what the far end can decode: a browser
+    /// picking H.264, or a head unit that only lists H.264, would show nothing.
+    pub hevc: bool,
+}
+
+/// The canvas scales the browser's display panel offers. Anything else is the
+/// default, which is what PlayPort's own panel does with a typed-in value.
+pub const UI_SCALES: [u32; 4] = [75, 85, 100, 115];
+
+impl ScreenParams {
+    /// The scale actually in force: one of the offered ones, or the default.
+    pub fn ui_scale(&self) -> u32 {
+        if UI_SCALES.contains(&self.ui_scale) {
+            self.ui_scale
+        } else {
+            100
+        }
+    }
+
+    /// The canvas the phone is actually asked for: the size above with the UI
+    /// scale applied. Mirrors PlayPort's `CarPlayUiScale.apply`, including its
+    /// refusal to ask for an enlarged canvas past 4K.
+    ///
+    /// Everything that has to line up with the stream uses this rather than
+    /// `width`/`height`: the decoder's coded size, and the pixel space a touch
+    /// is measured in.
+    pub fn canvas(&self) -> (u32, u32) {
+        let scale = self.ui_scale();
+        if scale == 100 {
+            return (self.width, self.height);
+        }
+        // Rounded up to even pixels, which is what CarPlay insists on.
+        let pixels = |value: u32| ((value as u64 * 100 / scale as u64 + 1) / 2 * 2) as u32;
+        let (width, height) = (pixels(self.width), pixels(self.height));
+        if scale < 100 && (width.max(height) > 3840 || width.min(height) > 2160) {
+            return (self.width, self.height);
+        }
+        (width, height)
+    }
 }
 
 /// Shared with whoever negotiates on our behalf; `None` means "use `Config`".
@@ -185,8 +232,12 @@ pub struct Shared {
     pub video_sink: Arc<dyn MediaSink>,
     pub audio_sink: Arc<dyn MediaSink>,
     /// Set by the Android Auto bridge once a head unit has said what it can
-    /// show. Read by `GET /info`.
+    /// show, or by the browser's display panel. Read by `GET /info`.
     pub screen: SharedScreen,
+    /// Fired when what the phone should be rendering has changed. `/info` is
+    /// answered once per session, so dropping the session is the only way a
+    /// change lands: the phone reconnects, asks again, and gets the new size.
+    pub restart: tokio::sync::broadcast::Sender<()>,
     /// The same MFi signer the iAP2 side uses, for `/auth-setup`.
     pub mfi: livi_runtime::mfi_async::SharedCoprocessor,
     /// Where the audio playout position is tracked, for `/feedback`.
@@ -197,8 +248,12 @@ pub struct Shared {
     pub timing: Arc<Mutex<SyncedClock>>,
     /// Announced to the phone so it knows what audio to send.
     pub audio_codec: Arc<Mutex<AudioCodec>>,
-    /// Where input lands; stdin dispatches into this once pairing completes.
+    /// Where input lands; the browser and the AA bridge dispatch into this once
+    /// pairing completes.
     pub event_sink: Arc<EventSink>,
+    /// The one stream that runs both ways. Opened when the phone asks for
+    /// bidirectional audio, and where the browser's microphone audio goes.
+    pub mic: Arc<MicSink>,
 }
 
 /// Accepts connections and runs each one to completion.
@@ -214,11 +269,13 @@ pub async fn serve(listener: TcpListener, shared: Shared) {
         println!("[airplay] {peer} connected");
         let cfg = shared.cfg.clone();
         let screen = shared.screen.clone();
+        let restart = shared.restart.subscribe();
         let pairings = shared.pairings.clone();
         let video_sink = shared.video_sink.clone();
         let audio_sink = shared.audio_sink.clone();
         let codec = shared.audio_codec.clone();
         let event_sink = shared.event_sink.clone();
+        let mic = shared.mic.clone();
         let mfi = shared.mfi.clone();
         let audio_clock = shared.audio_clock.clone();
         let timing = shared.timing.clone();
@@ -227,11 +284,13 @@ pub async fn serve(listener: TcpListener, shared: Shared) {
             let mut session = Session {
                 cfg,
                 screen,
+                restart,
                 pairings,
                 video_sink,
                 audio_sink,
                 codec,
                 event_sink,
+                mic,
                 mfi,
                 audio_clock,
                 timing,
@@ -294,13 +353,19 @@ struct Pump {
 
 struct Session {
     cfg: Arc<Config>,
-    /// What a head unit asked for, if one has. Read when answering `/info`.
+    /// What a head unit — or the browser's display panel — asked for, if either
+    /// has. Read when answering `/info`.
     screen: SharedScreen,
+    /// Fires when the session should end so the phone re-reads `/info`.
+    restart: tokio::sync::broadcast::Receiver<()>,
     pairings: Arc<Mutex<Pairings>>,
     video_sink: Arc<dyn MediaSink>,
     audio_sink: Arc<dyn MediaSink>,
     codec: Arc<Mutex<AudioCodec>>,
     event_sink: Arc<EventSink>,
+    /// The microphone uplink, opened for whichever audio stream the phone said
+    /// it wants to hear on.
+    mic: Arc<MicSink>,
     mfi: livi_runtime::mfi_async::SharedCoprocessor,
     audio_clock: Arc<Mutex<AudioClock>>,
     /// The clock every timestamp we send is stamped with. See `clock::SyncedClock`.
@@ -341,7 +406,25 @@ impl Session {
         let mut buf = [0u8; 8192];
 
         loop {
-            let n = reader.read(&mut buf).await?;
+            let n = tokio::select! {
+                result = reader.read(&mut buf) => result?,
+                signal = self.restart.recv() => match signal {
+                    // `Lagged` means a second change arrived before this one was
+                    // read; either way the answer is the same session restart.
+                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                        println!(
+                            "[airplay] {}: what to render changed; dropping the session so \
+                             the phone asks again",
+                            self.peer
+                        );
+                        self.close_streams().await;
+                        return Ok(());
+                    }
+                    // Unreachable while any sender lives, and dropping a healthy
+                    // session over it would be the wrong answer.
+                    Err(broadcast::error::RecvError::Closed) => continue,
+                },
+            };
             if n == 0 {
                 println!("[airplay] {} disconnected", self.peer);
                 return Ok(());
@@ -474,13 +557,27 @@ impl Session {
         }
     }
 
+    /// Whether HEVC is being advertised. The environment sets the default; a
+    /// head unit that cannot decode it, or a browser that picked H.264, writes
+    /// the negotiated display and overrides it.
+    fn hevc(&self) -> bool {
+        self.negotiated().map(|s| s.hevc).unwrap_or(self.cfg.hevc)
+    }
+
+    /// What the phone has been asked to render, if anything has asked.
+    fn negotiated(&self) -> Option<ScreenParams> {
+        self.screen.lock().ok().and_then(|g| *g)
+    }
+
     fn info(&self) -> Result<Response, String> {
-        // A head unit's declared resolution wins: it is the end that has to
-        // decode the picture, so asking the phone for something else just makes
-        // it scale.
-        let negotiated = self.screen.lock().ok().and_then(|g| *g);
-        let (width, height, fps) = match negotiated {
-            Some(s) => (s.width, s.height, s.fps),
+        // A head unit's declared resolution wins, and so does the browser's
+        // display panel: both are the end that has to decode the picture, so
+        // asking the phone for something else just makes it scale.
+        let (width, height, fps) = match self.negotiated() {
+            Some(s) => {
+                let (width, height) = s.canvas();
+                (width, height, s.fps)
+            }
             None => (self.cfg.width, self.cfg.height, self.cfg.fps),
         };
         let plist = info::build(&info::Static {
@@ -492,10 +589,11 @@ impl Session {
             fps,
             width_mm: self.cfg.width_mm,
             height_mm: self.cfg.height_mm,
-            hevc: self.cfg.hevc,
+            hevc: self.hevc(),
         })
         .map_err(|e| e.to_string())?;
-        println!("[airplay] answered GET /info");
+        println!("[airplay] answered GET /info ({width}x{height}@{fps}, {})",
+            if self.hevc() { "HEVC" } else { "H.264" });
         Ok(Response::new(200).plist(plist))
     }
 
@@ -562,11 +660,40 @@ impl Session {
             .flatten()
             .filter_map(|s| s.as_dictionary()?.get("type")?.as_signed_integer())
         {
-            self.audio_clock.lock().await.close_type(stream_type);
-            if let Some(pump) = self.pumps.remove(&stream_type) {
-                pump.task.abort();
-            }
+            self.close_stream(stream_type).await;
             println!("[airplay] stream {stream_type} torn down");
+        }
+    }
+
+    /// Closes every stream, without the phone having asked.
+    async fn close_streams(&mut self) {
+        for stream_type in self.pumps.keys().copied().collect::<Vec<_>>() {
+            self.close_stream(stream_type).await;
+        }
+    }
+
+    /// Closes one stream, named the way the phone names it.
+    ///
+    /// Aborting the pump is the only way a UDP stream ever ends, and it means
+    /// the pump never reaches its own goodbye — so the sink is told here or not
+    /// at all, or the browser keeps a mixer channel for a stream nobody will
+    /// ever send again.
+    async fn close_stream(&mut self, stream_type: i64) {
+        self.audio_clock.lock().await.close_type(stream_type);
+        if let Some(pump) = self.pumps.remove(&stream_type) {
+            pump.task.abort();
+        }
+        match stream_type {
+            110 => self.video_sink.push(StreamEvent::ScreenActive(false)),
+            100 | 101 | 102 => self.audio_sink.push(StreamEvent::AudioStopped {
+                stream_type: stream_type as u8,
+            }),
+            _ => {}
+        }
+        // Only the main audio stream ever carries a microphone, and a phone that
+        // has stopped sending us audio is not listening for any either.
+        if stream_type == 100 {
+            self.mic.close().await;
         }
     }
 
@@ -748,7 +875,7 @@ impl Session {
         );
         // `viewAreas` is advertised unconditionally by LIVI; omitting it changes
         // what the phone asks for downstream.
-        let features: Vec<Value> = if self.cfg.hevc {
+        let features: Vec<Value> = if self.hevc() {
             vec![
                 Value::String("hevc".into()),
                 Value::String("iAPChannel".into()),
@@ -822,12 +949,46 @@ impl Session {
                         .unwrap_or(0);
                     let codec = AudioCodec::from_format(fmt);
                     let stream_type = type_.unwrap_or(0);
+                    // The phone labels each stream itself — `media`, `telephony`,
+                    // `speechRecognition` — and the browser shows one mixer
+                    // channel per name, so the label is carried through as-is.
+                    let audio_type = table
+                        .get("audioType")
+                        .and_then(|v| v.as_string())
+                        .unwrap_or("default")
+                        .to_ascii_lowercase();
                     println!(
-                        "[airplay] audio stream type {stream_type} (format 0x{fmt:x} -> {codec:?})"
+                        "[airplay] audio stream type {stream_type} {audio_type:?} \
+                         (format 0x{fmt:x} -> {codec:?})"
                     );
                     {
                         *self.codec.lock().await = codec;
                     }
+                    // MainAudio is bidirectional, and this is how the phone says
+                    // so: a send port in its own SETUP, alongside an audio type
+                    // that has someone talking at the other end. It is the only
+                    // inbound stream that names a port — for every other one it
+                    // is we who do.
+                    let mic_port = table
+                        .get("dataPort")
+                        .and_then(|v| v.as_signed_integer())
+                        .unwrap_or(0);
+                    if stream_type == 100
+                        && matches!(audio_type.as_str(), "telephony" | "speechrecognition")
+                        && (1..=65535).contains(&mic_port)
+                    {
+                        let frames_per_packet = table
+                            .get("framesPerPacket")
+                            .and_then(|v| v.as_signed_integer())
+                            .unwrap_or(0) as u32;
+                        self.open_mic(stream_id, mic_port as u16, codec, frames_per_packet, keys)
+                            .await;
+                    }
+                    self.audio_sink.push(StreamEvent::AudioConfig {
+                        stream_type: stream_type as u8,
+                        codec,
+                        name: audio_type,
+                    });
                     // The phone's jitter buffer: how far the sound lags the
                     // samples it has already handed us, and so what `/feedback`
                     // has to subtract. Not sending it means there is none.
@@ -846,7 +1007,7 @@ impl Session {
                     let clock = self.audio_clock.clone();
                     let task = tokio::spawn(async move {
                         println!("[airplay] audio stream attached");
-                        Self::pump_audio(socket, key, codec, sink, clock, id).await;
+                        Self::pump_audio(socket, key, stream_type as u8, codec, sink, clock, id).await;
                     });
                     // Bound but never read; a failure here is not worth failing
                     // the whole setup over.
@@ -889,11 +1050,41 @@ impl Session {
         Ok(Response::new(200).plist(plist))
     }
 
+    /// Opens the microphone uplink for a stream the phone says it will hear on.
+    ///
+    /// The packets go back to the phone's own address on the port it named. A
+    /// failure here is not worth failing the SETUP over: the downlink is already
+    /// running, and the worst case is a browser whose microphone does nothing.
+    async fn open_mic(
+        &self,
+        stream_id: i64,
+        port: u16,
+        codec: AudioCodec,
+        frames_per_packet: u32,
+        keys: VerifyKeys,
+    ) {
+        let key = match SymKey::from_bytes(&keys.media_input(stream_id as u64)) {
+            Ok(key) => key,
+            Err(e) => {
+                eprintln!("[mic] input key for stream {stream_id} is unusable: {e}");
+                return;
+            }
+        };
+        let config = MicConfig::from_codec(codec, frames_per_packet);
+        let peer = SocketAddr::new(self.peer.ip(), port);
+        match self.mic.open(peer, 100, key, config).await {
+            Ok(()) => println!(
+                "[mic] uplink open to {peer} ({:?} {}Hz/{}ch, {} samples per packet)",
+                config.codec, config.sample_rate, config.channels, config.samples_per_packet
+            ),
+            Err(e) => eprintln!("[mic] uplink to {peer} not opened: {e}"),
+        }
+    }
+
     /// Registers a running stream under the type the phone will name it with.
     /// A type that is already open is replaced rather than left to rot, because
     /// the phone may re-open a stream without tearing the old one down.
-    fn open_pump(
-        &mut self,
+    fn open_pump(        &mut self,
         stream_type: i64,
         task: tokio::task::JoinHandle<()>,
         control: Option<UdpSocket>,
@@ -920,7 +1111,8 @@ impl Session {
 
     /// Video arrives on TCP as a stream of length-framed messages.
     async fn pump_video(socket: TcpStream, key: SymKey, sink: Arc<dyn MediaSink>) {
-        let mut rx = VideoReceiver::new(key, sink);
+        let mut rx = VideoReceiver::new(key, sink.clone());
+        sink.push(StreamEvent::ScreenActive(true));
         let mut socket = socket;
         let mut header = [0u8; screen::HEADER_LEN];
         let mut frames: u64 = 0;
@@ -946,6 +1138,7 @@ impl Session {
             rx.feed(&header, &body);
             frames += 1;
         }
+        sink.push(StreamEvent::ScreenActive(false));
         println!("[airplay] video stream closed after {frames} frames");
     }
 
@@ -953,12 +1146,13 @@ impl Session {
     async fn pump_audio(
         socket: UdpSocket,
         key: SymKey,
+        stream_type: u8,
         codec: AudioCodec,
         sink: Arc<dyn MediaSink>,
         clock: Arc<Mutex<AudioClock>>,
         id: u64,
     ) {
-        let rx = AudioReceiver::new(key, codec, sink);
+        let rx = AudioReceiver::new(key, stream_type, codec, sink.clone());
         let mut buf = [0u8; 2048];
         let mut packets: u64 = 0;
         loop {
@@ -987,6 +1181,7 @@ impl Session {
         // failing — stop announcing it. A stream that is gone but still named
         // in `/feedback` is one the phone keeps asking about.
         clock.lock().await.close(id);
+        sink.push(StreamEvent::AudioStopped { stream_type });
         println!("[airplay] audio stream closed after {packets} packets");
     }
 
@@ -1078,5 +1273,48 @@ impl Session {
             });
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params(width: u32, height: u32, ui_scale: u32) -> ScreenParams {
+        ScreenParams {
+            width,
+            height,
+            fps: 60,
+            ui_scale,
+            hevc: false,
+        }
+    }
+
+    /// The browser's panel sends a percentage and the phone is asked for a
+    /// canvas of `100/percent` the size. These are the values PlayPort's
+    /// `CarPlayUiScale.apply` produces for the same input, worked out by hand
+    /// from its expression — a mismatch would move every touch by the same
+    /// ratio, which is the kind of bug that looks like a broken touchscreen.
+    #[test]
+    fn canvas_matches_the_ui_scale_presets() {
+        assert_eq!(params(1280, 720, 100).canvas(), (1280, 720));
+        assert_eq!(params(1280, 720, 75).canvas(), (1706, 960));
+        assert_eq!(params(1280, 720, 85).canvas(), (1506, 848));
+        assert_eq!(params(1280, 720, 115).canvas(), (1114, 626));
+    }
+
+    /// Anything the panel does not offer is the default, rather than a scale
+    /// nothing has tested. The panel's input is a number field.
+    #[test]
+    fn an_unknown_scale_is_the_default() {
+        assert_eq!(params(1280, 720, 57).ui_scale(), 100);
+        assert_eq!(params(1280, 720, 0).canvas(), (1280, 720));
+    }
+
+    /// Enlarging past 4K is refused, the way the reference refuses it: nothing
+    /// on either end could render it, and the request would only cost a session.
+    #[test]
+    fn an_enlarged_canvas_stops_at_4k() {
+        assert_eq!(params(3840, 2160, 75).canvas(), (3840, 2160));
     }
 }

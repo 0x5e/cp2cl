@@ -433,10 +433,24 @@ impl VerifyKeys {
     }
     /// One media stream's decryption key, keyed by its stream id.
     pub fn media(&self, stream_id: u64) -> [u8; 32] {
+        self.data_stream(stream_id, "DataStream-Output-Encryption-Key")
+    }
+
+    /// The mirror of the above, for the one stream that runs both ways.
+    ///
+    /// CarPlay carries the microphone on the phone's own audio stream rather
+    /// than opening one of its own: the phone names a send port in that
+    /// stream's SETUP, and what we put on it is sealed with this. Same salt and
+    /// same key material as the downlink, a different label.
+    pub fn media_input(&self, stream_id: u64) -> [u8; 32] {
+        self.data_stream(stream_id, "DataStream-Input-Encryption-Key")
+    }
+
+    fn data_stream(&self, stream_id: u64, label: &str) -> [u8; 32] {
         hkdf_sha512(
             &self.shared,
             &format!("DataStream-Salt{stream_id}"),
-            "DataStream-Output-Encryption-Key",
+            label,
             32,
         )
         .try_into()

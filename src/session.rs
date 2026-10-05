@@ -19,7 +19,7 @@ use livi_runtime::ident::Identity;
 use livi_runtime::ident::Transport;
 use livi_runtime::mfi_async::SharedCoprocessor;
 use livi_runtime::vehicle::Vehicle;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc, Notify};
 
 use crate::config::Config;
 use crate::wireless::{parse_mac, short};
@@ -28,8 +28,18 @@ use crate::wireless::{parse_mac, short};
 /// second is not rude, and fast enough that plugging in feels immediate.
 const SCAN_INTERVAL: Duration = Duration::from_secs(1);
 
+/// How long to wait before asking the phone for another start. The AirPlay
+/// session is dropped in the same breath as the signal that triggers this, and
+/// a phone still closing the old one cannot act on a start that arrives early.
+const START_AGAIN_DELAY: Duration = Duration::from_millis(500);
+
 /// Keeps asking who is plugged in until we stop being asked to stop.
-pub async fn watch(cfg: Arc<Config>, auth: SharedCoprocessor, airplay_port: u32) {
+pub async fn watch(
+    cfg: Arc<Config>,
+    auth: SharedCoprocessor,
+    airplay_port: u32,
+    restart: broadcast::Sender<()>,
+) {
     let mut busy: Option<String> = None;
     loop {
         match iap2_wired::usbmuxd::devices().await {
@@ -46,7 +56,7 @@ pub async fn watch(cfg: Arc<Config>, auth: SharedCoprocessor, airplay_port: u32)
                     if let Some(device) = devices.into_iter().next() {
                         let udid = device.udid.clone();
                         println!("[cp] {} found over usb", short(&udid));
-                        match attach(&cfg, auth.clone(), &device, airplay_port).await {
+                        match attach(&cfg, auth.clone(), &device, airplay_port, &restart).await {
                             Ok(()) => busy = Some(udid),
                             Err(e) => eprintln!("[cp] {} could not attach: {e}", short(&udid)),
                         }
@@ -68,7 +78,12 @@ async fn attach(
     auth: SharedCoprocessor,
     device: &idevice::usbmuxd::UsbmuxdDevice,
     airplay_port: u32,
+    restart: &broadcast::Sender<()>,
 ) -> anyhow::Result<()> {
+    // Subscribed before anything opens, so a display change made while the
+    // carkit is coming up is still waiting for us rather than lost.
+    let changed = restart.subscribe();
+
     // The stream the phone sends its media over. On macOS this is the enX the
     // USB network function creates; on Linux it is whatever gadget we set up.
     let av_iface = av_interface(cfg, &device.udid).await;
@@ -94,6 +109,13 @@ async fn attach(
         bt_mac: parse_mac(&cfg.bt_mac),
     };
 
+    // The display panel can change what we render, and the phone reads `/info`
+    // once per session and never asks again — so a change means dropping the
+    // session and giving the phone a reason to come back. `start_again` is
+    // LIVI's own door for that second half: the start is sent over the iAP2
+    // session that is already up, so the carkit is never reopened.
+    let start_again = Arc::new(Notify::new());
+
     let cp = CpConfig {
         wifi_iface: String::new(),
         ssid: cfg.name.clone(),
@@ -114,17 +136,43 @@ async fn attach(
         ap_on_air: None,
         // Bluetooth-only: whether a phone we can see is also on the cable.
         on_cable: None,
-        // Wired sends the start once; there is no second iAP2 session to
-        // re-send it on.
-        start_again: None,
+        // Wired sends the start once on its own; this is how it is sent again
+        // without the iAP2 session ending under it.
+        start_again: Some(start_again.clone()),
     };
 
     let (tx, rx) = mpsc::channel(64);
     let vehicle = Vehicle::default().feed();
     tokio::spawn(async move { run_accessory(channel, auth, identity, cp, tx, vehicle).await });
 
+    let forward = tokio::spawn(forward_restarts(changed, start_again));
+
     run_bringup("[cp]", &short(&device.udid), airplay_port, None, rx).await;
+    forward.abort();
     Ok(())
+}
+
+/// Turns each "what to render changed" into another `CarPlayStartSession`.
+///
+/// Dropping the AirPlay session on its own leaves the phone nothing to knock on:
+/// iAP2 is still up, so nothing tells it we want it back and it simply stays
+/// away. LIVI's `start_again` re-sends the start over that live session, which is
+/// what makes the phone dial us again and read `/info` afresh.
+///
+/// Shared with the wireless half, which has the same iAP2 session to re-send
+/// over and so needs the same one-sided nudge.
+pub(crate) async fn forward_restarts(mut changed: broadcast::Receiver<()>, again: Arc<Notify>) {
+    loop {
+        match changed.recv().await {
+            // Lagged means more than one change arrived before this one was
+            // read; either way the phone only needs to hear it once more.
+            Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                tokio::time::sleep(START_AGAIN_DELAY).await;
+                again.notify_one();
+            }
+            Err(broadcast::error::RecvError::Closed) => return,
+        }
+    }
 }
 
 /// Prints the progress of one iAP2 bringup, and returns when it ends.

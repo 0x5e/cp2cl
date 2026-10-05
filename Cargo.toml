@@ -1,27 +1,26 @@
 [package]
 name = "cp2aa"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "Headless CarPlay receiver that bridges an Android Auto head unit and an iPhone"
 license = "GPL-3.0-or-later"
 
-# The LIVI crates come from the fork's `feature/local-credential` branch. LIVI's
-# repository root is an Electron app with no top-level Cargo.toml, but cargo
-# searches the checkout for a package by name, so these resolve as written.
-# Cargo.lock pins the commit; `cargo update -p livi-runtime` follows the branch
-# again. See README "Depending on LIVI".
+# The LIVI crates come from the `vendor/LIVI` submodule, pinned to the
+# `feature/local-credential` branch. LIVI's repository root is an Electron app
+# with no top-level Cargo.toml; its Rust lives under `native/`, so every path
+# spells that out. See README "Depending on LIVI".
 
 [dependencies]
-livi-runtime = { git = "https://github.com/0x5e/LIVI", branch = "feature/local-credential" }
-iap2-link = { git = "https://github.com/0x5e/LIVI", branch = "feature/local-credential" }
-iap2-wired = { git = "https://github.com/0x5e/LIVI", branch = "feature/local-credential" }
-iap2-mfi = { git = "https://github.com/0x5e/LIVI", branch = "feature/local-credential" }
-iap2-csm = { git = "https://github.com/0x5e/LIVI", branch = "feature/local-credential" }
+livi-runtime = { path = "vendor/LIVI/native/livi-helperd/crates/livi-runtime" }
+iap2-link = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-link" }
+iap2-wired = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-wired" }
+iap2-mfi = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-mfi" }
+iap2-csm = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-csm" }
 # LIVI's Android Auto implementation is the head-unit side; we are the phone.
 # Framing, the protobuf primitives and the channel constants know nothing about
 # which end they are on, so we take those from there instead of keeping a copy.
 # The TLS server and the session state machine are ours, in `src/aa-client`.
-livi-aa = { git = "https://github.com/0x5e/LIVI", branch = "feature/local-credential" }
+livi-aa = { path = "vendor/LIVI/native/livi-helperd/crates/livi-aa" }
 # Needed directly to name `usbmuxd::UsbmuxdDevice` in our own function
 # signatures. Same version LIVI resolves, so these unify into one build.
 idevice = { version = "0.1", features = ["usbmuxd"] }
@@ -58,7 +57,21 @@ thiserror = "1"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# The debug UI is PlayPort's own browser client, served out of the submodule.
+# Its Kotlin server is replaced by these: an HTTPS host (WebCodecs refuses to
+# decode outside a secure context, so plain HTTP only works on localhost) with
+# a WebSocket carrying the same JSON control messages and binary media wire.
+#
+# `tls-rustls-no-provider` rather than `tls-rustls`: the latter would pull in
+# `aws-lc-rs` as a second crypto provider, and rustls then refuses to guess
+# which one the process wants. There is exactly one — `ring`, the provider the
+# Android Auto half already needs — and `main` installs it.
+axum = { version = "0.8", features = ["ws"] }
+axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+rcgen = "0.13"
 
 # Android Auto, phone side (src/aa-client): a TLS 1.2 server presenting the
 # phone's certificate. rustls is already in the lock file through LIVI, so this

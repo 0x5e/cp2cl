@@ -1,24 +1,12 @@
-//! Plays the decoded media with ffplay, one process per stream.
+//! Where the media goes once CarPlay has handed it over.
 //!
-//! ffplay is doing real work here, not just being a convenience: it turns our
-//! elementary streams into a picture and sound without us writing a decoder, an
-//! A/V synchroniser or a window. Doing that in Rust would be thousands of lines
-//! for no gain in a demo.
-//!
-//! Two processes, deliberately independent:
-//!
-//! * audio and video arrive on separate connections and start at different
-//!   times — the phone may open the screen stream well before (or without) the
-//!   audio one, and a stalled side must never stop the other;
-//! * they need different input formats anyway.
-//!
-//! An earlier version pushed to go2rtc over RTSP. That added a server, a muxer
-//! and a whole class of "black screen with no error" failures; feeding ffplay
-//! directly cuts the problem in half when something does not show up.
+//! Exactly one consumer takes the streams: the browser client, or — one day — an
+//! Android Auto head unit. The events below carry the *description* of a stream
+//! as well as its bytes, which is what the ffplay sink this replaced never
+//! needed: ffplay was told what it was reading on its command line, while a
+//! browser decoding with WebCodecs has to be told out of band, because the
+//! description arrives on the stream itself after decoding has already started.
 
-use std::io::{Error as IoError, Write};
-use std::path::Path;
-use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -27,176 +15,22 @@ use tokio::sync::mpsc::{self, channel, Sender};
 
 use crate::aa_client::session::MediaFrame;
 
-/// How much may queue ahead of the player before we start dropping. Bounded
-/// with a drop policy on purpose: this is a live stream, so falling behind
-/// should cost a glitch, not seconds of latency that accumulate forever.
-const VIDEO_QUEUE: usize = 64;
-const AUDIO_QUEUE: usize = 512;
-
-/// Where to copy video frames, if anywhere. Read once from the environment.
-fn video_dump() -> Option<&'static std::path::PathBuf> {
-    use std::sync::OnceLock;
-    static DUMP: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
-    DUMP.get_or_init(|| {
-        std::env::var("CP2AA_DUMP_VIDEO")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .map(std::path::PathBuf::from)
-    })
-    .as_ref()
+/// Which family a video stream is in, which decides both how its parameter sets
+/// are read out of the config record and how the browser names the decoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoCodec {
+    H264,
+    H265,
 }
 
-/// Wherever a decoded stream ends up.
-///
-/// Two implementations: `PlayerSink`, which feeds ffplay, and `AaSink`, which
-/// hands the same bytes to the Android Auto side. Neither blocks — both drop
-/// instead, because a live stream should glitch rather than fall behind, and a
-/// receiver that is gone for good says so once instead of forever.
-pub trait MediaSink: Send + Sync {
-    fn push(&self, bytes: Vec<u8>);
-}
-
-/// A player this process started, shared between the task that feeds it and the
-/// registry below, so both can kill it.
-type Player = Arc<Mutex<Child>>;
-
-/// Every player started so far, so `quit` can take them down with us.
-///
-/// `std::process::exit` runs no destructors: the blocking task that owns the
-/// child never reaches its `kill`, and on Unix a child whose parent exits is
-/// reparented rather than signalled. Without this the ffplay windows stay on
-/// screen after `bye`, and the next run stacks a second pair in front of them.
-fn players() -> &'static Mutex<Vec<Player>> {
-    static PLAYERS: std::sync::OnceLock<Mutex<Vec<Player>>> = std::sync::OnceLock::new();
-    PLAYERS.get_or_init(|| Mutex::new(Vec::new()))
-}
-
-/// SIGKILLs every player this process started. Called on the way out of `main`.
-pub fn kill_players() {
-    for player in players().lock().unwrap().iter() {
-        kill(player);
-    }
-}
-
-/// `Child::kill` wants it mutable, and the lock is the same one the registry
-/// takes — held only for the call, never across a write.
-fn kill(player: &Player) {
-    if let Ok(mut player) = player.lock() {
-        let _ = player.kill();
-    }
-}
-
-/// A running ffplay, fed from a channel so a slow player never blocks parsing.
-pub struct PlayerSink {
-    label: &'static str,
-    tx: Sender<Vec<u8>>,
-    /// Set the first time a push fails. The player dying takes the channel with
-    /// it, and every later frame would otherwise print the same complaint.
-    dead: AtomicBool,
-    /// Set the first time the queue is full. Dropping is the right behaviour for
-    /// a live stream, but it is still worth knowing it is happening.
-    dropped: AtomicBool,
-}
-
-impl PlayerSink {
-    /// `header` is written once before the first payload — see `wav_header`.
-    /// Owned, because it moves onto the blocking task that owns stdin.
-    pub fn spawn(
-        program: &Path,
-        args: &[String],
-        header: Option<Vec<u8>>,
-        label: &'static str,
-    ) -> Result<Self, IoError> {
-        let mut child = Command::new(program)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|e| IoError::new(e.kind(), format!("failed to start ffplay: {e}")))?;
-
-        let mut stdin = child.stdin.take().expect("stdin was piped");
-        let child: Player = Arc::new(Mutex::new(child));
-        players().lock().unwrap().push(Arc::clone(&child));
-        let capacity = if label == "video" {
-            VIDEO_QUEUE
-        } else {
-            AUDIO_QUEUE
-        };
-        let (tx, mut rx) = channel::<Vec<u8>>(capacity);
-
-        tokio::task::spawn_blocking(move || {
-            if let Some(h) = header {
-                if let Err(e) = stdin.write_all(&h).and_then(|_| stdin.flush()) {
-                    eprintln!("[{label}] ffplay stdin closed on header: {e}");
-                    kill(&child);
-                    return;
-                }
-            }
-            while let Some(bytes) = rx.blocking_recv() {
-                if let Err(e) = stdin.write_all(&bytes).and_then(|_| stdin.flush()) {
-                    eprintln!("[{label}] ffplay stdin closed: {e}");
-                    break;
-                }
-            }
-            kill(&child);
-        });
-
-        Ok(Self {
-            label,
-            tx,
-            dead: AtomicBool::new(false),
-            dropped: AtomicBool::new(false),
-        })
-    }
-}
-
-impl MediaSink for PlayerSink {
-    fn push(&self, bytes: Vec<u8>) {
-        // `CP2AA_DUMP_VIDEO=/tmp/carplay.h264` writes the annex-B stream to disk
-        // as it goes. Playing that file settles whether the bytes are wrong or
-        // the player's options are.
-        if self.label == "video" {
-            if let Some(path) = video_dump() {
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-                {
-                    let _ = f.write_all(&bytes);
-                }
-            }
-        }
-        match self.tx.try_send(bytes) {
-            Ok(()) => {}
-            // The player exited; the receiver is gone for good.
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                if !self.dead.swap(true, Ordering::Relaxed) {
-                    eprintln!(
-                        "[{}] ffplay is gone — did it fail to open a window? \
-                         Further frames are dropped silently.",
-                        self.label
-                    );
-                }
-            }
-            // Full: the player is behind. Skipping is better than queueing,
-            // which is how several seconds of latency built up unnoticed.
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                if !self.dropped.swap(true, Ordering::Relaxed) {
-                    eprintln!("[{}] player is behind; dropping to stay live", self.label);
-                }
-            }
-        }
-    }
-}
-
-/// What the audio pipeline agreed to deliver, which decides ffmpeg's `-f`.
+/// What the audio pipeline agreed to deliver, which decides how the frames are
+/// framed for whoever decodes them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioCodec {
-    /// 16-bit big-endian PCM. Only ever offered over wired CarPlay.
+    /// 16-bit PCM, already swapped to little-endian for the consumer.
     Pcm { rate: u32, channels: u16 },
-    /// AAC-LC frames, which ffmpeg wants wrapped in ADTS.
+    /// Raw AAC-LC frames with no ADTS header: the browser is told the framing
+    /// separately, so an ADTS header would only be in the way.
     AacLc { rate: u32, channels: u16 },
     /// Raw Opus frames.
     Opus { rate: u32, channels: u16 },
@@ -217,6 +51,14 @@ impl AudioCodec {
             Self::Pcm { rate, .. } => *rate,
             Self::AacLc { rate, .. } => *rate,
             Self::Opus { rate, .. } => *rate,
+        }
+    }
+
+    pub fn channels(&self) -> u16 {
+        match self {
+            Self::Pcm { channels, .. } => *channels,
+            Self::AacLc { channels, .. } => *channels,
+            Self::Opus { channels, .. } => *channels,
         }
     }
 
@@ -262,139 +104,55 @@ impl AudioCodec {
     }
 }
 
-/// The two ffplay command lines. Kept as data so they can be printed verbatim,
-/// which is the fastest way to debug a pipeline you cannot see.
-pub struct Pipelines {
-    pub video: Vec<String>,
-    pub audio: Vec<String>,
-    /// Written ahead of the audio samples. Raw PCM has no self-describing
-    /// header, and ffplay refuses the `-ar` / `-ac` / `-channels` options that
-    /// would otherwise tell it what it is looking at — so we supply one.
-    pub audio_header: Option<Vec<u8>>,
-}
-
-/// A RIFF/WAVE header for raw PCM, with the sizes left open-ended so a stream
-/// of unknown length can follow it.
-fn wav_header(rate: u32, channels: u16, bits: u16) -> Vec<u8> {
-    let block_align = channels * bits / 8;
-    let byte_rate = rate * block_align as u32;
-    // Largest value that fits: a pipe has no seekable end to report.
-    let data_len: u32 = 0x7fff_ffff;
-
-    let mut h = Vec::with_capacity(44);
-    h.extend_from_slice(b"RIFF");
-    h.extend_from_slice(&(data_len.wrapping_add(36)).to_le_bytes());
-    h.extend_from_slice(b"WAVE");
-    h.extend_from_slice(b"fmt ");
-    h.extend_from_slice(&16u32.to_le_bytes());
-    h.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    h.extend_from_slice(&channels.to_le_bytes());
-    h.extend_from_slice(&rate.to_le_bytes());
-    h.extend_from_slice(&byte_rate.to_le_bytes());
-    h.extend_from_slice(&block_align.to_le_bytes());
-    h.extend_from_slice(&bits.to_le_bytes());
-    h.extend_from_slice(b"data");
-    h.extend_from_slice(&data_len.to_le_bytes());
-    h
-}
-
-impl Pipelines {
-    /// Two ffplay command lines, each reading one elementary stream from stdin.
+/// One thing a stream produced, on its way to whichever consumer asked for it.
+#[derive(Debug)]
+pub enum StreamEvent {
+    /// A video stream's codec description, sent once before any frame.
     ///
-    /// `window` is the size to open the video window at, in whatever units the
-    /// player's SDL takes them for. Left unset it opens at the backing pixel
-    /// count, which on a HiDPI display is twice the size it should be — and
-    /// since those units are points there, halving it halves the window.
-    pub fn build(codec: AudioCodec, fps: u32, window: (u32, u32), hevc: bool) -> Self {
-        let video_demuxer = if hevc { "hevc" } else { "h264" };
-        let video = vec![
-            "-hide_banner".into(),
-            // Not `warning`: libswscale prints "deprecated pixel format used"
-            // on the first frame and, at 60 fps with the banner gone, that one
-            // line is the only thing the player ever says. Real decode errors
-            // are still reported — they are `error`, not `warning`.
-            "-loglevel".into(),
-            "error".into(),
-            // As plain as it gets, deliberately. Dumping the same bytes to a file
-            // and playing that works with no options at all, so the bytes are
-            // fine — what broke it on stdin was the tuning: probesize,
-            // analyzeduration, nobuffer, low_delay and framedrop all assume they
-            // can look ahead or hold data back, which a pipe cannot do. Latency
-            // tuning can come back once there is a picture to tune.
-            //
-            // The demuxer has to match what we asked the phone for: an annex-B
-            // stream carries no headers saying which codec it is.
-            "-f".into(),
-            video_demuxer.into(),
-            "-framerate".into(),
-            fps.to_string(),
-            "-i".into(),
-            "pipe:0".into(),
-            "-x".into(),
-            window.0.to_string(),
-            "-y".into(),
-            window.1.to_string(),
-        ];
-
-        // The rate and channel count are bound per branch below: WAV needs them
-        // in its header, the framed codecs do not need them at all.
-        let input_fmt = match codec {
-            AudioCodec::Pcm { .. } => "s16be",
-            AudioCodec::AacLc { .. } => "aac",
-            AudioCodec::Opus { .. } => "opus",
-        };
-        // WAV carries the rate and channel count itself, so ffplay needs no
-        // format options at all — which is the only way past its refusal to
-        // accept them for a raw stream. AAC and Opus are self-describing.
-        let (audio, audio_header) = match codec {
-            AudioCodec::Pcm { rate, channels } => (
-                vec![
-                    "-hide_banner".into(),
-                    "-loglevel".into(),
-                    "error".into(),
-                    // Sound only — a window here would just be an empty box.
-                    "-nodisp".into(),
-                    // Low latency is safe here: with no picture there is no
-                    // scaler to trip over, and these keep the player from
-                    // holding samples back the way it does for a file.
-                    "-probesize".into(),
-                    "32".into(),
-                    "-analyzeduration".into(),
-                    "0".into(),
-                    "-i".into(),
-                    "pipe:0".into(),
-                    "-fflags".into(),
-                    "nobuffer".into(),
-                ],
-                Some(wav_header(rate, channels, 16)),
-            ),
-            _ => (
-                vec![
-                    "-hide_banner".into(),
-                    "-loglevel".into(),
-                    "error".into(),
-                    "-nodisp".into(),
-                    "-f".into(),
-                    input_fmt.into(),
-                    "-i".into(),
-                    "pipe:0".into(),
-                    "-fflags".into(),
-                    "nobuffer".into(),
-                ],
-                None,
-            ),
-        };
-
-        Self {
-            video,
-            audio,
-            audio_header,
-        }
-    }
+    /// Both shapes are carried because the two consumers want different ones and
+    /// neither can cheaply rebuild the other: `codec_data` is the raw avcC /
+    /// hvcC record, which is what WebCodecs wants as its decoder `description`,
+    /// while `parameter_sets` is the same information as annex-B chunks, which
+    /// is what a plain elementary stream needs.
+    VideoConfig {
+        codec: VideoCodec,
+        codec_data: Vec<u8>,
+        parameter_sets: Vec<Vec<u8>>,
+    },
+    /// One access unit as annex-B, and whether it is a keyframe.
+    VideoFrame { keyframe: bool, data: Vec<u8> },
+    /// The screen stream opened or closed. The browser ignores it today; it is
+    /// what the head unit would need to stop waiting for a picture.
+    ScreenActive(bool),
+    /// An audio stream's format. `name` is the phone's own `audioType` from the
+    /// SETUP — `media`, `telephony`, `speechRecognition` — which the browser
+    /// shows as one mixer channel per name.
+    AudioConfig {
+        stream_type: u8,
+        codec: AudioCodec,
+        name: String,
+    },
+    /// One audio frame. `timestamp_us` is the phone's RTP sample counter turned
+    /// into microseconds, the only clock a browser has to schedule against.
+    AudioPacket {
+        stream_type: u8,
+        timestamp_us: u64,
+        data: Vec<u8>,
+    },
+    AudioStopped { stream_type: u8 },
 }
 
-/// How many frames may wait for the head unit. Bounded and dropped past, for
-/// the same reason the player's queue is.
+/// Wherever a decoded stream ends up.
+///
+/// Never blocks: both implementations drop instead, because a live stream should
+/// glitch rather than fall behind, and a consumer that is gone for good says so
+/// once instead of forever.
+pub trait MediaSink: Send + Sync {
+    fn push(&self, event: StreamEvent);
+}
+
+/// How many frames may wait for the head unit. Bounded and dropped past, so a
+/// head unit that is behind glitches instead of accumulating latency.
 const AA_BACKLOG: usize = 256;
 
 /// The Android Auto end of the bridge.
@@ -460,7 +218,7 @@ impl Default for AaOutlet {
     }
 }
 
-/// A stream on its way to the head unit.
+/// A stream on its way to the head unit, as one continuous elementary stream.
 pub struct AaSink {
     label: &'static str,
     /// 0 until the handshake says which channel this is.
@@ -488,7 +246,31 @@ impl AaSink {
 }
 
 impl MediaSink for AaSink {
-    fn push(&self, bytes: Vec<u8>) {
+    fn push(&self, event: StreamEvent) {
+        match event {
+            // A head unit reads an annex-B elementary stream, so each parameter
+            // set goes out on its own ahead of the frames that reference it. The
+            // raw config record is for decoders that are told out of band and is
+            // dropped here.
+            StreamEvent::VideoConfig { parameter_sets, .. } => {
+                for parameter_set in parameter_sets {
+                    self.send(parameter_set);
+                }
+            }
+            StreamEvent::VideoFrame { data, .. } => self.send(data),
+            StreamEvent::AudioPacket { data, .. } => self.send(data),
+            // Nothing the head unit acts on yet: it learns the audio format from
+            // its own negotiation, and the screen-open signal has no channel of
+            // its own.
+            StreamEvent::ScreenActive(_)
+            | StreamEvent::AudioConfig { .. }
+            | StreamEvent::AudioStopped { .. } => {}
+        }
+    }
+}
+
+impl AaSink {
+    fn send(&self, bytes: Vec<u8>) {
         let ch = self.ch.load(Ordering::Relaxed);
         if ch == 0 {
             if !self.no_channel.swap(true, Ordering::Relaxed) {
