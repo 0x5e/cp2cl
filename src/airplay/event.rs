@@ -67,6 +67,14 @@ impl EventSink {
     /// Hands over the write half of the connection the phone opened. Until that
     /// arrives there is nowhere to put a report.
     pub(crate) async fn attach_writer(&self, writer: OwnedWriteHalf) {
+        // A new connection means the phone starts counting from zero again, so
+        // ours has to as well or it cannot open what we send. The wired phone
+        // connects once and never notices; the wireless one reconnects after
+        // the switch to Wi-Fi, and every report after that would be dropped.
+        let was = std::mem::replace(&mut *self.counter.lock().await, 0);
+        if was != 0 {
+            println!("[event] new event channel; write counter reset from {was}");
+        }
         *self.writer.lock().await = Some(writer);
     }
 
@@ -216,18 +224,12 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
         use commands::*;
 
         match cmd {
-            Command::Play => self.hid_report(MEDIA_HID_UID, vec![MEDIA_PLAY]).await?,
-            Command::Pause => self.hid_report(MEDIA_HID_UID, vec![MEDIA_PAUSE]).await?,
-            Command::PlayPause => {
-                self.hid_report(MEDIA_HID_UID, vec![MEDIA_PLAY_PAUSE])
-                    .await?
-            }
-            Command::Next => self.hid_report(MEDIA_HID_UID, vec![MEDIA_NEXT]).await?,
-            Command::Prev => self.hid_report(MEDIA_HID_UID, vec![MEDIA_PREV]).await?,
-            Command::NavGuidance => {
-                self.hid_report(MEDIA_HID_UID, vec![MEDIA_NAV_GUIDANCE])
-                    .await?
-            }
+            Command::Play => self.media_momentary(MEDIA_PLAY).await?,
+            Command::Pause => self.media_momentary(MEDIA_PAUSE).await?,
+            Command::PlayPause => self.media_momentary(MEDIA_PLAY_PAUSE).await?,
+            Command::Next => self.media_momentary(MEDIA_NEXT).await?,
+            Command::Prev => self.media_momentary(MEDIA_PREV).await?,
+            Command::NavGuidance => self.media_momentary(MEDIA_NAV_GUIDANCE).await?,
             // Every button is momentary: pressed report, then an all-zero one.
             // LIVI's `sendKnob` does this by default, and a button that is never
             // released does not register as a press at all — `home` doing
@@ -274,6 +276,17 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
             Command::Quit => {}
         }
         Ok(())
+    }
+
+    /// A media key: the index, then the all-zero report that releases it.
+    ///
+    /// The descriptor is an array-typed consumer control whose index 0 is
+    /// "unassigned", so a key that is never released stays down and the phone
+    /// reads the next report carrying the same value as no press at all. LIVI's
+    /// `sendMedia` sends both reports for the same reason.
+    async fn media_momentary(&mut self, index: u8) -> std::io::Result<()> {
+        self.hid_report(MEDIA_HID_UID, vec![index]).await?;
+        self.hid_report(MEDIA_HID_UID, vec![0]).await
     }
 
     async fn knob(&mut self, buttons: u8, x: i8, y: i8, wheel: i8) -> std::io::Result<()> {
