@@ -29,68 +29,136 @@ use super::screen::{self, VideoReceiver};
 use crate::config::Config;
 use crate::sink::{AudioCodec, MediaSink};
 
-/// How much audio the phone keeps buffered before playing it. Subtracted from
-/// the reported position so `sampleTime` describes what the listener is hearing
-/// now, not what we last received.
-const PLAYOUT_LATENCY_SEC: f64 = 1.0;
-
 /// Every /auth-setup request starts with this byte.
 const MFISAP_VERSION: u8 = 0x01;
 /// Timing-port packet types (RTCP-shaped, not NTP): request and reply.
 const TIMING_REQUEST: u8 = 210;
 const TIMING_RESPONSE: u8 = 211;
 
-/// Enough of an audio clock to answer `/feedback`.
+/// Every audio stream the phone has open, as far as `/feedback` is concerned.
 ///
 /// The phone asks once a second and expects the playback position of every
-/// active audio stream. An empty reply once audio is running tells it the stream
-/// is dead — it stops sending video and tears the session down shortly after.
+/// active stream. A stream counts from the moment it is set up, not from the
+/// moment its first packet lands: an empty reply while audio is running reads
+/// as "that stream died", and the phone then tears it down every few seconds
+/// until sound never comes back.
 #[derive(Default)]
 pub struct AudioClock {
+    /// Handed out per registration so a stream that dies cannot remove the
+    /// entry that replaced it.
+    next_id: u64,
+    streams: Vec<AudioStream>,
+}
+
+struct AudioStream {
+    id: u64,
     stream_type: i64,
-    sample_rate: u32,
     connection_id: i64,
+    sample_rate: u32,
+    /// The phone's own number for how far the sound lags the samples it has
+    /// already sent — its jitter buffer, in milliseconds. Subtracted from the
+    /// reported position so `sampleTime` describes what the listener is hearing
+    /// now rather than what we last received.
+    playout_latency_ms: u64,
     /// RTP timestamp of the first packet, and when it arrived.
     origin: Option<(u32, std::time::Instant)>,
 }
 
 impl AudioClock {
-    pub fn start(&mut self, stream_type: i64, connection_id: i64, sample_rate: u32) {
-        self.stream_type = stream_type;
-        self.connection_id = connection_id;
-        self.sample_rate = sample_rate;
-        self.origin = None;
+    /// Registers a stream and hands back a handle to it. Setting up the same
+    /// type again replaces the entry: the phone re-opens audio on every track
+    /// change rather than reusing the old stream.
+    pub fn open(
+        &mut self,
+        stream_type: i64,
+        connection_id: i64,
+        sample_rate: u32,
+        playout_latency_ms: u64,
+    ) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.streams.retain(|s| s.stream_type != stream_type);
+        self.streams.push(AudioStream {
+            id,
+            stream_type,
+            connection_id,
+            sample_rate,
+            playout_latency_ms,
+            origin: None,
+        });
+        id
     }
 
-    pub fn note(&mut self, rtp_timestamp: u32) {
-        if self.sample_rate == 0 {
+    /// Forgets one stream, by the handle its setup returned.
+    pub fn close(&mut self, id: u64) {
+        self.streams.retain(|s| s.id != id);
+    }
+
+    /// Forgets whichever stream carries this type, which is how the phone names
+    /// it in a teardown.
+    pub fn close_type(&mut self, stream_type: i64) {
+        self.streams.retain(|s| s.stream_type != stream_type);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.streams.is_empty()
+    }
+
+    /// Anchors a stream's playout position on its first packet. Every later
+    /// packet carries a counter that keeps advancing on its own, so the first
+    /// one is all that has to be remembered.
+    pub fn note(&mut self, id: u64, rtp_timestamp: u32) {
+        let Some(s) = self.streams.iter_mut().find(|s| s.id == id) else {
             return;
-        }
-        if self.origin.is_none() {
-            self.origin = Some((rtp_timestamp, std::time::Instant::now()));
+        };
+        if s.sample_rate > 0 && s.origin.is_none() {
+            s.origin = Some((rtp_timestamp, std::time::Instant::now()));
         }
     }
 
-    /// Whether there is something worth reporting.
-    pub fn active(&self) -> bool {
-        self.sample_rate > 0 && self.origin.is_some()
+    /// One entry per open stream, in the shape `/feedback` wants. Everything
+    /// past the sample rate only means something once the first packet has
+    /// placed the stream in time; announcing the stream without them is the
+    /// whole point, because an empty reply reads as "gone".
+    pub fn report(&self, timestamp: u64) -> Vec<Dictionary> {
+        self.streams
+            .iter()
+            .map(|s| {
+                let mut entry = Dictionary::new();
+                entry.insert("type".into(), Value::Integer(s.stream_type.into()));
+                entry.insert(
+                    "sampleRate".into(),
+                    Value::Integer((s.sample_rate as i64).into()),
+                );
+                if let Some(at) = s.sample_time() {
+                    entry.insert(
+                        "streamConnectionID".into(),
+                        Value::Integer(s.connection_id.into()),
+                    );
+                    // The one field that has to come from the steered clock:
+                    // the phone places `sampleTime` against it.
+                    entry.insert("timestamp".into(), Value::Integer(timestamp.into()));
+                    entry.insert("sampleTime".into(), Value::Integer(at.into()));
+                }
+                entry
+            })
+            .collect()
     }
 
+    /// What is registered, for the once-only log line.
+    pub fn summary(&self) -> String {
+        let types: Vec<i64> = self.streams.iter().map(|s| s.stream_type).collect();
+        let anchored = self.streams.iter().filter(|s| s.origin.is_some()).count();
+        format!("{types:?} ({anchored} anchored)")
+    }
+}
+
+impl AudioStream {
     /// First sample plus real time elapsed since, less the playout buffer.
-    pub fn sample_time(&self) -> Option<u64> {
+    fn sample_time(&self) -> Option<u64> {
         let (first, started) = self.origin?;
-        let elapsed = started.elapsed().as_secs_f64() - PLAYOUT_LATENCY_SEC;
+        let elapsed = started.elapsed().as_secs_f64() - self.playout_latency_ms as f64 / 1000.0;
         Some(first as u64 + (elapsed.max(0.0) * self.sample_rate as f64) as u64)
-    }
-
-    pub fn stream_type(&self) -> i64 {
-        self.stream_type
-    }
-    pub fn sample_rate(&self) -> u32 {
-        self.sample_rate
-    }
-    pub fn connection_id(&self) -> i64 {
-        self.connection_id
     }
 }
 
@@ -175,13 +243,14 @@ pub async fn serve(listener: TcpListener, shared: Shared) {
                 cipher_write: None,
                 next_port: NextPort::default(),
                 streams: HashMap::new(),
+                pumps: HashMap::new(),
                 in_buf: Vec::new(),
                 frame_buf: Vec::new(),
                 plain_buf: Vec::new(),
                 read_ctr: 0,
                 write_ctr: 0,
                 cseq: 0,
-                feedback_n: 0,
+                feedback_log: String::new(),
             };
             if let Err(e) = session.run(socket).await {
                 println!("[airplay] {peer} ended: {e}");
@@ -211,6 +280,18 @@ impl NextPort {
     }
 }
 
+/// One open stream: the task reading it, and a socket held on the phone's
+/// behalf. Aborting the task is the only way a UDP stream ever ends — nothing
+/// in the protocol tells the socket the phone has stopped sending, so without
+/// it the task would sit in `recv` for the life of the process holding a port.
+struct Pump {
+    task: tokio::task::JoinHandle<()>,
+    /// The stream's control port, bound but never read: leaving it closed makes
+    /// the phone's RTCP bounce back as ICMPv6 port-unreachable, and an open
+    /// socket nobody listens on is the cheapest way to answer "nothing to say".
+    _control: Option<UdpSocket>,
+}
+
 struct Session {
     cfg: Arc<Config>,
     /// What a head unit asked for, if one has. Read when answering `/info`.
@@ -233,6 +314,9 @@ struct Session {
     next_port: NextPort,
     /// stream id -> port, kept only for logging.
     streams: HashMap<u64, u16>,
+    /// Open streams by the type the phone names them with. Teardown looks them
+    /// up here to close what it says it is closing.
+    pumps: HashMap<i64, Pump>,
     in_buf: Vec<u8>,
     /// Sealed frames waiting to be complete, once the channel is encrypted.
     frame_buf: Vec<u8>,
@@ -243,8 +327,9 @@ struct Session {
     read_ctr: u64,
     write_ctr: u64,
     cseq: u32,
-    /// Only for throttling the /feedback log line.
-    feedback_n: u32,
+    /// The last `/feedback` summary printed, so the line only appears when the
+    /// set of streams changes rather than once a second.
+    feedback_log: String,
 }
 
 impl Session {
@@ -369,13 +454,7 @@ impl Session {
             // Worth reading: the phone usually names the streams it is dropping,
             // and a session-level teardown right after RECORD means it gave up.
             "TEARDOWN" => {
-                match Self::plist_body(&req.body) {
-                    Ok(d) if !d.is_empty() => println!("[airplay] TEARDOWN body: {d:?}"),
-                    _ => println!(
-                        "[airplay] TEARDOWN body (not a plist): {}",
-                        hex::encode(&req.body[..req.body.len().min(48)])
-                    ),
-                }
+                self.teardown(req).await;
                 Ok(Response::new(200))
             }
             "FLUSH" | "PAUSE" => Ok(Response::new(200)),
@@ -458,52 +537,65 @@ impl Session {
         );
     }
 
+    /// Closes the streams the phone names. It names them by type, and it opens
+    /// a fresh one for every track change, so this fires constantly during
+    /// normal use — leaving it as a no-op leaked a port, a socket and a task
+    /// per song, and kept `/feedback` reporting a stream that was already gone.
+    async fn teardown(&mut self, req: &Request) {
+        let dict = Self::plist_body(&req.body);
+        let named = match &dict {
+            Ok(d) if !d.is_empty() => {
+                println!("[airplay] TEARDOWN body: {d:?}");
+                d.get("streams").and_then(|v| v.as_array())
+            }
+            _ => {
+                println!(
+                    "[airplay] TEARDOWN body (not a plist): {}",
+                    hex::encode(&req.body[..req.body.len().min(48)])
+                );
+                None
+            }
+        };
+
+        for stream_type in named
+            .into_iter()
+            .flatten()
+            .filter_map(|s| s.as_dictionary()?.get("type")?.as_signed_integer())
+        {
+            self.audio_clock.lock().await.close_type(stream_type);
+            if let Some(pump) = self.pumps.remove(&stream_type) {
+                pump.task.abort();
+            }
+            println!("[airplay] stream {stream_type} torn down");
+        }
+    }
+
     /// The media-clock reply. Silence here is what made the phone stop sending
     /// video a second after the audio stream opened.
     async fn feedback(&mut self) -> Result<Response, String> {
         let clock = self.audio_clock.lock().await;
-        if !clock.active() {
+        if clock.is_empty() {
             return Ok(Response::new(200));
         }
-        let mut stream = Dictionary::new();
-        stream.insert("type".into(), Value::Integer(clock.stream_type().into()));
-        stream.insert(
-            "sampleRate".into(),
-            Value::Integer((clock.sample_rate() as i64).into()),
-        );
-        stream.insert(
-            "streamConnectionID".into(),
-            Value::Integer(clock.connection_id().into()),
-        );
-        stream.insert(
-            "timestamp".into(),
-            // In the phone's domain, not ours: it is what places `sampleTime`
-            // against the audio the phone sent. `AudioClock` counts samples, so
-            // this is the one field that has to come from the steered clock.
-            Value::Integer(self.timing.lock().await.now_u64().into()),
-        );
-        if let Some(at) = clock.sample_time() {
-            stream.insert("sampleTime".into(), Value::Integer(at.into()));
-        }
+        let now = self.timing.lock().await.now_u64();
+        let streams: Vec<Value> = clock
+            .report(now)
+            .into_iter()
+            .map(Value::Dictionary)
+            .collect();
 
-        let at = clock.sample_time();
         let mut body = Dictionary::new();
-        body.insert(
-            "streams".into(),
-            Value::Array(vec![Value::Dictionary(stream)]),
-        );
+        body.insert("streams".into(), Value::Array(streams));
         let plist = to_binary(&Value::Dictionary(body)).map_err(|e| e.to_string())?;
 
-        // Once, to show the reported position is advancing; after that it is
-        // once-a-second chatter like the request it answers.
-        self.feedback_n += 1;
-        if self.feedback_n == 1 {
-            println!(
-                "[airplay] /feedback now reporting type {} at {} Hz, sampleTime {:?}",
-                clock.stream_type(),
-                clock.sample_rate(),
-                at
-            );
+        // Everything but the rate is reported only once the stream is anchored,
+        // so the summary is what says whether the phone is being told about a
+        // stream at all, and whether it knows where in it we are. Printed on
+        // change — it is otherwise once-a-second chatter like the request.
+        let summary = clock.summary();
+        if self.feedback_log != summary {
+            println!("[airplay] /feedback streams: {summary}");
+            self.feedback_log = summary;
         }
         Ok(Response::new(200).plist(plist))
     }
@@ -698,13 +790,14 @@ impl Session {
                         .await
                         .map_err(|e| e.to_string())?;
                     let sink = self.video_sink.clone();
-                    tokio::spawn(async move {
+                    let task = tokio::spawn(async move {
                         let Ok((socket, _)) = listener.accept().await else {
                             return;
                         };
                         println!("[airplay] video stream attached");
                         Self::pump_video(socket, key, sink).await;
                     });
+                    self.open_pump(110, task, None);
                     self.streams.insert(stream_id as u64, port);
                     let mut entry = Dictionary::new();
                     entry.insert("type".into(), Value::Integer(110.into()));
@@ -722,23 +815,43 @@ impl Session {
                         .and_then(|v| v.as_signed_integer())
                         .unwrap_or(0);
                     let codec = AudioCodec::from_format(fmt);
+                    let stream_type = type_.unwrap_or(0);
                     println!(
-                        "[airplay] audio stream type {} (format 0x{fmt:x} -> {codec:?})",
-                        type_.unwrap_or(0)
+                        "[airplay] audio stream type {stream_type} (format 0x{fmt:x} -> {codec:?})"
                     );
                     {
                         *self.codec.lock().await = codec;
                     }
-                    self.audio_clock
+                    // The phone's jitter buffer: how far the sound lags the
+                    // samples it has already handed us, and so what `/feedback`
+                    // has to subtract. Not sending it means there is none.
+                    let latency = table
+                        .get("audioLatencyMs")
+                        .and_then(|v| v.as_signed_integer())
+                        .filter(|v| *v > 0)
+                        .map(|v| v as u64)
+                        .unwrap_or(0);
+                    let id = self
+                        .audio_clock
                         .lock()
                         .await
-                        .start(type_.unwrap_or(0), stream_id, codec.rate());
+                        .open(stream_type, stream_id, codec.rate(), latency);
                     let sink = self.audio_sink.clone();
                     let clock = self.audio_clock.clone();
-                    tokio::spawn(async move {
+                    let task = tokio::spawn(async move {
                         println!("[airplay] audio stream attached");
-                        Self::pump_audio(socket, key, codec, sink, clock).await;
+                        Self::pump_audio(socket, key, codec, sink, clock, id).await;
                     });
+                    // Bound but never read; a failure here is not worth failing
+                    // the whole setup over.
+                    let control = match UdpSocket::bind(("::", control_port)).await {
+                        Ok(s) => Some(s),
+                        Err(e) => {
+                            eprintln!("[airplay] control port {control_port} not bound: {e}");
+                            None
+                        }
+                    };
+                    self.open_pump(stream_type, task, control);
                     self.streams.insert(stream_id as u64, port);
                     let mut entry = Dictionary::new();
                     entry.insert("type".into(), Value::Integer(type_.unwrap().into()));
@@ -768,6 +881,24 @@ impl Session {
         body.insert("streams".into(), Value::Array(replies));
         let plist = to_binary(&Value::Dictionary(body)).map_err(|e| e.to_string())?;
         Ok(Response::new(200).plist(plist))
+    }
+
+    /// Registers a running stream under the type the phone will name it with.
+    /// A type that is already open is replaced rather than left to rot, because
+    /// the phone may re-open a stream without tearing the old one down.
+    fn open_pump(
+        &mut self,
+        stream_type: i64,
+        task: tokio::task::JoinHandle<()>,
+        control: Option<UdpSocket>,
+    ) {
+        let pump = Pump {
+            task,
+            _control: control,
+        };
+        if let Some(old) = self.pumps.insert(stream_type, pump) {
+            old.task.abort();
+        }
     }
 
     fn plist_body(bytes: &[u8]) -> Result<Dictionary, String> {
@@ -819,6 +950,7 @@ impl Session {
         codec: AudioCodec,
         sink: Arc<dyn MediaSink>,
         clock: Arc<Mutex<AudioClock>>,
+        id: u64,
     ) {
         let rx = AudioReceiver::new(key, codec, sink);
         let mut buf = [0u8; 2048];
@@ -830,7 +962,7 @@ impl Session {
                     // what /feedback reports back as the playout position.
                     if n >= audio::RTP_HEADER_LEN {
                         let ts = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
-                        clock.lock().await.note(ts);
+                        clock.lock().await.note(id, ts);
                     }
                     rx.feed(&buf[..n]);
                     packets += 1;
@@ -845,6 +977,10 @@ impl Session {
                 Err(_) => break,
             }
         }
+        // Whatever ended it — the phone tearing the stream down, or the socket
+        // failing — stop announcing it. A stream that is gone but still named
+        // in `/feedback` is one the phone keeps asking about.
+        clock.lock().await.close(id);
         println!("[airplay] audio stream closed after {packets} packets");
     }
 
