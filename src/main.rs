@@ -2,30 +2,44 @@
 //!
 //! Nothing here draws anything itself. Three pieces run concurrently:
 //!
-//! * a wired session watcher that carries iAP2 over USB and starts CarPlay,
+//! * a session watcher that carries iAP2 over USB — or over Bluetooth, when
+//!   `CP2AA_WIRELESS` is set — and starts CarPlay,
 //! * an airplay receiver that accepts the phone's return call and decrypts its
 //!   media into two ffplay processes,
 //! * a stdin reader turning keyboard lines into HID reports.
 
 mod airplay;
+mod bridge;
 mod commands;
 mod config;
 mod session;
 mod sink;
+mod wireless;
+
+// On disk this is `src/aa-client/`, which is not a legal module name, so the
+// path is spelled out. It is the Android Auto *phone* side: not wired to the
+// CarPlay receiver yet, but it lives in the same binary on purpose — the
+// bridge is the point of this program.
+#[path = "aa-client/mod.rs"]
+mod aa_client;
 
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use iap2_mfi::{AuthCoprocessor, local::LocalCoprocessor, NoCoprocessor};
+use iap2_mfi::local::LocalCoprocessor;
+use iap2_mfi::{AuthCoprocessor, NoCoprocessor};
 use livi_runtime::mfi_async::SharedCoprocessor;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
+use crate::aa_client::tls::PhoneIdentity;
+use crate::airplay::clock::SyncedClock;
 use crate::airplay::pairing::Pairings;
 use crate::airplay::{AudioClock, EventSink};
-use crate::config::Config;
-use crate::sink::{AudioCodec, Pipelines, PlayerSink};
+use crate::bridge::Bridge;
+use crate::config::{Config, Sink};
+use crate::sink::{AaOutlet, AudioCodec, MediaSink, Pipelines, PlayerSink};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -39,45 +53,89 @@ async fn main() -> Result<()> {
 
     // Ask for a free port rather than picking one: whatever we get is what gets
     // advertised to the phone, so there is no way for the two to disagree.
-    let listener = TcpListener::bind(("::", 0)).await.context("bind airplay listener")?;
+    let listener = TcpListener::bind(("::", 0))
+        .await
+        .context("bind airplay listener")?;
     let airplay_port = listener.local_addr()?.port() as u32;
     println!("[cp2aa] airplay receiver listening on {airplay_port}");
 
     let codec = AudioCodec::default();
-    let pipelines = Pipelines::build(codec, cfg.fps, cfg.window, cfg.hevc);
-    println!("[cp2aa] playing with {}", cfg.player.program.display());
-    println!(
-        "[cp2aa] {}x{} as {} ({}) in a {}x{} window",
-        cfg.width,
-        cfg.height,
-        if cfg.hevc { "HEVC" } else { "H.264" },
-        if cfg.width_mm > 0 {
-            format!("{}mm wide", cfg.width_mm)
-        } else {
-            "default 200mm wide".into()
-        },
-        cfg.window.0,
-        cfg.window.1
-    );
 
-    // Independent on purpose: the phone may open the screen stream long before
-    // (or without) the audio one, and neither may hold the other back.
-    let video_sink = Arc::new(
-        PlayerSink::spawn(&cfg.player.program, &pipelines.video, None, "video")
-            .with_context(|| format!("start video player ({:?})", pipelines.video))?,
-    );
-    let audio_sink = Arc::new(
-        PlayerSink::spawn(
-            &cfg.player.program,
-            &pipelines.audio,
-            pipelines.audio_header.clone(),
-            "audio",
-        )
-        .with_context(|| format!("start audio player ({:?})", pipelines.audio))?,
-    );
+    // Two ways out of here: played on this machine, or sent to a head unit
+    // that thinks we are an Android phone. The bytes are identical either way,
+    // so nothing downstream knows which one it got.
+    let outlet: Option<Arc<AaOutlet>> = (cfg.sink == Sink::Aa).then(|| Arc::new(AaOutlet::new()));
+    let (video_sink, audio_sink): (Arc<dyn MediaSink>, Arc<dyn MediaSink>) = match &outlet {
+        None => {
+            let pipelines = Pipelines::build(codec, cfg.fps, cfg.window, cfg.hevc);
+            println!("[cp2aa] playing with {}", cfg.player.program.display());
+            println!(
+                "[cp2aa] {}x{} as {} ({}) in a {}x{} window",
+                cfg.width,
+                cfg.height,
+                if cfg.hevc { "HEVC" } else { "H.264" },
+                if cfg.width_mm > 0 {
+                    format!("{}mm wide", cfg.width_mm)
+                } else {
+                    "default 200mm wide".into()
+                },
+                cfg.window.0,
+                cfg.window.1
+            );
+            // Independent on purpose: the phone may open the screen stream long
+            // before (or without) the audio one, and neither may hold the other
+            // back.
+            (
+                Arc::new(
+                    PlayerSink::spawn(&cfg.player.program, &pipelines.video, None, "video")
+                        .with_context(|| format!("start video player ({:?})", pipelines.video))?,
+                ),
+                Arc::new(
+                    PlayerSink::spawn(
+                        &cfg.player.program,
+                        &pipelines.audio,
+                        pipelines.audio_header.clone(),
+                        "audio",
+                    )
+                    .with_context(|| format!("start audio player ({:?})", pipelines.audio))?,
+                ),
+            )
+        }
+        Some(outlet) => {
+            println!(
+                "[cp2aa] CP2AA_SINK=aa: streams go to Android Auto instead of being played here"
+            );
+            (outlet.video(), outlet.audio())
+        }
+    };
 
     let pairings = Arc::new(Mutex::new(Pairings::load_or_create(None)?));
     let event_sink = EventSink::new();
+    // What the head unit asks for, once it asks. Read by `GET /info`, written by
+    // the bridge.
+    let screen = Arc::new(std::sync::Mutex::new(None));
+
+    // Started before the iPhone is expected, because it is what tells the iPhone
+    // what to render: a head unit has to be heard from first for its resolution
+    // to reach `/info`.
+    if let Some(outlet) = &outlet {
+        let identity = Arc::new(PhoneIdentity::load_default().with_context(|| {
+            "no Android Auto phone certificate; put android_auto.crt + \
+             android_auto.key in ./aa, or set CP2AA_AA_CERT_DIR"
+        })?);
+        let bridge = Arc::new(Bridge::new(
+            cfg.clone(),
+            identity,
+            outlet.clone(),
+            screen.clone(),
+            event_sink.clone(),
+        ));
+        tokio::spawn(async move {
+            if let Err(e) = bridge.run().await {
+                eprintln!("[aa] transport stopped: {e}");
+            }
+        });
+    }
 
     // Built before the receiver starts because both halves need it: iAP2 to
     // answer the phone's challenge, and airplay to answer /auth-setup.
@@ -91,15 +149,26 @@ async fn main() -> Result<()> {
             video_sink,
             audio_sink,
             audio_codec: Arc::new(Mutex::new(codec)),
+            screen: screen.clone(),
             event_sink: event_sink.clone(),
             mfi: auth.clone(),
             audio_clock: Arc::new(Mutex::new(AudioClock::default())),
+            timing: Arc::new(Mutex::new(SyncedClock::new())),
         },
     ));
 
     tokio::spawn(stdin_loop(event_sink.clone()));
 
-    session::watch(cfg, auth, airplay_port).await;
+    if cfg.wireless {
+        println!(
+            "[cp2aa] wireless: the phone will be told to join {:?} and reach us on \
+             {} port {airplay_port}",
+            cfg.ssid, cfg.wifi_iface
+        );
+        wireless::watch(cfg, auth, airplay_port).await;
+    } else {
+        session::watch(cfg, auth, airplay_port).await;
+    }
     Ok(())
 }
 
@@ -112,7 +181,10 @@ fn mfi_signer(cfg: &Config) -> Result<Box<dyn AuthCoprocessor + Send>> {
     match &cfg.auth_dir {
         Some(dir) => match LocalCoprocessor::load(dir) {
             Ok(signer) => {
-                println!("[cp2aa] local MFi credentials loaded from {}", dir.display());
+                println!(
+                    "[cp2aa] local MFi credentials loaded from {}",
+                    dir.display()
+                );
                 Ok(Box::new(signer))
             }
             Err(e) => Err(anyhow::anyhow!(

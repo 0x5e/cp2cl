@@ -7,4 +7,10 @@ authentication/
 *.p7b
 *.p12
 
+# Android Auto phone certificate, if it is dropped next to the binary.
+aa/
+android_auto.crt
+android_auto.key
+
 .DS_Store
+.workbuddy/

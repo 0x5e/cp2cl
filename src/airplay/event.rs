@@ -18,9 +18,9 @@ use plist::{dictionary::Dictionary, Value};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use super::bplist::to_binary;
-use super::crypto::{SymKey, nonce_counter, seal};
+use super::crypto::{nonce_counter, seal, SymKey};
 use crate::airplay::MAX_PAYLOAD;
-use crate::commands::{self, Command};
+use crate::commands::{self, Command, TouchContact};
 
 pub struct EventChannel<W> {
     write: SymKey,
@@ -30,7 +30,11 @@ pub struct EventChannel<W> {
 
 impl<W: AsyncWrite + Unpin> EventChannel<W> {
     pub fn new(write: SymKey, writer: W) -> Self {
-        Self { write, counter: 0, writer }
+        Self {
+            write,
+            counter: 0,
+            writer,
+        }
     }
 
     pub fn set_counter(&mut self, counter: u64) {
@@ -80,17 +84,21 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
 
     /// Runs one parsed key press, including the release the phone expects.
     pub async fn key(&mut self, cmd: Command) -> std::io::Result<()> {
-        use super::info::{MEDIA_HID_UID, TELEPHONY_HID_UID};
+        use super::info::{MEDIA_HID_UID, TELEPHONY_HID_UID, TOUCH_HID_UID};
         use commands::*;
 
         match cmd {
             Command::Play => self.hid_report(MEDIA_HID_UID, vec![MEDIA_PLAY]).await?,
             Command::Pause => self.hid_report(MEDIA_HID_UID, vec![MEDIA_PAUSE]).await?,
-            Command::PlayPause => self.hid_report(MEDIA_HID_UID, vec![MEDIA_PLAY_PAUSE]).await?,
+            Command::PlayPause => {
+                self.hid_report(MEDIA_HID_UID, vec![MEDIA_PLAY_PAUSE])
+                    .await?
+            }
             Command::Next => self.hid_report(MEDIA_HID_UID, vec![MEDIA_NEXT]).await?,
             Command::Prev => self.hid_report(MEDIA_HID_UID, vec![MEDIA_PREV]).await?,
             Command::NavGuidance => {
-                self.hid_report(MEDIA_HID_UID, vec![MEDIA_NAV_GUIDANCE]).await?
+                self.hid_report(MEDIA_HID_UID, vec![MEDIA_NAV_GUIDANCE])
+                    .await?
             }
             // Every button is momentary: pressed report, then an all-zero one.
             // LIVI's `sendKnob` does this by default, and a button that is never
@@ -109,8 +117,13 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
                 self.knob(0x00, 0, 0, v).await?;
                 self.knob(0x00, 0, 0, 0).await?;
             }
+            Command::Touch(contacts) => {
+                self.hid_report(TOUCH_HID_UID, touch_report(&contacts))
+                    .await?
+            }
             Command::Answer => {
-                self.hid_report(TELEPHONY_HID_UID, vec![PHONE_HOOK_SWITCH]).await?;
+                self.hid_report(TELEPHONY_HID_UID, vec![PHONE_HOOK_SWITCH])
+                    .await?;
                 self.hid_report(TELEPHONY_HID_UID, vec![0]).await?;
             }
             Command::Hangup => {
@@ -142,8 +155,10 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
             Command::Night(on) => self.simple("setNightMode", Value::Boolean(on)).await?,
             Command::Siri => {
                 // press then release; 2 = down, 3 = up
-                self.simple_with("requestSiri", "siriAction", Value::Integer(2.into())).await?;
-                self.simple_with("requestSiri", "siriAction", Value::Integer(3.into())).await?;
+                self.simple_with("requestSiri", "siriAction", Value::Integer(2.into()))
+                    .await?;
+                self.simple_with("requestSiri", "siriAction", Value::Integer(3.into()))
+                    .await?;
             }
             Command::KeyFrame => self.simple("forceKeyFrame", Value::Boolean(true)).await?,
             Command::Quit => {}
@@ -153,7 +168,8 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
 
     async fn knob(&mut self, buttons: u8, x: i8, y: i8, wheel: i8) -> std::io::Result<()> {
         use super::info::KNOB_HID_UID;
-        self.hid_report(KNOB_HID_UID, vec![buttons, x as u8, y as u8, wheel as u8]).await
+        self.hid_report(KNOB_HID_UID, vec![buttons, x as u8, y as u8, wheel as u8])
+            .await
     }
 
     /// Press and release. The matching LIVI call sends the second, all-zero
@@ -189,4 +205,20 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
             other => other.to_ascii_lowercase(),
         }
     }
+}
+
+/// One multitouch input report: a six-byte slot per finger the descriptor
+/// declares — `[index][touch][X LE][Y LE]` — including slots no finger is on,
+/// because the phone identifies a finger by the slot it keeps arriving in.
+/// Mirrors LIVI's `touchReport`, and has to agree with
+/// `info::multitouch_descriptor`.
+fn touch_report(contacts: &[TouchContact]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(contacts.len() * 6);
+    for (slot, c) in contacts.iter().enumerate() {
+        out.push(slot as u8);
+        out.push(u8::from(c.down));
+        out.extend_from_slice(&c.x.to_le_bytes());
+        out.extend_from_slice(&c.y.to_le_bytes());
+    }
+    out
 }

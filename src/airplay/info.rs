@@ -56,7 +56,10 @@ pub fn build(static_: &Static) -> Result<Vec<u8>, plist::Error> {
     d.insert("model".into(), Value::String("cp2aa".into()));
     d.insert("manufacturer".into(), Value::String("cp2aa".into()));
     d.insert("deviceID".into(), Value::String(static_.device_id.clone()));
-    d.insert("bluetoothIDs".into(), Value::Array(vec![Value::String(static_.bt_mac.clone())]));
+    d.insert(
+        "bluetoothIDs".into(),
+        Value::Array(vec![Value::String(static_.bt_mac.clone())]),
+    );
     d.insert("name".into(), Value::String(static_.name.clone()));
     d.insert("rightHandDrive".into(), Value::Boolean(false));
     d.insert("keepAliveLowPower".into(), Value::Boolean(false));
@@ -71,7 +74,10 @@ pub fn build(static_: &Static) -> Result<Vec<u8>, plist::Error> {
             Value::String("enhancedRequestCarUI".into()),
         ]),
     );
-    d.insert("displays".into(), Value::Array(vec![display_entry(static_)]));
+    d.insert(
+        "displays".into(),
+        Value::Array(vec![display_entry(static_)]),
+    );
     d.insert("hidDevices".into(), hid_devices(static_));
     if static_.hevc {
         d.insert("hevcInfo".into(), Dictionary::new().into());
@@ -83,10 +89,22 @@ fn resource(id: i64) -> Value {
     let mut d = Dictionary::new();
     d.insert("resourceID".into(), Value::Integer(id.into()));
     d.insert("transferType".into(), Value::Integer(TRANSFER_TAKE.into()));
-    d.insert("transferPriority".into(), Value::Integer(PRIORITY_NICE_TO_HAVE.into()));
-    d.insert("takeConstraint".into(), Value::Integer(CONSTRAINT_ANYTIME.into()));
-    d.insert("borrowConstraint".into(), Value::Integer(CONSTRAINT_ANYTIME.into()));
-    d.insert("unborrowConstraint".into(), Value::Integer(CONSTRAINT_ANYTIME.into()));
+    d.insert(
+        "transferPriority".into(),
+        Value::Integer(PRIORITY_NICE_TO_HAVE.into()),
+    );
+    d.insert(
+        "takeConstraint".into(),
+        Value::Integer(CONSTRAINT_ANYTIME.into()),
+    );
+    d.insert(
+        "borrowConstraint".into(),
+        Value::Integer(CONSTRAINT_ANYTIME.into()),
+    );
+    d.insert(
+        "unborrowConstraint".into(),
+        Value::Integer(CONSTRAINT_ANYTIME.into()),
+    );
     Value::Dictionary(d)
 }
 
@@ -107,7 +125,11 @@ fn modes() -> Value {
     nav.insert("state".into(), Value::Boolean(false));
     d.insert(
         "appStates".into(),
-        Value::Array(vec![Value::Dictionary(call), Value::Dictionary(speech), Value::Dictionary(nav)]),
+        Value::Array(vec![
+            Value::Dictionary(call),
+            Value::Dictionary(speech),
+            Value::Dictionary(nav),
+        ]),
     );
     Value::Dictionary(d)
 }
@@ -167,7 +189,12 @@ fn audio_formats(rate: u32) -> Value {
         format_entry(100, "alert", pcm | opus, None),
         format_entry(100, "media", pcm_media, None),
         format_entry(100, "telephony", pcm_mono | opus, Some(pcm_mono | opus)),
-        format_entry(100, "speechRecognition", pcm_mono | opus, Some(pcm_mono | opus)),
+        format_entry(
+            100,
+            "speechRecognition",
+            pcm_mono | opus,
+            Some(pcm_mono | opus),
+        ),
         format_entry(101, "default", pcm | opus, None),
         format_entry(102, "media", aac_lc, None),
     ])
@@ -185,7 +212,10 @@ fn display_entry(s: &Static) -> Value {
 
     let mut d = Dictionary::new();
     d.insert("uuid".into(), Value::String(MAIN_UUID.into()));
-    d.insert("type".into(), Value::Integer(STREAM_TYPE_MAIN_SCREEN.into()));
+    d.insert(
+        "type".into(),
+        Value::Integer(STREAM_TYPE_MAIN_SCREEN.into()),
+    );
     d.insert("maxFPS".into(), Value::Integer(s.fps.into()));
     d.insert("widthPixels".into(), Value::Integer(s.width.into()));
     d.insert("heightPixels".into(), Value::Integer(s.height.into()));
@@ -195,7 +225,10 @@ fn display_entry(s: &Static) -> Value {
         "features".into(),
         Value::Integer((DISPLAY_HIGH_FIDELITY_TOUCH | DISPLAY_KNOBS).into()),
     );
-    d.insert("primaryInputDevice".into(), Value::Integer(PRIMARY_INPUT_TOUCH.into()));
+    d.insert(
+        "primaryInputDevice".into(),
+        Value::Integer(PRIMARY_INPUT_TOUCH.into()),
+    );
     // SETUP advertises `viewAreas`, so the display has to carry one or the phone
     // sees a contradiction and tears the session down instead of opening streams.
     d.insert("viewAreas".into(), Value::Array(vec![view_area(s)]));
@@ -237,10 +270,18 @@ fn hid_device(uid: u32, name: &str, descriptor: Vec<u8>) -> Value {
 
 fn hid_devices(s: &Static) -> Value {
     Value::Array(vec![
-        hid_device(TOUCH_HID_UID, "cp2aa Touchscreen", multitouch_descriptor(s.width, s.height)),
+        hid_device(
+            TOUCH_HID_UID,
+            "cp2aa Touchscreen",
+            multitouch_descriptor(s.width, s.height),
+        ),
         hid_device(KNOB_HID_UID, "cp2aa Knob", KNOB_DESCRIPTOR.to_vec()),
         hid_device(MEDIA_HID_UID, "cp2aa Media", MEDIA_DESCRIPTOR.to_vec()),
-        hid_device(TELEPHONY_HID_UID, "cp2aa Telephony", TELEPHONY_DESCRIPTOR.to_vec()),
+        hid_device(
+            TELEPHONY_HID_UID,
+            "cp2aa Telephony",
+            TELEPHONY_DESCRIPTOR.to_vec(),
+        ),
     ])
 }
 

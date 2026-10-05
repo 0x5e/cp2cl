@@ -19,9 +19,13 @@
 use std::io::{Error as IoError, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
-use tokio::sync::mpsc::{self, Sender, channel};
+use tokio::sync::mpsc::{self, channel, Sender};
+
+use crate::aa_client::session::MediaFrame;
 
 /// How much may queue ahead of the player before we start dropping. Bounded
 /// with a drop policy on purpose: this is a live stream, so falling behind
@@ -41,6 +45,16 @@ fn video_dump() -> Option<&'static std::path::PathBuf> {
             .map(std::path::PathBuf::from)
     })
     .as_ref()
+}
+
+/// Wherever a decoded stream ends up.
+///
+/// Two implementations: `PlayerSink`, which feeds ffplay, and `AaSink`, which
+/// hands the same bytes to the Android Auto side. Neither blocks — both drop
+/// instead, because a live stream should glitch rather than fall behind, and a
+/// receiver that is gone for good says so once instead of forever.
+pub trait MediaSink: Send + Sync {
+    fn push(&self, bytes: Vec<u8>);
 }
 
 /// A running ffplay, fed from a channel so a slow player never blocks parsing.
@@ -73,7 +87,11 @@ impl PlayerSink {
             .map_err(|e| IoError::new(e.kind(), format!("failed to start ffplay: {e}")))?;
 
         let mut stdin = child.stdin.take().expect("stdin was piped");
-        let capacity = if label == "video" { VIDEO_QUEUE } else { AUDIO_QUEUE };
+        let capacity = if label == "video" {
+            VIDEO_QUEUE
+        } else {
+            AUDIO_QUEUE
+        };
         let (tx, mut rx) = channel::<Vec<u8>>(capacity);
 
         tokio::task::spawn_blocking(move || {
@@ -100,15 +118,19 @@ impl PlayerSink {
             dropped: AtomicBool::new(false),
         })
     }
+}
 
-    pub fn push(&self, bytes: Vec<u8>) {
+impl MediaSink for PlayerSink {
+    fn push(&self, bytes: Vec<u8>) {
         // `CP2AA_DUMP_VIDEO=/tmp/carplay.h264` writes the annex-B stream to disk
         // as it goes. Playing that file settles whether the bytes are wrong or
         // the player's options are.
         if self.label == "video" {
             if let Some(path) = video_dump() {
-                if let Ok(mut f) =
-                    std::fs::OpenOptions::new().create(true).append(true).open(path)
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
                 {
                     let _ = f.write_all(&bytes);
                 }
@@ -150,7 +172,10 @@ pub enum AudioCodec {
 
 impl Default for AudioCodec {
     fn default() -> Self {
-        Self::Pcm { rate: 48_000, channels: 2 }
+        Self::Pcm {
+            rate: 48_000,
+            channels: 2,
+        }
     }
 }
 
@@ -173,10 +198,17 @@ impl AudioCodec {
         const AAC_LC_48K: u64 = 0x80_0000;
 
         if bits & OPUS != 0 {
-            return Self::Opus { rate: 48_000, channels: 1 };
+            return Self::Opus {
+                rate: 48_000,
+                channels: 1,
+            };
         }
         if bits & (AAC_LC_44K | AAC_LC_48K) != 0 {
-            let rate = if bits & AAC_LC_48K != 0 { 48_000 } else { 44_100 };
+            let rate = if bits & AAC_LC_48K != 0 {
+                48_000
+            } else {
+                44_100
+            };
             return Self::AacLc { rate, channels: 2 };
         }
         let (rate, channels) = match bits {
@@ -245,8 +277,12 @@ impl Pipelines {
         let video_demuxer = if hevc { "hevc" } else { "h264" };
         let video = vec![
             "-hide_banner".into(),
+            // Not `warning`: libswscale prints "deprecated pixel format used"
+            // on the first frame and, at 60 fps with the banner gone, that one
+            // line is the only thing the player ever says. Real decode errors
+            // are still reported — they are `error`, not `warning`.
             "-loglevel".into(),
-            "warning".into(),
+            "error".into(),
             // As plain as it gets, deliberately. Dumping the same bytes to a file
             // and playing that works with no options at all, so the bytes are
             // fine — what broke it on stdin was the tuning: probesize,
@@ -283,7 +319,7 @@ impl Pipelines {
                 vec![
                     "-hide_banner".into(),
                     "-loglevel".into(),
-                    "warning".into(),
+                    "error".into(),
                     // Sound only — a window here would just be an empty box.
                     "-nodisp".into(),
                     // Low latency is safe here: with no picture there is no
@@ -304,7 +340,7 @@ impl Pipelines {
                 vec![
                     "-hide_banner".into(),
                     "-loglevel".into(),
-                    "warning".into(),
+                    "error".into(),
                     "-nodisp".into(),
                     "-f".into(),
                     input_fmt.into(),
@@ -317,6 +353,154 @@ impl Pipelines {
             ),
         };
 
-        Self { video, audio, audio_header }
+        Self {
+            video,
+            audio,
+            audio_header,
+        }
     }
+}
+
+/// How many frames may wait for the head unit. Bounded and dropped past, for
+/// the same reason the player's queue is.
+const AA_BACKLOG: usize = 256;
+
+/// The Android Auto end of the bridge.
+///
+/// A head unit chooses the channel numbers during its handshake, so they are
+/// unknown when this is built: both stay 0 until service discovery answers and
+/// `set_channels` fills them in, and frames that arrive before then are dropped
+/// rather than sent to a channel that does not exist yet.
+pub struct AaOutlet {
+    video_ch: Arc<AtomicU8>,
+    audio_ch: Arc<AtomicU8>,
+    tx: Sender<MediaFrame>,
+    /// Taken once, by whoever starts the AA session.
+    rx: Mutex<Option<mpsc::Receiver<MediaFrame>>>,
+}
+
+// `set_channels` and `take_receiver` belong to whoever starts the AA session,
+// which is the far end of the bridge. Nothing calls them yet.
+#[allow(dead_code)]
+impl AaOutlet {
+    pub fn new() -> Self {
+        let (tx, rx) = channel(AA_BACKLOG);
+        Self {
+            video_ch: Arc::new(AtomicU8::new(0)),
+            audio_ch: Arc::new(AtomicU8::new(0)),
+            tx,
+            rx: Mutex::new(Some(rx)),
+        }
+    }
+
+    pub fn video(&self) -> Arc<AaSink> {
+        Arc::new(AaSink::new("video", self.video_ch.clone(), self.tx.clone()))
+    }
+
+    pub fn audio(&self) -> Arc<AaSink> {
+        Arc::new(AaSink::new("audio", self.audio_ch.clone(), self.tx.clone()))
+    }
+
+    /// The channels the head unit offered. `None` is a stream it did not ask
+    /// for, which leaves that sink dropping.
+    pub fn set_channels(&self, video: Option<u8>, audio: Option<u8>) {
+        self.video_ch.store(video.unwrap_or(0), Ordering::Relaxed);
+        self.audio_ch.store(audio.unwrap_or(0), Ordering::Relaxed);
+    }
+
+    /// The receiving half, for the AA session. One link, one owner: a second
+    /// call gets nothing, which is how a second head unit is turned away.
+    pub fn take_receiver(&self) -> Option<mpsc::Receiver<MediaFrame>> {
+        self.rx.lock().ok()?.take()
+    }
+
+    /// Given back when a session ends so the next one can use it.
+    pub fn return_receiver(&self, rx: mpsc::Receiver<MediaFrame>) {
+        if let Ok(mut guard) = self.rx.lock() {
+            *guard = Some(rx);
+        }
+    }
+}
+
+impl Default for AaOutlet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A stream on its way to the head unit.
+pub struct AaSink {
+    label: &'static str,
+    /// 0 until the handshake says which channel this is.
+    ch: Arc<AtomicU8>,
+    tx: Sender<MediaFrame>,
+    /// Each of these is reported once: a stream that starts before the
+    /// handshake finishes, or keeps going after it ends, would otherwise print
+    /// the same line for every frame.
+    no_channel: AtomicBool,
+    gone: AtomicBool,
+    dropped: AtomicBool,
+}
+
+impl AaSink {
+    fn new(label: &'static str, ch: Arc<AtomicU8>, tx: Sender<MediaFrame>) -> Self {
+        Self {
+            label,
+            ch,
+            tx,
+            no_channel: AtomicBool::new(false),
+            gone: AtomicBool::new(false),
+            dropped: AtomicBool::new(false),
+        }
+    }
+}
+
+impl MediaSink for AaSink {
+    fn push(&self, bytes: Vec<u8>) {
+        let ch = self.ch.load(Ordering::Relaxed);
+        if ch == 0 {
+            if !self.no_channel.swap(true, Ordering::Relaxed) {
+                eprintln!(
+                    "[aa] {}: no Android Auto channel negotiated yet; dropping",
+                    self.label
+                );
+            }
+            return;
+        }
+        let frame = MediaFrame {
+            ch,
+            ts_us: Some(now_us()),
+            data: bytes,
+        };
+        match self.tx.try_send(frame) {
+            Ok(()) => {}
+            // No session is draining the other end.
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                if !self.gone.swap(true, Ordering::Relaxed) {
+                    eprintln!(
+                        "[aa] {}: no Android Auto session is reading; dropping",
+                        self.label
+                    );
+                }
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                if !self.dropped.swap(true, Ordering::Relaxed) {
+                    eprintln!(
+                        "[aa] {}: head unit is behind; dropping to stay live",
+                        self.label
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Microseconds since the process started, which is the unit an AV channel
+/// timestamp carries. CarPlay's own RTP timestamps should replace this once the
+/// two clocks are bridged; until then a monotonic local clock at least gives
+/// the head unit something to play out in order.
+fn now_us() -> u64 {
+    use std::sync::OnceLock;
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_micros() as u64
 }

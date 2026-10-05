@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use iap2_link::LinkConfig;
-use livi_runtime::bringup::{BringupEvent, CpConfig, run_accessory};
+use livi_runtime::bringup::{run_accessory, BringupEvent, CpConfig};
 use livi_runtime::driver::spawn_link_stream;
 use livi_runtime::ident::Identity;
 // `CpConfig::transport` is a `Transport`, but `bringup` only imports it
@@ -22,6 +22,7 @@ use livi_runtime::vehicle::Vehicle;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
+use crate::wireless::{parse_mac, short};
 
 /// How often the system usbmuxd is asked who is attached. Cheap enough that a
 /// second is not rude, and fast enough that plugging in feels immediate.
@@ -79,11 +80,19 @@ async fn attach(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     println!("[cp] {} carkit up, starting iAP2", short(&device.udid));
 
-    let link =
-        LinkConfig { max_outgoing: 4, control_version: 2, zero_ack: true, ..LinkConfig::default() };
+    let link = LinkConfig {
+        max_outgoing: 4,
+        control_version: 2,
+        zero_ack: true,
+        ..LinkConfig::default()
+    };
     let (channel, _artwork) = spawn_link_stream(stream, link, true);
 
-    let identity = Identity { name: cfg.name.clone(), ssid: cfg.name.clone(), bt_mac: parse_mac(&cfg.bt_mac) };
+    let identity = Identity {
+        name: cfg.name.clone(),
+        ssid: cfg.name.clone(),
+        bt_mac: parse_mac(&cfg.bt_mac),
+    };
 
     let cp = CpConfig {
         wifi_iface: String::new(),
@@ -96,9 +105,18 @@ async fn attach(
         public_key: String::new(),
         transport: Transport::Wired,
         av_iface,
+        // The USB network function is already up by the time we get here —
+        // this is a wired session on a cable that has been plugged in for a
+        // while — so there is nothing to wait for.
+        av_iface_late: None,
         available_current_ma: 500,
         ap_mac: None,
         ap_on_air: None,
+        // Bluetooth-only: whether a phone we can see is also on the cable.
+        on_cable: None,
+        // Wired sends the start once; there is no second iAP2 session to
+        // re-send it on.
+        start_again: None,
     };
 
     let (tx, mut rx) = mpsc::channel(64);
@@ -110,8 +128,10 @@ async fn attach(
             BringupEvent::Identified => println!("[cp] identified"),
             BringupEvent::Authenticated => println!("[cp] MFi authentication passed"),
             BringupEvent::Subscribed => println!("[cp] subscriptions sent"),
-            BringupEvent::CarPlayStartSent => {
-                println!("[cp] CarPlayStartSession sent — the phone should knock on {airplay_port}")
+            BringupEvent::CarPlayStartSent { ip } => {
+                println!(
+                    "[cp] CarPlayStartSession sent — the phone should knock on {ip}:{airplay_port}"
+                )
             }
             BringupEvent::Failed(reason) => {
                 eprintln!("[cp] session failed: {reason}");
@@ -152,24 +172,5 @@ async fn av_interface(cfg: &Config, _udid: &str) -> Option<String> {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         None
-    }
-}
-
-fn parse_mac(text: &str) -> [u8; 6] {
-    let mut out = [0u8; 6];
-    let parts: Vec<&str> = text.split(':').collect();
-    for (i, part) in parts.iter().take(6).enumerate() {
-        if let Ok(v) = u8::from_str_radix(part, 16) {
-            out[i] = v;
-        }
-    }
-    out
-}
-
-fn short(udid: &str) -> String {
-    if udid.len() > 8 {
-        udid[udid.len() - 8..].to_uppercase()
-    } else {
-        udid.to_uppercase()
     }
 }

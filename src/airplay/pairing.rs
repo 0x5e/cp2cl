@@ -76,8 +76,7 @@ pub fn tlv_get(items: &Tlv, want: u8) -> Option<Vec<u8>> {
 }
 
 pub fn tlv_state(items: &Tlv) -> Option<u8> {
-    tlv_get(items, TYPE_STATE)
-        .and_then(|v| v.first().copied())
+    tlv_get(items, TYPE_STATE).and_then(|v| v.first().copied())
 }
 
 pub fn tlv_parse(bytes: &[u8]) -> Tlv {
@@ -128,7 +127,11 @@ impl Pairings {
                     if seed.len() == 32 && !id.is_empty() {
                         let mut arr = [0u8; 32];
                         arr.copy_from_slice(&seed);
-                        return Ok(Self { path, accessory_id: id, identity: Identity::from_seed(&arr) });
+                        return Ok(Self {
+                            path,
+                            accessory_id: id,
+                            identity: Identity::from_seed(&arr),
+                        });
                     }
                 }
             }
@@ -138,7 +141,11 @@ impl Pairings {
         let mut id_bytes = [0u8; 6];
         getrandom_fill(&mut id_bytes);
         let acc = format!("{}", hex::encode(id_bytes));
-        let s = Self { path, accessory_id: acc, identity };
+        let s = Self {
+            path,
+            accessory_id: acc,
+            identity,
+        };
         s.save()?;
         Ok(s)
     }
@@ -230,7 +237,12 @@ impl PairSetup {
         let private = to_big(&raw);
         let public = (k * &verifier + g.modpow(&private, &n)) % &n;
 
-        Self { salt, private, public_b: pad(&public).to_vec(), session_key: None }
+        Self {
+            salt,
+            private,
+            public_b: pad(&public).to_vec(),
+            session_key: None,
+        }
     }
 
     /// Whether the SRP exchange has produced a session key (i.e. we are past M3).
@@ -292,7 +304,10 @@ impl PairSetup {
                 }
                 let ours = crypto::sha512_all(&[&pad(&a), &expected, &key]);
                 println!("[pair] setup M3 -> M4 (SRP verified)");
-                Ok(tlv_encode(&vec![(TYPE_STATE, vec![4]), (TYPE_PROOF, ours.to_vec())]))
+                Ok(tlv_encode(&vec![
+                    (TYPE_STATE, vec![4]),
+                    (TYPE_PROOF, ours.to_vec()),
+                ]))
             }
             5 => self.finish_step5(&items, pairings),
             other => Err(format!("unexpected pair-setup state {other}")),
@@ -305,7 +320,10 @@ impl PairSetup {
     /// validated, so this returns the key directly instead of a `Result`.
     fn finish(&mut self, a: &BigUint) -> [u8; 64] {
         let n = n_prime();
-        let u = to_big(&crypto::sha512_all(&[&pad(a), &pad(&self.public_b_biguint())]));
+        let u = to_big(&crypto::sha512_all(&[
+            &pad(a),
+            &pad(&self.public_b_biguint()),
+        ]));
         let s = (a * (self.verifier_ref().modpow(&u, &n))).modpow(&self.private, &n) % &n;
         // Unpadded, matching LIVI: `K = sha512(toBuf(S))`. `pad` is for the
         // group elements that go over the wire, not for hash inputs.
@@ -443,7 +461,12 @@ impl Default for PairVerify {
 
 impl PairVerify {
     pub fn new() -> Self {
-        Self { eph: None, client_pub: None, shared: None, verified: false }
+        Self {
+            eph: None,
+            client_pub: None,
+            shared: None,
+            verified: false,
+        }
     }
 
     /// Only `Some` after M4 is answered. Handing these out any earlier makes the
@@ -483,10 +506,7 @@ impl PairVerify {
                 sig_data.extend_from_slice(&client);
                 let sig = pairings.identity.sign(&sig_data).to_vec();
 
-                let inner = tlv_encode(&vec![
-                    (TYPE_IDENTIFIER, acc_id),
-                    (TYPE_SIGNATURE, sig),
-                ]);
+                let inner = tlv_encode(&vec![(TYPE_IDENTIFIER, acc_id), (TYPE_SIGNATURE, sig)]);
                 let sealed = seal(&sub_key, &nonce_label("PV-Msg02"), &inner, &[])
                     .map_err(|_| String::from("could not seal PV-Msg02"))?;
 

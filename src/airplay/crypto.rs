@@ -95,18 +95,40 @@ fn to_nonce(n: &[u8; 12]) -> Nonce {
 }
 
 /// Opens a sealed message, treating `aad` as additional authenticated data.
-pub fn open(key: &SymKey, nonce: &[u8; 12], ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
+pub fn open(
+    key: &SymKey,
+    nonce: &[u8; 12],
+    ciphertext: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
     let cipher = ChaCha20Poly1305::new(&key.0);
     cipher
-        .decrypt(&to_nonce(nonce), Payload { msg: ciphertext, aad })
+        .decrypt(
+            &to_nonce(nonce),
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
         .map_err(|_| CryptoError::Aead)
 }
 
 /// Seals a message the same way.
-pub fn seal(key: &SymKey, nonce: &[u8; 12], plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
+pub fn seal(
+    key: &SymKey,
+    nonce: &[u8; 12],
+    plaintext: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
     let cipher = ChaCha20Poly1305::new(&key.0);
     cipher
-        .encrypt(&to_nonce(nonce), Payload { msg: plaintext, aad })
+        .encrypt(
+            &to_nonce(nonce),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .map_err(|_| CryptoError::Aead)
 }
 
@@ -215,7 +237,9 @@ pub struct Identity {
 
 impl Identity {
     pub fn from_seed(seed: &[u8; 32]) -> Self {
-        Self { signing: SigningKey::from_bytes(seed) }
+        Self {
+            signing: SigningKey::from_bytes(seed),
+        }
     }
 
     /// `ed25519_dalek` 2 dropped `SigningKey::generate` (it wants a full CSPRNG
@@ -225,7 +249,9 @@ impl Identity {
         use rand::RngCore;
         let mut seed = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut seed);
-        Self { signing: SigningKey::from_bytes(&seed) }
+        Self {
+            signing: SigningKey::from_bytes(&seed),
+        }
     }
 
     pub fn seed(&self) -> [u8; 32] {

@@ -18,8 +18,8 @@
 //! The plaintext is a run of length-prefixed NAL units (four byte big-endian
 //! length, no start codes). ffmpeg's h264 demuxer wants annex-B, so we convert.
 
-use super::crypto::{SymKey, open};
-use crate::sink::PlayerSink;
+use super::crypto::{open, SymKey};
+use crate::sink::MediaSink;
 use std::sync::Arc;
 
 pub const HEADER_LEN: usize = 128;
@@ -34,7 +34,7 @@ pub enum Codec {
 pub struct VideoReceiver {
     key: SymKey,
     counter: u64,
-    sink: Arc<PlayerSink>,
+    sink: Arc<dyn MediaSink>,
     codec: Option<Codec>,
     /// Bytes in front of each NAL unit; whatever the avcC record said.
     nal_length_size: usize,
@@ -42,7 +42,7 @@ pub struct VideoReceiver {
 }
 
 impl VideoReceiver {
-    pub fn new(key: SymKey, sink: Arc<PlayerSink>) -> Self {
+    pub fn new(key: SymKey, sink: Arc<dyn MediaSink>) -> Self {
         // We only ever advertise H.264, so assume it from the start. Waiting for
         // the config message before handling frames meant a config we could not
         // parse silently discarded *every* frame — a black picture with no error
@@ -93,13 +93,19 @@ impl VideoReceiver {
                     // Nothing to do: we cannot even tell the decoder what it is.
                     return;
                 }
-                match open(&self.key, &super::crypto::nonce_counter(self.counter), body, header) {
+                match open(
+                    &self.key,
+                    &super::crypto::nonce_counter(self.counter),
+                    body,
+                    header,
+                ) {
                     Ok(plain) => {
                         // Only advance on success — see the module note.
                         self.counter += 1;
                         let nal = self.nal_length_size;
-                        let Some(annex_b) =
-                            self.codec.and_then(|c| length_prefixed_to_annex_b(&plain, c, nal))
+                        let Some(annex_b) = self
+                            .codec
+                            .and_then(|c| length_prefixed_to_annex_b(&plain, c, nal))
                         else {
                             return;
                         };
@@ -141,7 +147,11 @@ fn parse_video_config(body: &[u8]) -> Option<VideoConfig> {
         let params = avcc_to_annex_b(avcc)?;
         // avcC byte 4: 0xFC | (lengthSizeMinusOne), so +1 for the real width.
         let nal_length_size = (avcc[4] & 0x03) as usize + 1;
-        Some(VideoConfig { codec: Codec::H264, parameters: params, nal_length_size })
+        Some(VideoConfig {
+            codec: Codec::H264,
+            parameters: params,
+            nal_length_size,
+        })
     };
     for i in 4..body.len().saturating_sub(4) {
         let tag = &body[i..i + 4];

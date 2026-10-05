@@ -67,8 +67,12 @@ pub fn parse(buf: &[u8]) -> Result<Option<(Request, usize)>, ParseError> {
     }
     let mut parts = request_line.split_whitespace();
     let (method, path, version) = {
-        let m = parts.next().ok_or_else(|| ParseError::Line(request_line.into()))?;
-        let p = parts.next().ok_or_else(|| ParseError::Line(request_line.into()))?;
+        let m = parts
+            .next()
+            .ok_or_else(|| ParseError::Line(request_line.into()))?;
+        let p = parts
+            .next()
+            .ok_or_else(|| ParseError::Line(request_line.into()))?;
         let v = parts.next().unwrap_or("RTSP/1.0");
         (m.to_string(), p.to_string(), v.to_string())
     };
@@ -96,7 +100,13 @@ pub fn parse(buf: &[u8]) -> Result<Option<(Request, usize)>, ParseError> {
 
     let body = buf[body_start..body_start + want].to_vec();
     Ok(Some((
-        Request { method, path, version, headers, body },
+        Request {
+            method,
+            path,
+            version,
+            headers,
+            body,
+        },
         body_start + want,
     )))
 }
@@ -122,7 +132,12 @@ impl Response {
             500 => "Internal Server Error",
             _ => "Unknown",
         };
-        Self { status, reason, headers: Vec::new(), body: Vec::new() }
+        Self {
+            status,
+            reason,
+            headers: Vec::new(),
+            body: Vec::new(),
+        }
     }
 
     pub fn header(mut self, k: &str, v: &str) -> Self {
@@ -136,8 +151,10 @@ impl Response {
     }
 
     pub fn plist(mut self, body: Vec<u8>) -> Self {
-        self.headers.push(("Content-Type".into(), PLIST_CONTENT_TYPE.into()));
-        self.headers.push(("Content-Length".into(), body.len().to_string()));
+        self.headers
+            .push(("Content-Type".into(), PLIST_CONTENT_TYPE.into()));
+        self.headers
+            .push(("Content-Length".into(), body.len().to_string()));
         self.body = body;
         self
     }

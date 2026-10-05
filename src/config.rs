@@ -6,7 +6,10 @@
 use std::path::{Path, PathBuf};
 
 fn env(key: &str) -> Option<String> {
-    std::env::var(key).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    std::env::var(key)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -32,6 +35,31 @@ fn env_size(key: &str, fallback: (u32, u32)) -> (u32, u32) {
 pub struct Player {
     /// `ffplay`
     pub program: PathBuf,
+}
+
+/// Where a decoded stream goes, once CarPlay has handed it over.
+///
+/// Both ends of this are the same bytes — annex-B video, PCM or AAC audio — so
+/// the choice is only about who consumes them: this machine, or a head unit
+/// that thinks we are an Android phone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sink {
+    /// Play locally with ffplay, one process per stream. The default.
+    Ffplay,
+    /// Send to a connected Android Auto head unit over `aa_client`.
+    Aa,
+}
+
+impl Sink {
+    fn parse(text: &str) -> Option<Self> {
+        if text.eq_ignore_ascii_case("ffplay") {
+            Some(Self::Ffplay)
+        } else if text.eq_ignore_ascii_case("aa") {
+            Some(Self::Aa)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +94,44 @@ pub struct Config {
     /// Auto-detected when unset.
     pub av_iface: Option<String>,
     pub log_filter: String,
+    /// What consumes the streams: ffplay here, or an Android Auto head unit.
+    pub sink: Sink,
+    /// Android Auto over TCP. The wireless protocol is TCP on this port, so a
+    /// head unit that connects over the network works without a gadget — which
+    /// is also the only way to try any of this from a Mac.
+    pub aa_tcp_port: u16,
+    /// Android Auto over a USB gadget instead: the board plays an Android phone,
+    /// the head unit is the host. Linux only, and it needs configfs — which is
+    /// why the field only exists there.
+    #[cfg(target_os = "linux")]
+    pub aa_usb: bool,
+
+    /// Take CarPlay over Bluetooth and Wi-Fi instead of the cable.
+    ///
+    /// The phone is paired in the OS first — this program does not pair — and
+    /// then finds us by the iAP service we publish. Everything after that is the
+    /// same iAP2 conversation, except that `CarPlayStartSession` has to name a
+    /// Wi-Fi network the phone can join, which is why the fields below exist.
+    pub wireless: bool,
+    /// The network both ends are on. Wireless CarPlay does not make one: the
+    /// phone is told to join this, so it has to be a network it can reach.
+    pub ssid: String,
+    pub passphrase: String,
+    /// 1..196. Reported to the phone so it can find the network faster; a wrong
+    /// value is not fatal, the phone scans anyway.
+    pub wifi_channel: u8,
+    /// The interface facing that network. Its IPv6 link-local address is what
+    /// the phone is told to connect back to.
+    pub wifi_iface: String,
+    /// The router's BSSID. Sent as the accessory's device identifier; without
+    /// it the phone falls back to this machine's Wi-Fi MAC, which on recent
+    /// macOS SDKs comes back as a placeholder.
+    pub ap_mac: Option<String>,
+    /// Only talk to this Bluetooth MAC. Several iPhones paired with the same
+    /// machine otherwise race for the session.
+    pub target_bt: Option<String>,
+    /// Linux only: the Bluetooth adapter, as BlueZ names it.
+    pub bt_adapter: String,
 }
 
 impl Config {
@@ -76,7 +142,9 @@ impl Config {
         let width_mm = env_num("CP2AA_WIDTH_MM", 0);
         Self {
             auth_dir: Self::resolve_auth_dir(),
-            player: Player { program: PathBuf::from(env_or("CP2AA_PLAYER", "ffplay")) },
+            player: Player {
+                program: PathBuf::from(env_or("CP2AA_PLAYER", "ffplay")),
+            },
             width,
             height,
             // Half, because the window is measured in points and the stream in
@@ -97,6 +165,36 @@ impl Config {
             name: env_or("CP2AA_NAME", "cp2aa"),
             av_iface: env("CP2AA_AV_IFACE"),
             log_filter: env_or("CP2AA_LOG", "info"),
+            sink: match env("CP2AA_SINK") {
+                Some(text) => match Sink::parse(&text) {
+                    Some(sink) => sink,
+                    None => {
+                        eprintln!(
+                            "[cp2aa] CP2AA_SINK={text} is neither `ffplay` nor `aa`; playing here"
+                        );
+                        Sink::Ffplay
+                    }
+                },
+                None => Sink::Ffplay,
+            },
+            // 5288 is the port Android Auto uses for wireless.
+            aa_tcp_port: env_num("CP2AA_AA_TCP_PORT", 5288),
+            #[cfg(target_os = "linux")]
+            aa_usb: std::env::var("CP2AA_AA_USB")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            // Wired stays the default: it needs nothing the operator has to
+            // look up first.
+            wireless: std::env::var("CP2AA_WIRELESS")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            ssid: env_or("CP2AA_WIFI_SSID", ""),
+            passphrase: env_or("CP2AA_WIFI_PASS", ""),
+            wifi_channel: env_num("CP2AA_WIFI_CHANNEL", 36),
+            wifi_iface: env_or("CP2AA_WIFI_IFACE", default_wifi_iface()),
+            ap_mac: env("CP2AA_AP_MAC"),
+            target_bt: env("CP2AA_TARGET_BT"),
+            bt_adapter: env_or("CP2AA_BT_ADAPTER", "hci0"),
         }
     }
 
@@ -117,10 +215,24 @@ impl Config {
         }
         candidates.push(PathBuf::from("authentication"));
         candidates.push(PathBuf::from("assets/authentication"));
-        candidates.into_iter().find(|dir| Self::has_credentials(dir))
+        candidates
+            .into_iter()
+            .find(|dir| Self::has_credentials(dir))
     }
 
     fn has_credentials(dir: &Path) -> bool {
         dir.join("identity.pk8").is_file() && dir.join("certificate.p7b").is_file()
+    }
+}
+
+/// The interface the phone will be told to reach us on, per platform.
+fn default_wifi_iface() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "en0"
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "wlan0"
     }
 }

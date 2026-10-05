@@ -15,6 +15,11 @@ iap2-link = { path = "../LIVI/native/livi-helperd/crates/iap2-link" }
 iap2-wired = { path = "../LIVI/native/livi-helperd/crates/iap2-wired" }
 iap2-mfi = { path = "../LIVI/native/livi-helperd/crates/iap2-mfi" }
 iap2-csm = { path = "../LIVI/native/livi-helperd/crates/iap2-csm" }
+# LIVI's Android Auto implementation is the head-unit side; we are the phone.
+# Framing, the protobuf primitives and the channel constants know nothing about
+# which end they are on, so we take those from there instead of keeping a copy.
+# The TLS server and the session state machine are ours, in `src/aa-client`.
+livi-aa = { path = "../LIVI/native/livi-helperd/crates/livi-aa" }
 # Needed directly to name `usbmuxd::UsbmuxdDevice` in our own function
 # signatures. Same version LIVI resolves, so these unify into one build.
 idevice = { version = "0.1", features = ["usbmuxd"] }
@@ -52,3 +57,9 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde_json = "1"
+
+# Android Auto, phone side (src/aa-client): a TLS 1.2 server presenting the
+# phone's certificate. rustls is already in the lock file through LIVI, so this
+# resolves to the build that is there rather than pulling in a second one.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"

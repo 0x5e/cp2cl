@@ -4,6 +4,19 @@
 //! unrecognised prints the available list rather than failing silently, because
 //! this is the only control surface the demo has.
 
+/// One finger in a touch report, in the display's own pixel space.
+///
+/// The phone tracks a finger by the slot it is reported in, not by an id, so a
+/// contact that vanishes between two reports has to leave its slot empty rather
+/// than be dropped from the list — `down: false` is what says "this slot is
+/// free".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TouchContact {
+    pub down: bool,
+    pub x: u16,
+    pub y: u16,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     // Media keys, sent to the media HID device.
@@ -24,6 +37,9 @@ pub enum Command {
     Up,
     Down,
     Wheel(i8),
+    /// A multitouch report: one entry per slot the /info descriptor declares,
+    /// whether or not a finger is on it.
+    Touch([TouchContact; TOUCH_SLOTS]),
     // Telephony.
     Answer,
     Hangup,
@@ -38,6 +54,10 @@ pub enum Command {
     KeyFrame,
     Quit,
 }
+
+/// How many simultaneous fingers the touchscreen descriptor declares — and so
+/// how many slots a touch report carries. Two is enough for pinch and rotate.
+pub const TOUCH_SLOTS: usize = 2;
 
 /// Media key indices, mirroring LIVI's `MediaButton`.
 pub const MEDIA_PLAY: u8 = 1;

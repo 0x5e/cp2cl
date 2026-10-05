@@ -15,8 +15,8 @@
 //! what was negotiated in the audio SETUP: raw PCM, an AAC-LC frame, or an Opus
 //! frame.
 
-use super::crypto::{SymKey, open};
-use crate::sink::{AudioCodec, PlayerSink};
+use super::crypto::{open, SymKey};
+use crate::sink::{AudioCodec, MediaSink};
 use std::sync::Arc;
 
 pub const RTP_HEADER_LEN: usize = 12;
@@ -26,11 +26,11 @@ const NONCE_LEN: usize = 8;
 pub struct AudioReceiver {
     key: SymKey,
     codec: AudioCodec,
-    sink: Arc<PlayerSink>,
+    sink: Arc<dyn MediaSink>,
 }
 
 impl AudioReceiver {
-    pub fn new(key: SymKey, codec: AudioCodec, sink: Arc<PlayerSink>) -> Self {
+    pub fn new(key: SymKey, codec: AudioCodec, sink: Arc<dyn MediaSink>) -> Self {
         Self { key, codec, sink }
     }
 
@@ -58,12 +58,10 @@ impl AudioReceiver {
             // and the sound is pure noise.
             AudioCodec::Pcm { .. } => self.sink.push(to_le16(&payload)),
             AudioCodec::Opus { .. } => self.sink.push(payload),
-            AudioCodec::AacLc { rate, channels } => {
-                match adts_frame(&payload, rate, channels) {
-                    Some(frame) => self.sink.push(frame),
-                    None => eprintln!("[audio] aac frame too small for adts"),
-                }
-            }
+            AudioCodec::AacLc { rate, channels } => match adts_frame(&payload, rate, channels) {
+                Some(frame) => self.sink.push(frame),
+                None => eprintln!("[audio] aac frame too small for adts"),
+            },
         }
     }
 }

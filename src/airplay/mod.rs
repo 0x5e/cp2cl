@@ -21,6 +21,7 @@
 
 pub mod audio;
 pub mod bplist;
+pub mod clock;
 pub mod crypto;
 pub mod event;
 pub mod info;
@@ -42,33 +43,20 @@ use livi_runtime::AsyncAuth;
 
 use crate::airplay::audio::AudioReceiver;
 use crate::airplay::bplist::to_binary;
-use crate::airplay::crypto::{
-    SymKey, aes_ctr128, nonce_counter, open, seal, sha1_all, sha256_all,
-};
+use crate::airplay::clock::{ntp_diff, SyncedClock};
+use crate::airplay::crypto::{aes_ctr128, nonce_counter, open, seal, sha1_all, sha256_all, SymKey};
 use crate::airplay::event::EventChannel;
 use crate::airplay::pairing::{PairSetup, PairVerify, Pairings, VerifyKeys};
-use crate::airplay::rtsp::{OCTET_CONTENT_TYPE, PAIRING_CONTENT_TYPE, Request, Response};
+use crate::airplay::rtsp::{Request, Response, OCTET_CONTENT_TYPE, PAIRING_CONTENT_TYPE};
 use crate::airplay::screen::VideoReceiver;
 use crate::commands::Command;
 use crate::config::Config;
-use crate::sink::{AudioCodec, PlayerSink};
+use crate::sink::{AudioCodec, MediaSink};
 
 /// How much audio the phone keeps buffered before playing it. Subtracted from
 /// the reported position so `sampleTime` describes what the listener is hearing
 /// now, not what we last received.
 const PLAYOUT_LATENCY_SEC: f64 = 1.0;
-
-/// Seconds between two 64-bit NTP stamps, as a signed difference.
-///
-/// The stamps themselves overflow an `i64` (seconds since 1900 shifted up by 32
-/// is about 1.7e19), but their difference never does — so wrap first, then sign.
-/// Used only to report how far off the phone's clock is; we do not steer ours.
-fn ntp_diff(a: u64, b: u64) -> f64 {
-    const TWO32: f64 = 4_294_967_296.0;
-    let d = a.wrapping_sub(b);
-    let d = if d >= 1u64 << 63 { d as i128 - (1i128 << 64) } else { d as i128 };
-    d as f64 / TWO32
-}
 
 /// Enough of an audio clock to answer `/feedback`.
 ///
@@ -124,6 +112,22 @@ impl AudioClock {
     }
 }
 
+/// What the phone should render at, when something other than the configuration
+/// knows better — an Android Auto head unit's declared resolution, say.
+///
+/// `GET /info` prefers this to `Config` once it is set. It only lands if the
+/// head unit is heard from before the iPhone asks: the iPhone reads `/info` once
+/// at the start of a session and does not ask again.
+#[derive(Debug, Clone, Copy)]
+pub struct ScreenParams {
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+}
+
+/// Shared with whoever negotiates on our behalf; `None` means "use `Config`".
+pub type SharedScreen = Arc<std::sync::Mutex<Option<ScreenParams>>>;
+
 /// Input only becomes possible after pair-verify derives the keys, so the sink
 /// exists the whole time and fills itself in as pieces arrive.
 pub struct EventSink {
@@ -134,7 +138,11 @@ pub struct EventSink {
 
 impl EventSink {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self { key: Mutex::new(None), counter: Mutex::new(0), writer: Mutex::new(None) })
+        Arc::new(Self {
+            key: Mutex::new(None),
+            counter: Mutex::new(0),
+            writer: Mutex::new(None),
+        })
     }
 
     async fn set_key(&self, raw: [u8; 32]) {
@@ -243,7 +251,12 @@ async fn pump_events(
                 }
                 continue;
             }
-            println!("[event] <- {} {} ({}B)", req.method, req.path, req.body.len());
+            println!(
+                "[event] <- {} {} ({}B)",
+                req.method,
+                req.path,
+                req.body.len()
+            );
             if let Err(e) = sink.reply(req.cseq()).await {
                 eprintln!("[event] reply failed: {e}");
                 return;
@@ -257,12 +270,19 @@ async fn pump_events(
 pub struct Shared {
     pub cfg: Arc<Config>,
     pub pairings: Arc<Mutex<Pairings>>,
-    pub video_sink: Arc<PlayerSink>,
-    pub audio_sink: Arc<PlayerSink>,
+    pub video_sink: Arc<dyn MediaSink>,
+    pub audio_sink: Arc<dyn MediaSink>,
+    /// Set by the Android Auto bridge once a head unit has said what it can
+    /// show. Read by `GET /info`.
+    pub screen: SharedScreen,
     /// The same MFi signer the iAP2 side uses, for `/auth-setup`.
     pub mfi: livi_runtime::mfi_async::SharedCoprocessor,
     /// Where the audio playout position is tracked, for `/feedback`.
     pub audio_clock: Arc<Mutex<AudioClock>>,
+    /// Our clock, steered onto the phone's by the timing port. Shared rather
+    /// than per session on purpose: `/feedback` and the timing task both stamp
+    /// with it, and the phone only ever has one clock domain to be in.
+    pub timing: Arc<Mutex<SyncedClock>>,
     /// Announced to the phone so it knows what audio to send.
     pub audio_codec: Arc<Mutex<AudioCodec>>,
     /// Where input lands; stdin dispatches into this once pairing completes.
@@ -281,6 +301,7 @@ pub async fn serve(listener: TcpListener, shared: Shared) {
         };
         println!("[airplay] {peer} connected");
         let cfg = shared.cfg.clone();
+        let screen = shared.screen.clone();
         let pairings = shared.pairings.clone();
         let video_sink = shared.video_sink.clone();
         let audio_sink = shared.audio_sink.clone();
@@ -288,10 +309,12 @@ pub async fn serve(listener: TcpListener, shared: Shared) {
         let event_sink = shared.event_sink.clone();
         let mfi = shared.mfi.clone();
         let audio_clock = shared.audio_clock.clone();
+        let timing = shared.timing.clone();
 
         tokio::spawn(async move {
             let mut session = Session {
                 cfg,
+                screen,
                 pairings,
                 video_sink,
                 audio_sink,
@@ -299,6 +322,7 @@ pub async fn serve(listener: TcpListener, shared: Shared) {
                 event_sink,
                 mfi,
                 audio_clock,
+                timing,
                 peer,
                 setup: None,
                 verify: None,
@@ -357,13 +381,17 @@ impl NextPort {
 
 struct Session {
     cfg: Arc<Config>,
+    /// What a head unit asked for, if one has. Read when answering `/info`.
+    screen: SharedScreen,
     pairings: Arc<Mutex<Pairings>>,
-    video_sink: Arc<PlayerSink>,
-    audio_sink: Arc<PlayerSink>,
+    video_sink: Arc<dyn MediaSink>,
+    audio_sink: Arc<dyn MediaSink>,
     codec: Arc<Mutex<AudioCodec>>,
     event_sink: Arc<EventSink>,
     mfi: livi_runtime::mfi_async::SharedCoprocessor,
     audio_clock: Arc<Mutex<AudioClock>>,
+    /// The clock every timestamp we send is stamped with. See `clock::SyncedClock`.
+    timing: Arc<Mutex<SyncedClock>>,
     peer: SocketAddr,
     setup: Option<PairSetup>,
     verify: Option<PairVerify>,
@@ -388,7 +416,10 @@ struct Session {
 }
 
 impl Session {
-    async fn run(&mut self, socket: TcpStream) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn run(
+        &mut self,
+        socket: TcpStream,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (mut reader, mut writer) = socket.into_split();
         let mut buf = [0u8; 8192];
 
@@ -417,7 +448,8 @@ impl Session {
                         let mut out = Vec::new();
                         for chunk in plaintext.chunks(MAX_PAYLOAD) {
                             let header = (chunk.len() as u16).to_le_bytes();
-                            let sealed = seal(&key, &nonce_counter(self.write_ctr), chunk, &header)?;
+                            let sealed =
+                                seal(&key, &nonce_counter(self.write_ctr), chunk, &header)?;
                             self.write_ctr += 1;
                             out.extend_from_slice(&header);
                             out.extend_from_slice(&sealed);
@@ -442,7 +474,9 @@ impl Session {
         }
     }
 
-    fn next_request(&mut self) -> Result<Option<Request>, Box<dyn std::error::Error + Send + Sync>> {
+    fn next_request(
+        &mut self,
+    ) -> Result<Option<Request>, Box<dyn std::error::Error + Send + Sync>> {
         match self.cipher_read.clone() {
             None => {
                 let Some((request, used)) = rtsp::parse(&self.in_buf)? else {
@@ -456,22 +490,24 @@ impl Session {
                     // The length counts the ciphertext only, so the tag has to
                     // be added back to find where the next frame starts.
                     if self.frame_buf.len() >= 2 {
-                        let len = u16::from_le_bytes([self.frame_buf[0], self.frame_buf[1]]) as usize;
+                        let len =
+                            u16::from_le_bytes([self.frame_buf[0], self.frame_buf[1]]) as usize;
                         let total = 2 + len + TAG_LEN;
                         if self.frame_buf.len() >= total {
                             let aad = self.frame_buf[..2].to_vec();
                             let sealed = self.frame_buf[2..total].to_vec();
                             self.frame_buf.drain(..total);
-                            let plain = match open(&key, &nonce_counter(self.read_ctr), &sealed, &aad) {
-                                Ok(p) => p,
-                                Err(e) => {
-                                    eprintln!(
-                                        "[airplay] frame {} failed to open ({} bytes): {e}",
-                                        self.read_ctr, len,
-                                    );
-                                    return Err(e.into());
-                                }
-                            };
+                            let plain =
+                                match open(&key, &nonce_counter(self.read_ctr), &sealed, &aad) {
+                                    Ok(p) => p,
+                                    Err(e) => {
+                                        eprintln!(
+                                            "[airplay] frame {} failed to open ({} bytes): {e}",
+                                            self.read_ctr, len,
+                                        );
+                                        return Err(e.into());
+                                    }
+                                };
                             self.read_ctr += 1;
                             self.plain_buf.extend_from_slice(&plain);
                             continue;
@@ -484,7 +520,8 @@ impl Session {
                     if self.in_buf.is_empty() {
                         return Ok(None);
                     }
-                    self.frame_buf.extend_from_slice(&std::mem::take(&mut self.in_buf));
+                    self.frame_buf
+                        .extend_from_slice(&std::mem::take(&mut self.in_buf));
                 }
             }
         }
@@ -495,10 +532,14 @@ impl Session {
         // is the whole answer, and silence means the phone stopped talking.
         // `/feedback` and OPTIONS arrive once a second, so they are chatter —
         // logging them buries everything else.
-        let chatty =
-            req.method == "OPTIONS" || req.path.to_lowercase().ends_with("/feedback");
+        let chatty = req.method == "OPTIONS" || req.path.to_lowercase().ends_with("/feedback");
         if !chatty {
-            println!("[airplay] <- {} {} ({}B)", req.method, req.path, req.body.len());
+            println!(
+                "[airplay] <- {} {} ({}B)",
+                req.method,
+                req.path,
+                req.body.len()
+            );
         }
         let result = self.route(req).await;
         match result {
@@ -553,13 +594,21 @@ impl Session {
     }
 
     fn info(&self) -> Result<Response, String> {
+        // A head unit's declared resolution wins: it is the end that has to
+        // decode the picture, so asking the phone for something else just makes
+        // it scale.
+        let negotiated = self.screen.lock().ok().and_then(|g| *g);
+        let (width, height, fps) = match negotiated {
+            Some(s) => (s.width, s.height, s.fps),
+            None => (self.cfg.width, self.cfg.height, self.cfg.fps),
+        };
         let plist = info::build(&info::Static {
             device_id: self.cfg.device_id.clone(),
             bt_mac: self.cfg.bt_mac.clone(),
             name: self.cfg.name.clone(),
-            width: self.cfg.width,
-            height: self.cfg.height,
-            fps: self.cfg.fps,
+            width,
+            height,
+            fps,
             width_mm: self.cfg.width_mm,
             height_mm: self.cfg.height_mm,
             hevc: self.cfg.hevc,
@@ -601,7 +650,10 @@ impl Session {
         if ROUTINE.contains(&kind) {
             return;
         }
-        println!("[airplay] {what}: type {kind:?}, keys {:?}", dict.keys().collect::<Vec<_>>());
+        println!(
+            "[airplay] {what}: type {kind:?}, keys {:?}",
+            dict.keys().collect::<Vec<_>>()
+        );
     }
 
     /// The media-clock reply. Silence here is what made the phone stop sending
@@ -613,12 +665,20 @@ impl Session {
         }
         let mut stream = Dictionary::new();
         stream.insert("type".into(), Value::Integer(clock.stream_type().into()));
-        stream.insert("sampleRate".into(), Value::Integer((clock.sample_rate() as i64).into()));
-        stream
-            .insert("streamConnectionID".into(), Value::Integer(clock.connection_id().into()));
+        stream.insert(
+            "sampleRate".into(),
+            Value::Integer((clock.sample_rate() as i64).into()),
+        );
+        stream.insert(
+            "streamConnectionID".into(),
+            Value::Integer(clock.connection_id().into()),
+        );
         stream.insert(
             "timestamp".into(),
-            Value::Integer(u64::from_be_bytes(ntp_timestamp_now()).into()),
+            // In the phone's domain, not ours: it is what places `sampleTime`
+            // against the audio the phone sent. `AudioClock` counts samples, so
+            // this is the one field that has to come from the steered clock.
+            Value::Integer(self.timing.lock().await.now_u64().into()),
         );
         if let Some(at) = clock.sample_time() {
             stream.insert("sampleTime".into(), Value::Integer(at.into()));
@@ -626,7 +686,10 @@ impl Session {
 
         let at = clock.sample_time();
         let mut body = Dictionary::new();
-        body.insert("streams".into(), Value::Array(vec![Value::Dictionary(stream)]));
+        body.insert(
+            "streams".into(),
+            Value::Array(vec![Value::Dictionary(stream)]),
+        );
         let plist = to_binary(&Value::Dictionary(body)).map_err(|e| e.to_string())?;
 
         // Once, to show the reported position is advancing; after that it is
@@ -647,7 +710,9 @@ impl Session {
         let setup = self.setup.get_or_insert_with(PairSetup::new);
         let mut pairings = self.pairings.lock().await;
         let reply = setup.handle(&req.body, &mut pairings)?;
-        Ok(Response::new(200).header("Content-Type", PAIRING_CONTENT_TYPE).body(reply))
+        Ok(Response::new(200)
+            .header("Content-Type", PAIRING_CONTENT_TYPE)
+            .body(reply))
     }
 
     async fn pair_verify(&mut self, req: &Request) -> Result<Response, String> {
@@ -659,7 +724,9 @@ impl Session {
             self.event_sink.set_key(keys.events_write()).await;
             println!("[airplay] pair-verify complete; shared secret ready");
         }
-        Ok(Response::new(200).header("Content-Type", PAIRING_CONTENT_TYPE).body(reply))
+        Ok(Response::new(200)
+            .header("Content-Type", PAIRING_CONTENT_TYPE)
+            .body(reply))
     }
 
     /// MFiSAP. The phone sends `[1B version][32B controller X25519 public]` and
@@ -689,7 +756,11 @@ impl Session {
         let aes_key = sha1_all(&[b"AES-KEY", &shared]);
         let aes_iv = sha1_all(&[b"AES-IV", &shared]);
 
-        let cert = self.mfi.read_certificate().await.map_err(|e| e.to_string())?;
+        let cert = self
+            .mfi
+            .read_certificate()
+            .await
+            .map_err(|e| e.to_string())?;
         // 2.0 coprocessors sign a SHA-1 digest, 3.0 signs SHA-256. Ours reports 3.
         let major = self.mfi.protocol_major().await.map_err(|e| e.to_string())?;
         let digest = if major == 2 {
@@ -713,7 +784,9 @@ impl Session {
         out.extend_from_slice(&cert);
         out.extend_from_slice(&(enc_sig.len() as u32).to_be_bytes());
         out.extend_from_slice(&enc_sig);
-        Ok(Response::new(200).header("Content-Type", OCTET_CONTENT_TYPE).body(out))
+        Ok(Response::new(200)
+            .header("Content-Type", OCTET_CONTENT_TYPE)
+            .body(out))
     }
 
     async fn setup(&mut self, req: &Request) -> Result<Response, String> {
@@ -733,18 +806,25 @@ impl Session {
         }
     }
 
-    async fn setup_session(&mut self, dict: plist::dictionary::Dictionary) -> Result<Response, String> {
+    async fn setup_session(
+        &mut self,
+        dict: plist::dictionary::Dictionary,
+    ) -> Result<Response, String> {
         let event_port = self.next_port.take();
         let timing_port = self.next_port.take();
         let keys = self.keys.ok_or("SETUP before pair-verify")?;
         // The phone tells us where to send our timing requests; it is the only
         // way the two clocks ever agree.
-        let peer_timing_port =
-            dict.get("timingPort").and_then(|v| v.as_signed_integer()).map(|v| v as u16);
+        let peer_timing_port = dict
+            .get("timingPort")
+            .and_then(|v| v.as_signed_integer())
+            .map(|v| v as u16);
 
         // The phone opens this before it asks for any stream. It is bidirectional:
         // we push input down it, and it posts us requests that each need a 200.
-        let listener = TcpListener::bind(("::", event_port)).await.map_err(|e| e.to_string())?;
+        let listener = TcpListener::bind(("::", event_port))
+            .await
+            .map_err(|e| e.to_string())?;
         let read_key = SymKey::from_bytes(&keys.events_read()).map_err(|e| e.to_string())?;
         let sink = self.event_sink.clone();
         let responder = sink.clone();
@@ -761,8 +841,14 @@ impl Session {
         self.spawn_timing(timing_port, peer_timing_port).await?;
 
         let mut body = Dictionary::new();
-        body.insert("eventPort".into(), Value::Integer((event_port as i64).into()));
-        body.insert("timingPort".into(), Value::Integer((timing_port as i64).into()));
+        body.insert(
+            "eventPort".into(),
+            Value::Integer((event_port as i64).into()),
+        );
+        body.insert(
+            "timingPort".into(),
+            Value::Integer((timing_port as i64).into()),
+        );
         // `viewAreas` is advertised unconditionally by LIVI; omitting it changes
         // what the phone asks for downstream.
         let features: Vec<Value> = if self.cfg.hevc {
@@ -772,7 +858,10 @@ impl Session {
                 Value::String("viewAreas".into()),
             ]
         } else {
-            vec![Value::String("iAPChannel".into()), Value::String("viewAreas".into())]
+            vec![
+                Value::String("iAPChannel".into()),
+                Value::String("viewAreas".into()),
+            ]
         };
         body.insert("enabledFeatures".into(), Value::Array(features));
 
@@ -781,9 +870,16 @@ impl Session {
         Ok(Response::new(200).plist(plist))
     }
 
-    async fn setup_streams(&mut self, dict: plist::dictionary::Dictionary) -> Result<Response, String> {
+    async fn setup_streams(
+        &mut self,
+        dict: plist::dictionary::Dictionary,
+    ) -> Result<Response, String> {
         let keys = self.keys.ok_or("stream SETUP before pair-verify")?;
-        let streams = dict.get("streams").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let streams = dict
+            .get("streams")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         let mut replies: Vec<Value> = Vec::new();
 
         for stream in streams {
@@ -796,12 +892,15 @@ impl Session {
                 .get("streamConnectionID")
                 .and_then(|v| v.as_signed_integer())
                 .unwrap_or(1);
-            let key = SymKey::from_bytes(&keys.media(stream_id as u64)).map_err(|e| e.to_string())?;
+            let key =
+                SymKey::from_bytes(&keys.media(stream_id as u64)).map_err(|e| e.to_string())?;
 
             match type_ {
                 Some(110) => {
                     let port = self.next_port.take();
-                    let listener = TcpListener::bind(("::", port)).await.map_err(|e| e.to_string())?;
+                    let listener = TcpListener::bind(("::", port))
+                        .await
+                        .map_err(|e| e.to_string())?;
                     let sink = self.video_sink.clone();
                     tokio::spawn(async move {
                         let Ok((socket, _)) = listener.accept().await else {
@@ -819,8 +918,13 @@ impl Session {
                 Some(100) | Some(101) | Some(102) => {
                     let port = self.next_port.take();
                     let control_port = self.next_port.take();
-                    let socket = UdpSocket::bind(("::", port)).await.map_err(|e| e.to_string())?;
-                    let fmt = table.get("audioFormat").and_then(|v| v.as_signed_integer()).unwrap_or(0);
+                    let socket = UdpSocket::bind(("::", port))
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let fmt = table
+                        .get("audioFormat")
+                        .and_then(|v| v.as_signed_integer())
+                        .unwrap_or(0);
                     let codec = AudioCodec::from_format(fmt);
                     println!(
                         "[airplay] audio stream type {} (format 0x{fmt:x} -> {codec:?})",
@@ -829,10 +933,11 @@ impl Session {
                     {
                         *self.codec.lock().await = codec;
                     }
-                    self.audio_clock
-                        .lock()
-                        .await
-                        .start(type_.unwrap_or(0), stream_id, codec.rate());
+                    self.audio_clock.lock().await.start(
+                        type_.unwrap_or(0),
+                        stream_id,
+                        codec.rate(),
+                    );
                     let sink = self.audio_sink.clone();
                     let clock = self.audio_clock.clone();
                     tokio::spawn(async move {
@@ -843,8 +948,14 @@ impl Session {
                     let mut entry = Dictionary::new();
                     entry.insert("type".into(), Value::Integer(type_.unwrap().into()));
                     entry.insert("dataPort".into(), Value::Integer((port as i64).into()));
-                    entry.insert("controlPort".into(), Value::Integer((control_port as i64).into()));
-                    entry.insert("streamConnectionID".into(), Value::Integer(stream_id.into()));
+                    entry.insert(
+                        "controlPort".into(),
+                        Value::Integer((control_port as i64).into()),
+                    );
+                    entry.insert(
+                        "streamConnectionID".into(),
+                        Value::Integer(stream_id.into()),
+                    );
                     replies.push(Value::Dictionary(entry));
                 }
                 // 130 is iAP-over-CarPlay; ignoring it costs nothing visible.
@@ -876,7 +987,7 @@ impl Session {
     }
 
     /// Video arrives on TCP as a stream of length-framed messages.
-    async fn pump_video(socket: TcpStream, key: SymKey, sink: Arc<PlayerSink>) {
+    async fn pump_video(socket: TcpStream, key: SymKey, sink: Arc<dyn MediaSink>) {
         let mut rx = VideoReceiver::new(key, sink);
         let mut socket = socket;
         let mut header = [0u8; screen::HEADER_LEN];
@@ -911,7 +1022,7 @@ impl Session {
         socket: UdpSocket,
         key: SymKey,
         codec: AudioCodec,
-        sink: Arc<PlayerSink>,
+        sink: Arc<dyn MediaSink>,
         clock: Arc<Mutex<AudioClock>>,
     ) {
         let rx = AudioReceiver::new(key, codec, sink);
@@ -949,15 +1060,23 @@ impl Session {
     /// The accessory drives it — it sends a request every second to the port the
     /// phone named in its SETUP. Without that the phone drops the session after
     /// a few seconds, which looks exactly like a codec failure.
-    async fn spawn_timing(&mut self, port: u16, peer_timing_port: Option<u16>) -> Result<(), String> {
-        let socket = Arc::new(UdpSocket::bind(("::", port)).await.map_err(|e| e.to_string())?);
+    async fn spawn_timing(
+        &mut self,
+        port: u16,
+        peer_timing_port: Option<u16>,
+    ) -> Result<(), String> {
+        let socket = Arc::new(
+            UdpSocket::bind(("::", port))
+                .await
+                .map_err(|e| e.to_string())?,
+        );
 
         // Two jobs on one socket: answer the phone's requests, and read the
-        // replies to ours.
+        // replies to ours. Both stamp with the same steered clock.
         let rx = socket.clone();
+        let rx_clock = self.timing.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 64];
-            let mut seen: u64 = 0;
             loop {
                 let Ok((n, from)) = rx.recv_from(&mut buf).await else {
                     break;
@@ -965,7 +1084,6 @@ impl Session {
                 if n < 32 {
                     continue;
                 }
-                seen += 1;
                 if buf[1] == TIMING_REQUEST {
                     let mut resp = [0u8; 32];
                     resp[0] = 0x80;
@@ -973,25 +1091,28 @@ impl Session {
                     resp[2..4].copy_from_slice(&7u16.to_be_bytes());
                     // Its transmit time becomes our originate time.
                     resp[8..16].copy_from_slice(&buf[24..32]);
-                    let now = ntp_timestamp_now();
+                    let now = rx_clock.lock().await.now();
                     resp[16..24].copy_from_slice(&now);
                     resp[24..32].copy_from_slice(&now);
                     let _ = rx.send_to(&resp, from).await;
                 } else if buf[1] == TIMING_RESPONSE {
-                    // Reported, not applied: the phone's clock runs on its own
-                    // monotonic base, so the first sample is enormous, and
-                    // steering ours off it needs filtering we do not have.
                     let at = |r: std::ops::Range<usize>| -> u64 {
                         let mut b = [0u8; 8];
                         b.copy_from_slice(&buf[r]);
                         u64::from_be_bytes(b)
                     };
-                    let t4 = u64::from_be_bytes(ntp_timestamp_now());
-                    let offset = (ntp_diff(at(16..24), at(8..16)) + ntp_diff(at(24..32), t4)) / 2.0;
-                    // Once: the gap is constant, so repeating it says nothing.
-                    if seen == 1 {
-                        println!("[timing] phone clock is {offset:.3}s from ours");
-                    }
+                    // T1 is what we sent, echoed back; T2 and T3 are the phone's
+                    // receive and transmit; T4 is our arrival. Offset and
+                    // round-trip time fall out of the four.
+                    let (t1, t2, t3) = (at(8..16), at(16..24), at(24..32));
+                    let mut clock = rx_clock.lock().await;
+                    let t4 = clock.now_u64();
+                    let offset = (ntp_diff(t2, t1) + ntp_diff(t3, t4)) / 2.0;
+                    let rtt = ntp_diff(t4, t1) - ntp_diff(t3, t2);
+                    // Applied, not just reported: `/feedback` has to answer in
+                    // the phone's domain, and this is the only place it is
+                    // learned. The clock decides what a sample is worth.
+                    clock.sample(offset, rtt);
                 }
             }
         });
@@ -1001,6 +1122,7 @@ impl Session {
             let mut target = self.peer;
             target.set_port(p);
             let tx = socket.clone();
+            let tx_clock = self.timing.clone();
             println!("[airplay] driving clock sync to {target}");
             tokio::spawn(async move {
                 let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -1011,7 +1133,7 @@ impl Session {
                     pkt[1] = TIMING_REQUEST;
                     pkt[2..4].copy_from_slice(&7u16.to_be_bytes());
                     // Our transmit time; the phone echoes it back as originate.
-                    pkt[24..32].copy_from_slice(&ntp_timestamp_now());
+                    pkt[24..32].copy_from_slice(&tx_clock.lock().await.now());
                     if tx.send_to(&pkt, target).await.is_err() {
                         break;
                     }
@@ -1022,16 +1144,3 @@ impl Session {
     }
 }
 
-/// Seconds since 1900 in NTP fixed point, which starts from a different epoch
-/// than everything else you have written today.
-fn ntp_timestamp_now() -> [u8; 8] {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    const SECONDS_1900_TO_1970: u64 = 2_208_988_800;
-    let since_unix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-    let secs = since_unix.as_secs() + SECONDS_1900_TO_1970;
-    let frac = ((since_unix.subsec_micros() as u64) << 32) / 1_000_000;
-    let mut out = [0u8; 8];
-    out[..4].copy_from_slice(&(secs as u32).to_be_bytes());
-    out[4..].copy_from_slice(&(frac as u32).to_be_bytes());
-    out
-}
