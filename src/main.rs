@@ -117,8 +117,9 @@ async fn main() -> Result<()> {
     if let Some(hub) = &hub {
         let hub = hub.clone();
         let port = cfg.web_port;
+        let token = cfg.web_token.clone();
         tokio::spawn(async move {
-            if let Err(e) = web::serve(hub, port).await {
+            if let Err(e) = web::serve(hub, port, token).await {
                 eprintln!("[web] {e}");
             }
         });

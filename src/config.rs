@@ -78,6 +78,11 @@ pub struct Config {
     /// Where the browser client is served. HTTPS only; the port is the whole
     /// address, since it listens on every interface.
     pub web_port: u16,
+    /// The access token the page has to carry — on the socket, and when changing
+    /// the display. Fixed rather than minted per run, so the URL to open, and
+    /// any bookmark of it, survives a restart. The default is sixteen zero bytes
+    /// in hex, which is what the debugging URL used to look like anyway.
+    pub web_token: String,
     /// Android Auto over TCP. The wireless protocol is TCP on this port, so a
     /// head unit that connects over the network works without a gadget — which
     /// is also the only way to try any of this from a Mac.
@@ -152,6 +157,7 @@ impl Config {
                 None => Sink::Web,
             },
             web_port: env_num("CP2AA_WEB_PORT", 8080),
+            web_token: env_or("CP2AA_WEB_TOKEN", "00000000000000000000000000000000"),
             // 5288 is the port Android Auto uses for wireless.
             aa_tcp_port: env_num("CP2AA_AA_TCP_PORT", 5288),
             #[cfg(target_os = "linux")]

@@ -895,8 +895,7 @@ pub fn web_root() -> PathBuf {
 /// TLS is not optional: WebCodecs only exists in a secure context, and a LAN
 /// address over plain HTTP is not one. The certificate is generated here, so the
 /// first visit is a warning to click through.
-pub async fn serve(hub: Arc<Hub>, port: u16) -> anyhow::Result<()> {
-    let token = random_token();
+pub async fn serve(hub: Arc<Hub>, port: u16, token: String) -> anyhow::Result<()> {
     let host = local_ipv4();
     let app = router(hub, token.clone(), web_root());
     let certificate = self_signed(&host).await?;
@@ -909,15 +908,6 @@ pub async fn serve(hub: Arc<Hub>, port: u16) -> anyhow::Result<()> {
         .serve(app.into_make_service())
         .await
         .map_err(|e| anyhow::anyhow!("web server stopped: {e}"))
-}
-
-/// A fresh access token per start, the same 16 random bytes the Kotlin server
-/// minted. It is what the printed link carries and what the socket checks.
-fn random_token() -> String {
-    use rand::RngCore;
-    let mut bytes = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A certificate for this machine, made here so there is nothing to configure.
