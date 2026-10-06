@@ -300,7 +300,7 @@ pub async fn serve(listener: TcpListener, shared: Shared) {
                 keys: None,
                 cipher_read: None,
                 cipher_write: None,
-                next_port: NextPort::default(),
+                _timing: Vec::new(),
                 streams: HashMap::new(),
                 pumps: HashMap::new(),
                 in_buf: Vec::new(),
@@ -318,24 +318,26 @@ pub async fn serve(listener: TcpListener, shared: Shared) {
     }
 }
 
-/// Ports are allocated from a range so each stream is easy to tell apart in
-/// `lsof`, and because the phone expects them to be distinct.
-struct NextPort(u16);
+/// What is told to the phone for a stream we do not actually open.
+///
+/// The number is never bound, so the phone never reaches anything on it; it
+/// exists because the answer's shape has a `dataPort` field. It used to come
+/// from the same range as the real ports, back when those were handed out from
+/// a counter — see `setup_session` for why that had to go.
+const UNUSED_PORT: u16 = 45000;
 
-impl Default for NextPort {
-    fn default() -> Self {
-        Self(45000)
-    }
-}
+/// Aborts a task when the session that started it goes away.
+///
+/// The timing socket loops on `recv_from` until something tells it to stop, and
+/// nothing in the protocol ever does: each session binds its own, and the task
+/// that owns it outlives the session that started it unless it is killed. The
+/// descriptor would then live as long as the process, one per session — a
+/// debugging run that changes resolution a dozen times leaves a dozen behind.
+struct StopOnDrop(tokio::task::JoinHandle<()>);
 
-impl NextPort {
-    fn take(&mut self) -> u16 {
-        let p = self.0;
-        self.0 = self.0.wrapping_add(1);
-        if self.0 > 45999 {
-            self.0 = 45000;
-        }
-        p
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -376,9 +378,11 @@ struct Session {
     keys: Option<VerifyKeys>,
     cipher_read: Option<SymKey>,
     cipher_write: Option<SymKey>,
-    next_port: NextPort,
     /// stream id -> port, kept only for logging.
     streams: HashMap<u64, u16>,
+    /// Tasks this session started that nothing else will stop. Held rather than
+    /// awaited: dropping them is the whole point, see `StopOnDrop`.
+    _timing: Vec<StopOnDrop>,
     /// Open streams by the type the phone names them with. Teardown looks them
     /// up here to close what it says it is closing.
     pumps: HashMap<i64, Pump>,
@@ -828,8 +832,6 @@ impl Session {
     }
 
     async fn setup_session(&mut self, dict: Dictionary) -> Result<Response, String> {
-        let event_port = self.next_port.take();
-        let timing_port = self.next_port.take();
         let keys = self.keys.ok_or("SETUP before pair-verify")?;
         // The phone tells us where to send our timing requests; it is the only
         // way the two clocks ever agree.
@@ -840,9 +842,18 @@ impl Session {
 
         // The phone opens this before it asks for any stream. It is bidirectional:
         // we push input down it, and it posts us requests that each need a 200.
-        let listener = TcpListener::bind(("::", event_port))
+        //
+        // Every port here is the kernel's choice, not one of ours. A session that
+        // has just ended leaves a socket or two behind for a moment — the event
+        // channel's write half in particular is held by `EventSink` until the
+        // connection actually goes away — and binding a number one of them still
+        // holds fails with `EADDRINUSE`. That is precisely what the second SETUP
+        // after a display change used to hit: the ports were handed out from a
+        // counter that restarted at 45000 for every session.
+        let listener = TcpListener::bind(("::", 0))
             .await
             .map_err(|e| e.to_string())?;
+        let event_port = listener.local_addr().map_err(|e| e.to_string())?.port();
         let read_key = SymKey::from_bytes(&keys.events_read()).map_err(|e| e.to_string())?;
         let sink = self.event_sink.clone();
         let responder = sink.clone();
@@ -862,7 +873,7 @@ impl Session {
             pump_events(read, read_key, responder).await;
         });
 
-        self.spawn_timing(timing_port, peer_timing_port).await?;
+        let timing_port = self.spawn_timing(peer_timing_port).await?;
 
         let mut body = Dictionary::new();
         body.insert(
@@ -918,10 +929,10 @@ impl Session {
 
             match type_ {
                 Some(110) => {
-                    let port = self.next_port.take();
-                    let listener = TcpListener::bind(("::", port))
+                    let listener = TcpListener::bind(("::", 0))
                         .await
                         .map_err(|e| e.to_string())?;
+                    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
                     let sink = self.video_sink.clone();
                     let task = tokio::spawn(async move {
                         let Ok((socket, _)) = listener.accept().await else {
@@ -938,11 +949,10 @@ impl Session {
                     replies.push(Value::Dictionary(entry));
                 }
                 Some(100) | Some(101) | Some(102) => {
-                    let port = self.next_port.take();
-                    let control_port = self.next_port.take();
-                    let socket = UdpSocket::bind(("::", port))
+                    let socket = UdpSocket::bind(("::", 0))
                         .await
                         .map_err(|e| e.to_string())?;
+                    let port = socket.local_addr().map_err(|e| e.to_string())?.port();
                     let fmt = table
                         .get("audioFormat")
                         .and_then(|v| v.as_signed_integer())
@@ -1011,13 +1021,17 @@ impl Session {
                     });
                     // Bound but never read; a failure here is not worth failing
                     // the whole setup over.
-                    let control = match UdpSocket::bind(("::", control_port)).await {
+                    let control = match UdpSocket::bind(("::", 0)).await {
                         Ok(s) => Some(s),
                         Err(e) => {
-                            eprintln!("[airplay] control port {control_port} not bound: {e}");
+                            eprintln!("[airplay] control port not bound: {e}");
                             None
                         }
                     };
+                    let control_port = control
+                        .as_ref()
+                        .and_then(|s| s.local_addr().ok())
+                        .map_or(0, |a| a.port());
                     self.open_pump(stream_type, task, control);
                     self.streams.insert(stream_id as u64, port);
                     let mut entry = Dictionary::new();
@@ -1035,10 +1049,9 @@ impl Session {
                 }
                 // 130 is iAP-over-CarPlay; ignoring it costs nothing visible.
                 other => {
-                    let port = self.next_port.take();
                     let mut entry = Dictionary::new();
                     entry.insert("type".into(), Value::Integer(other.unwrap_or(0).into()));
-                    entry.insert("dataPort".into(), Value::Integer((port as i64).into()));
+                    entry.insert("dataPort".into(), Value::Integer(UNUSED_PORT.into()));
                     replies.push(Value::Dictionary(entry));
                 }
             }
@@ -1192,22 +1205,21 @@ impl Session {
     /// The accessory drives it — it sends a request every second to the port the
     /// phone named in its SETUP. Without that the phone drops the session after
     /// a few seconds, which looks exactly like a codec failure.
-    async fn spawn_timing(
-        &mut self,
-        port: u16,
-        peer_timing_port: Option<u16>,
-    ) -> Result<(), String> {
+    /// Also returns the port it landed on: the phone is told to send here, so
+    /// the kernel's choice has to be read back rather than assumed.
+    async fn spawn_timing(&mut self, peer_timing_port: Option<u16>) -> Result<u16, String> {
         let socket = Arc::new(
-            UdpSocket::bind(("::", port))
+            UdpSocket::bind(("::", 0))
                 .await
                 .map_err(|e| e.to_string())?,
         );
+        let port = socket.local_addr().map_err(|e| e.to_string())?.port();
 
         // Two jobs on one socket: answer the phone's requests, and read the
         // replies to ours. Both stamp with the same steered clock.
         let rx = socket.clone();
         let rx_clock = self.timing.clone();
-        tokio::spawn(async move {
+        let reader = tokio::spawn(async move {
             let mut buf = [0u8; 64];
             loop {
                 let Ok((n, from)) = rx.recv_from(&mut buf).await else {
@@ -1248,6 +1260,7 @@ impl Session {
                 }
             }
         });
+        self._timing.push(StopOnDrop(reader));
 
         // And drive our own requests, so the phone has a clock to work against.
         if let Some(p) = peer_timing_port.filter(|p| *p > 0) {
@@ -1256,7 +1269,7 @@ impl Session {
             let tx = socket.clone();
             let tx_clock = self.timing.clone();
             println!("[airplay] driving clock sync to {target}");
-            tokio::spawn(async move {
+            let ticker = tokio::spawn(async move {
                 let mut tick = tokio::time::interval(Duration::from_secs(1));
                 loop {
                     tick.tick().await;
@@ -1271,8 +1284,9 @@ impl Session {
                     }
                 }
             });
+            self._timing.push(StopOnDrop(ticker));
         }
-        Ok(())
+        Ok(port)
     }
 }
 

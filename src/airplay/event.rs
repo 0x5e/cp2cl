@@ -93,6 +93,18 @@ impl EventSink {
         outcome
     }
 
+    /// Gives up the write half once the connection it belongs to has gone.
+    ///
+    /// Left here it would outlive the session: the phone closes the event
+    /// channel when a session ends, `pump_events` sees that and returns, but
+    /// the write half parked on the sink keeps the socket — and its local port
+    /// — alive on its own. One descriptor per session, for as long as the
+    /// process runs, is exactly the kind of thing that only shows up as "it
+    /// stopped working some hours later".
+    pub(crate) async fn detach_writer(&self) {
+        *self.writer.lock().await = None;
+    }
+
     /// Answers one request the phone posted us on the event channel.
     ///
     /// The channel runs both ways: alongside our HID reports the phone sends its
@@ -134,7 +146,7 @@ pub(crate) async fn pump_events(
         // Same framing as the control channel: [2B length][ciphertext][tag].
         if let Err(e) = open_frames(&read_key, &mut ctr, &mut enc, &mut plain) {
             eprintln!("[event] frame failed to open: {e}");
-            return;
+            break;
         }
 
         while let Ok(Some((req, used))) = rtsp::parse(&plain) {
@@ -156,10 +168,11 @@ pub(crate) async fn pump_events(
             );
             if let Err(e) = sink.reply(req.cseq()).await {
                 eprintln!("[event] reply failed: {e}");
-                return;
+                break;
             }
         }
     }
+    sink.detach_writer().await;
     println!("[airplay] event channel closed");
 }
 
