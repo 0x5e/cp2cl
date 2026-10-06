@@ -5,10 +5,10 @@
 //! for the life of the session. Everything a session needs is owned once in
 //! `Shared` and cloned per connection.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use plist::{dictionary::Dictionary, from_bytes, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -35,6 +35,39 @@ const MFISAP_VERSION: u8 = 0x01;
 /// Timing-port packet types (RTCP-shaped, not NTP): request and reply.
 const TIMING_REQUEST: u8 = 210;
 const TIMING_RESPONSE: u8 = 211;
+
+/// How often the audio pump reports how it is going. Choppy sound is either
+/// packets that never arrived or an uneven trickle of them, and nothing else in
+/// the program can tell those apart.
+const AUDIO_REPORT: Duration = Duration::from_secs(5);
+
+/// An arrival this much later than the one before it closes the burst that was
+/// in progress and starts a new one.
+///
+/// The phone does not send a buffered stream one packet at a time: it hands
+/// over a lump and lets the receiver's buffer absorb it. Whether the player can
+/// absorb that lump is the difference between sound and stutter, so the lumps
+/// are counted instead of inferred from packet totals.
+const BURST_GAP: Duration = Duration::from_millis(50);
+
+/// The buffered media stream. It is the one stream the phone hands over in
+/// lumps — ~384 ms at a time — rather than at its own playback rate, so it is
+/// the one stream that has to be re-timed on the way out.
+const BUFFERED_AUDIO: u8 = 102;
+
+/// How late a frame may be before the pacer stops resuming the schedule it was
+/// following and takes that frame as the new zero.
+///
+/// Small on purpose: a frame that is merely a little late keeps its place, so
+/// ordinary scheduling jitter does not accumulate into drift, while one held up
+/// past this cannot be caught up on without firing a burst — and a burst is
+/// exactly what makes the consumer reschedule.
+const PACE_SLACK: Duration = Duration::from_millis(8);
+
+/// A timestamp this far from the one before it is not the next frame: it is a
+/// counter wraparound, or a stream that started again after a pause. The pacer
+/// anchors on it instead of waiting out the difference.
+const PACE_RESET: Duration = Duration::from_secs(5);
 
 /// Every audio stream the phone has open, as far as `/feedback` is concerned.
 ///
@@ -339,6 +372,37 @@ impl Drop for StopOnDrop {
     fn drop(&mut self) {
         self.0.abort();
     }
+}
+
+/// One audio frame waiting for the moment the phone's own timestamp gives it.
+struct Pending {
+    timestamp_us: u64,
+    data: Vec<u8>,
+}
+
+/// Waits until the frame stamped `ts` is due, `last` being the deadline the one
+/// before it went out on.
+///
+/// Every frame is measured against the phone's timestamp rather than against
+/// when it happened to arrive, which is what keeps the pacing from drifting: a
+/// frame that is late delays only itself. Past `PACE_SLACK` even that stops
+/// being true — the frames behind it would have to be fired off together to
+/// catch up — so that frame becomes the new anchor instead.
+async fn wait_due(last: &mut (u64, tokio::time::Instant), ts: u64) {
+    let now = tokio::time::Instant::now();
+    let ahead = ts.saturating_sub(last.0);
+    if ahead > PACE_RESET.as_micros() as u64 {
+        *last = (ts, now);
+        return;
+    }
+    let mut due = last.1 + Duration::from_micros(ahead);
+    if now > due + PACE_SLACK {
+        due = now;
+    }
+    if due > now {
+        tokio::time::sleep_until(due).await;
+    }
+    *last = (ts, due);
 }
 
 /// One open stream: the task reading it, and a socket held on the phone's
@@ -967,9 +1031,20 @@ impl Session {
                         .and_then(|v| v.as_string())
                         .unwrap_or("default")
                         .to_ascii_lowercase();
+                    // The phone's jitter buffer: how far the sound lags the
+                    // samples it has already handed us, and so what `/feedback`
+                    // has to subtract. Not sending it means there is none — and
+                    // a stream the phone calls buffered is sent in lumps sized
+                    // against exactly this, so the number is worth printing.
+                    let latency = table
+                        .get("audioLatencyMs")
+                        .and_then(|v| v.as_signed_integer())
+                        .filter(|v| *v > 0)
+                        .map(|v| v as u64)
+                        .unwrap_or(0);
                     println!(
                         "[airplay] audio stream type {stream_type} {audio_type:?} \
-                         (format 0x{fmt:x} -> {codec:?})"
+                         (format 0x{fmt:x} -> {codec:?}), latency {latency} ms"
                     );
                     {
                         *self.codec.lock().await = codec;
@@ -999,15 +1074,6 @@ impl Session {
                         codec,
                         name: audio_type,
                     });
-                    // The phone's jitter buffer: how far the sound lags the
-                    // samples it has already handed us, and so what `/feedback`
-                    // has to subtract. Not sending it means there is none.
-                    let latency = table
-                        .get("audioLatencyMs")
-                        .and_then(|v| v.as_signed_integer())
-                        .filter(|v| *v > 0)
-                        .map(|v| v as u64)
-                        .unwrap_or(0);
                     let id = self
                         .audio_clock
                         .lock()
@@ -1168,16 +1234,80 @@ impl Session {
         let rx = AudioReceiver::new(key, stream_type, codec, sink.clone());
         let mut buf = [0u8; 2048];
         let mut packets: u64 = 0;
+        // Sound that stutters is either packets that never arrived or ones that
+        // arrived in lumps. The sequence number counts the first, the gap
+        // between arrivals measures the second, and neither is visible from
+        // anywhere else — so both are reported, worst gap and all.
+        let mut last_seq: Option<u16> = None;
+        let mut missing: u64 = 0;
+        let mut worst_gap = Duration::ZERO;
+        let mut last_at = Instant::now();
+        let mut report_at = last_at + AUDIO_REPORT;
+        // Lumps, counted directly: a gap longer than BURST_GAP closes the one
+        // before it, so every closed lump is a burst and its packet count is
+        // how much audio the phone handed over at once.
+        let mut bursts: u64 = 0;
+        let mut burst_sum: u64 = 0;
+        let mut burst_min = u32::MAX;
+        let mut burst_max: u32 = 0;
+        let mut in_burst: u32 = 0;
+        // The buffered stream is re-timed: frames wait here for the moment the
+        // phone's own timestamp gives them and leave one at a time, so the
+        // consumer never sees the lump they arrived in. Every other stream is
+        // already arriving at its own playback rate and goes straight through.
+        let paced = stream_type == BUFFERED_AUDIO;
+        let mut queue: VecDeque<Pending> = VecDeque::new();
+        // Where the frame before this one was due; the next is measured from it.
+        let mut aired = (0u64, tokio::time::Instant::now());
         loop {
-            match socket.recv(&mut buf).await {
-                Ok(n) => {
+            // A frame waiting to go out is the other thing this loop waits on.
+            // With none there is nothing to wait for but the next packet.
+            let front = queue.front().map(|f| f.timestamp_us);
+            tokio::select! {
+                biased;
+                _ = wait_due(&mut aired, front.unwrap_or(0)), if front.is_some() => {
+                    if let Some(frame) = queue.pop_front() {
+                        sink.push(StreamEvent::AudioPacket {
+                            stream_type,
+                            timestamp_us: frame.timestamp_us,
+                            data: frame.data,
+                        });
+                    }
+                }
+                got = socket.recv(&mut buf) => {
+                    let Ok(n) = got else { break };
+                    let now = Instant::now();
+                    let gap = now - last_at;
+                    worst_gap = worst_gap.max(gap);
+                    last_at = now;
+                    if gap > BURST_GAP && in_burst > 0 {
+                        bursts += 1;
+                        burst_sum += u64::from(in_burst);
+                        burst_min = burst_min.min(in_burst);
+                        burst_max = burst_max.max(in_burst);
+                        in_burst = 0;
+                    }
+                    in_burst += 1;
                     // The RTP timestamp is the phone's own sample counter; it is
                     // what /feedback reports back as the playout position.
                     if n >= audio::RTP_HEADER_LEN {
                         let ts = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
                         clock.lock().await.note(id, ts);
+                        let seq = u16::from_be_bytes([buf[2], buf[3]]);
+                        if let Some(prev) = last_seq {
+                            // Wrapping subtraction, so a counter that rolls over
+                            // reads as the one packet it is.
+                            missing += u64::from(seq.wrapping_sub(prev.wrapping_add(1)));
+                        }
+                        last_seq = Some(seq);
                     }
-                    rx.feed(&buf[..n]);
+                    if paced {
+                        if let Some((timestamp_us, data)) = rx.decode(&buf[..n]) {
+                            queue.push_back(Pending { timestamp_us, data });
+                        }
+                    } else {
+                        rx.feed(&buf[..n]);
+                    }
                     packets += 1;
                     // Once, and only to settle a question: if this appears right
                     // after "audio stream attached" but sound comes seconds
@@ -1186,8 +1316,33 @@ impl Session {
                     if packets == 1 {
                         println!("[airplay] audio: first packet handed to the player");
                     }
+                    if now >= report_at {
+                        // A burst is only counted once the next one starts, so a
+                        // window that saw none reports zero rather than a stale
+                        // minimum.
+                        let (lo, hi, avg) = if bursts == 0 {
+                            (0, 0, 0.0)
+                        } else {
+                            (burst_min, burst_max, burst_sum as f64 / bursts as f64)
+                        };
+                        // `held` is what the re-timing shows: a buffered stream
+                        // leaves at its own rate, so the queue should sit at a
+                        // steady depth instead of sawtoothing.
+                        println!(
+                            "[airplay] audio: {packets} packets, {missing} missing, \
+                             worst gap {:.0} ms, {bursts} bursts of {lo}-{hi} \
+                             (avg {avg:.1}), {} held",
+                            worst_gap.as_secs_f64() * 1000.0,
+                            queue.len()
+                        );
+                        worst_gap = Duration::ZERO;
+                        bursts = 0;
+                        burst_sum = 0;
+                        burst_min = u32::MAX;
+                        burst_max = 0;
+                        report_at = now + AUDIO_REPORT;
+                    }
                 }
-                Err(_) => break,
             }
         }
         // Whatever ended it — the phone tearing the stream down, or the socket
@@ -1195,7 +1350,9 @@ impl Session {
         // in `/feedback` is one the phone keeps asking about.
         clock.lock().await.close(id);
         sink.push(StreamEvent::AudioStopped { stream_type });
-        println!("[airplay] audio stream closed after {packets} packets");
+        println!(
+            "[airplay] audio stream closed after {packets} packets, {missing} missing"
+        );
     }
 
     /// Clock sync on the timing port.

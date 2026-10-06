@@ -43,9 +43,13 @@ impl AudioReceiver {
         }
     }
 
-    pub fn feed(&self, packet: &[u8]) {
+    /// One packet's frame, decoded but not yet handed anywhere.
+    ///
+    /// The buffered stream is re-timed before it reaches the consumer, so the
+    /// pacer wants the frame and its timestamp apart from the sink.
+    pub fn decode(&self, packet: &[u8]) -> Option<(u64, Vec<u8>)> {
         if packet.len() <= RTP_HEADER_LEN + TAG_LEN + NONCE_LEN {
-            return;
+            return None;
         }
         let end = packet.len() - NONCE_LEN;
         let mut nonce = [0u8; 12];
@@ -55,10 +59,10 @@ impl AudioReceiver {
 
         let Ok(payload) = open(&self.key, &nonce, sealed, aad) else {
             eprintln!("[audio] packet failed to open");
-            return;
+            return None;
         };
         if payload.is_empty() {
-            return;
+            return None;
         }
 
         let data = match self.codec {
@@ -68,11 +72,17 @@ impl AudioReceiver {
             AudioCodec::Pcm { .. } => to_le16(&payload),
             _ => payload,
         };
-        self.sink.push(StreamEvent::AudioPacket {
-            stream_type: self.stream_type,
-            timestamp_us: self.timestamp_us(packet),
-            data,
-        });
+        Some((self.timestamp_us(packet), data))
+    }
+
+    pub fn feed(&self, packet: &[u8]) {
+        if let Some((timestamp_us, data)) = self.decode(packet) {
+            self.sink.push(StreamEvent::AudioPacket {
+                stream_type: self.stream_type,
+                timestamp_us,
+                data,
+            });
+        }
     }
 
     /// The RTP timestamp is the phone's own sample counter. Turning it into

@@ -398,6 +398,17 @@ plugged in. Expect to fix the UDC name and the endpoint ordering first.
   for the rest of the session.
 * **A display change blanks the screen for a moment.** See the display panel
   above: the session has to be rebuilt for the new size to reach the phone.
+* **Wireless audio is re-timed on the way out.** A *buffered* media stream does
+  not arrive packet by packet: the phone hands it over in lumps — measured at a
+  steady 18 packets, 384 ms of audio, with nothing in between — which is more
+  than the client's own 120–350 ms playback buffer holds, so it reschedules in
+  the middle of a lump and the sound stutters. Wired sessions never see this,
+  because the phone sends PCM packet by packet there. The audio pump therefore
+  releases the buffered stream one frame per 21.33 ms, and prints how it is
+  going every five seconds:
+  `[airplay] audio: N packets, M missing, worst gap X ms, B bursts of LO-HI (avg A), N held`.
+  A rising `missing` is loss; a large `worst gap` is the phone's lumping and is
+  expected; `held` is how much audio is waiting to go out.
 
 ## Known gaps
 
