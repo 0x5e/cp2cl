@@ -236,6 +236,12 @@ pub struct Hub {
     /// is answered once per session and never asked again, so nothing short of a
     /// new session changes what the phone renders.
     restart: broadcast::Sender<()>,
+    /// Where each touch slot was last reported. The browser lists a finger only
+    /// while it is down, so a lift arrives as a slot that is simply missing from
+    /// the message — and reporting that slot at the origin instead would drop the
+    /// finger in the top left corner, which the phone reads as a jump and stops
+    /// the press it was in the middle of.
+    last_touch: Mutex<[TouchContact; TOUCH_SLOTS]>,
 }
 
 impl Hub {
@@ -264,6 +270,7 @@ impl Hub {
             input,
             mic,
             restart,
+            last_touch: Mutex::new([TouchContact::default(); TOUCH_SLOTS]),
         });
         hub.watch_microphone();
         hub
@@ -457,7 +464,14 @@ impl Hub {
                 // own pixel space — the canvas, which the UI scale can make a
                 // different size from the one the panel displays.
                 let canvas = self.canvas();
-                let mut contacts = [TouchContact::default(); TOUCH_SLOTS];
+                let mut last = self.last_touch.lock().unwrap();
+                // Every slot starts lifted, still where it was. A slot the
+                // message does not name is one the browser has dropped, and
+                // dropping a finger is how it says the finger came up.
+                let mut contacts = *last;
+                for contact in contacts.iter_mut() {
+                    contact.down = false;
+                }
                 for contact in message.contacts.iter().take(TOUCH_SLOTS) {
                     let slot = contact.id as usize;
                     if slot >= TOUCH_SLOTS {
@@ -469,6 +483,7 @@ impl Hub {
                         y: (contact.y.clamp(0.0, 1.0) * canvas.height as f64) as u16,
                     };
                 }
+                *last = contacts;
                 vec![Command::Touch(contacts)]
             }
             "media" => message

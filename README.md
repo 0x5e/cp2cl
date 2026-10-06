@@ -248,7 +248,11 @@ media and telephony.
 A press is always two reports, the press and an all-zero one. The phone tracks a
 button by whether it is still down, so a key that is never released does not
 register as a press at all; the same is true of the touchscreen, where a lifted
-finger has to leave its slot behind rather than disappear from the list.
+finger has to leave its slot behind rather than disappear from the list, and at
+the position it was last seen at. The browser drops a finger the moment it lifts,
+so a slot a message does not name is carried over from the last report with only
+its touch bit cleared. Naming the origin instead reads as the finger jumping
+there, and the phone cancels a press that moves off the control before it lifts.
 
 ## The microphone
 
