@@ -3,6 +3,7 @@
 //! Nothing here is required: the defaults build a working wired session and serve
 //! it to the browser client. See README for the full table.
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 fn env(key: &str) -> Option<String> {
@@ -14,6 +15,15 @@ fn env(key: &str) -> Option<String> {
 
 fn env_or(key: &str, default: &str) -> String {
     env(key).unwrap_or_else(|| default.to_string())
+}
+
+/// `CP2AA_LOG`, or `info`.
+///
+/// Read on its own rather than with the rest, because it has to be known before
+/// the config is: a setting that could not be used is reported by a log line,
+/// and that line needs a subscriber to already exist.
+pub fn log_filter() -> String {
+    env_or("CP2AA_LOG", "info")
 }
 
 fn env_num<T: std::str::FromStr>(key: &str, default: T) -> T {
@@ -72,12 +82,13 @@ pub struct Config {
     /// Linux only: which USB network gadget carries the airplay stream.
     /// Auto-detected when unset.
     pub av_iface: Option<String>,
-    pub log_filter: String,
     /// What consumes the streams: the browser client, or an Android Auto head unit.
     pub sink: Sink,
-    /// Where the browser client is served. HTTPS only; the port is the whole
-    /// address, since it listens on every interface.
-    pub web_port: u16,
+    /// Where the browser client is served, read from `CP2AA_WEB_ADDR` as
+    /// `address:port`. The scheme is not part of it because there is only one:
+    /// the page decodes with WebCodecs, which a browser only offers in a secure
+    /// context, so this is HTTPS whether or not anyone says so.
+    pub web_addr: SocketAddr,
     /// The access token the page has to carry — on the socket, and when changing
     /// the display. Fixed rather than minted per run, so the URL to open, and
     /// any bookmark of it, survives a restart. The default is sixteen zero bytes
@@ -145,7 +156,6 @@ impl Config {
             bt_mac: env_or("CP2AA_BT_MAC", "00:11:22:33:44:55"),
             name: env_or("CP2AA_NAME", "cp2aa"),
             av_iface: env("CP2AA_AV_IFACE"),
-            log_filter: env_or("CP2AA_LOG", "info"),
             sink: match env("CP2AA_SINK") {
                 Some(text) => match Sink::parse(&text) {
                     Some(sink) => sink,
@@ -156,7 +166,7 @@ impl Config {
                 },
                 None => Sink::Web,
             },
-            web_port: env_num("CP2AA_WEB_PORT", 8080),
+            web_addr: web_addr_from_env(),
             web_token: env_or("CP2AA_WEB_TOKEN", "00000000000000000000000000000000"),
             // 5288 is the port Android Auto uses for wireless.
             aa_tcp_port: env_num("CP2AA_AA_TCP_PORT", 5288),
@@ -206,6 +216,26 @@ impl Config {
     }
 }
 
+/// Where the browser client listens unless told otherwise. `0.0.0.0` is every
+/// interface, which is what makes the page reachable from another device.
+const DEFAULT_WEB_ADDR: &str = "0.0.0.0:8080";
+
+/// `CP2AA_WEB_ADDR`, or the default when it is unset or not an `address:port`.
+fn web_addr_from_env() -> SocketAddr {
+    let Some(text) = env("CP2AA_WEB_ADDR") else {
+        return default_web_addr();
+    };
+    text.parse().unwrap_or_else(|_| {
+        tracing::warn!("[cp2aa] CP2AA_WEB_ADDR={text} is not `address:port`; using {DEFAULT_WEB_ADDR}");
+        default_web_addr()
+    })
+}
+
+fn default_web_addr() -> SocketAddr {
+    // A constant, so this cannot fail.
+    DEFAULT_WEB_ADDR.parse().expect("the default web address parses")
+}
+
 /// The interface the phone will be told to reach us on, per platform.
 fn default_wifi_iface() -> &'static str {
     #[cfg(target_os = "macos")]
@@ -215,5 +245,15 @@ fn default_wifi_iface() -> &'static str {
     #[cfg(not(target_os = "macos"))]
     {
         "wlan0"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_default_web_address_is_every_interface_on_8080() {
+        assert_eq!(default_web_addr().to_string(), "0.0.0.0:8080");
     }
 }

@@ -82,9 +82,10 @@ That certificate is self-signed by us, so the browser does not know it. Click
 through the warning once and the page works. The certificate is regenerated on
 every start, so nothing has to be stored or renewed.
 
-The address printed is this machine's LAN address as the route to the phone sees
-it, which is the one to use from another device. `https://localhost:8080` works
-too, on the machine itself.
+The server listens wherever `CP2AA_WEB_ADDR` says — `0.0.0.0:8080` by default —
+and the address printed is this machine's LAN address as the route to the phone
+sees it, which is the one to use from another device.
+`https://localhost:8080` works too, on the machine itself.
 
 ### The token
 
@@ -174,7 +175,7 @@ decode. `CP2AA_HEVC` sets the default, and the panel overrides it per session.
 |---|---|---|
 | `CP2AA_AUTH_DIR` | `./authentication` | MFi credentials |
 | `CP2AA_SINK` | `web` | where the streams go: `web` serves the browser client, `aa` sends them to a connected Android Auto head unit |
-| `CP2AA_WEB_PORT` | `8080` | where the browser client is served, on every interface |
+| `CP2AA_WEB_ADDR` | `0.0.0.0:8080` | where the browser client is served. HTTPS is not part of it because there is no other option — WebCodecs needs a secure context — and `0.0.0.0` is every interface |
 | `CP2AA_WEB_TOKEN` | sixteen zero bytes | the token the page has to carry; fixed, so the URL is stable. Set something shorter if typing it in is annoying |
 | `CP2AA_WIDTH` / `CP2AA_HEIGHT` | `1280` / `720` | what the phone renders, until the display panel says otherwise |
 | `CP2AA_FPS` | `60` | frame rate上限 |

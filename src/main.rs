@@ -59,11 +59,15 @@ async fn main() -> Result<()> {
     // dropped or unexpected that we carried on from, `info` is the life of a
     // session — connecting, pairing, streams opening and closing — and `debug`
     // is the per-event detail that would otherwise drown all of it.
-    let cfg = Arc::new(Config::from_env());
+    // It is installed before the config is read on purpose: a setting that
+    // cannot be used is reported by a log line, and that line needs somewhere
+    // to go.
     tracing_subscriber::fmt()
-        .with_env_filter(&cfg.log_filter)
+        .with_env_filter(config::log_filter())
         .with_target(false)
         .init();
+
+    let cfg = Arc::new(Config::from_env());
 
     tracing::info!("cp2aa — headless CarPlay receiver");
 
@@ -122,10 +126,10 @@ async fn main() -> Result<()> {
 
     if let Some(hub) = &hub {
         let hub = hub.clone();
-        let port = cfg.web_port;
+        let address = cfg.web_addr;
         let token = cfg.web_token.clone();
         tokio::spawn(async move {
-            if let Err(e) = web::serve(hub, port, token).await {
+            if let Err(e) = web::serve(hub, address, token).await {
                 tracing::error!("[web] {e}");
             }
         });

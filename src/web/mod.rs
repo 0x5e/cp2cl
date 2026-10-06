@@ -910,13 +910,19 @@ pub fn web_root() -> PathBuf {
 /// TLS is not optional: WebCodecs only exists in a secure context, and a LAN
 /// address over plain HTTP is not one. The certificate is generated here, so the
 /// first visit is a warning to click through.
-pub async fn serve(hub: Arc<Hub>, port: u16, token: String) -> anyhow::Result<()> {
-    let host = local_ipv4();
+pub async fn serve(hub: Arc<Hub>, address: SocketAddr, token: String) -> anyhow::Result<()> {
+    // What the page is opened at is not always what we listen on: `0.0.0.0` is
+    // every interface, and no browser can open that.
+    let host = advertised_ip(address);
+    let port = address.port();
     let app = router(hub, token.clone(), web_root());
-    let certificate = self_signed(&host).await?;
-    let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
+    let certificate = self_signed(host).await?;
 
-    tracing::info!("[web] browser client: https://{host}:{port}/?token={token}");
+    let authority = match host {
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
+    };
+    tracing::info!("[web] browser client: https://{authority}:{port}/?token={token}");
     tracing::info!("[web] accept the certificate warning once; WebCodecs needs HTTPS");
 
     axum_server::bind_rustls(address, certificate)
@@ -927,13 +933,13 @@ pub async fn serve(hub: Arc<Hub>, port: u16, token: String) -> anyhow::Result<()
 
 /// A certificate for this machine, made here so there is nothing to configure.
 /// Self-signed, so the browser has to be told once that it is fine.
-async fn self_signed(host: &str) -> anyhow::Result<axum_server::tls_rustls::RustlsConfig> {
+async fn self_signed(host: IpAddr) -> anyhow::Result<axum_server::tls_rustls::RustlsConfig> {
     let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()])?;
     params
         .subject_alt_names
         .push(rcgen::SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST)));
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        params.subject_alt_names.push(rcgen::SanType::IpAddress(ip));
+    if host != IpAddr::V4(Ipv4Addr::LOCALHOST) {
+        params.subject_alt_names.push(rcgen::SanType::IpAddress(host));
     }
     let key = rcgen::KeyPair::generate()?;
     let cert = params.self_signed(&key)?;
@@ -944,19 +950,26 @@ async fn self_signed(host: &str) -> anyhow::Result<axum_server::tls_rustls::Rust
     Ok(config.await?)
 }
 
-/// The address the browser should be pointed at: this machine's LAN address, as
-/// seen by the route the phone is told to use.
-fn local_ipv4() -> String {
+/// The address to advertise: the one bound when it names an interface, and this
+/// machine's LAN address when we listen on all of them.
+fn advertised_ip(address: SocketAddr) -> IpAddr {
+    if address.ip().is_unspecified() {
+        local_ipv4()
+    } else {
+        address.ip()
+    }
+}
+
+/// This machine's LAN address, as seen by the route the phone is told to use.
+fn local_ipv4() -> IpAddr {
+    let fallback = IpAddr::V4(Ipv4Addr::LOCALHOST);
     let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") else {
-        return "localhost".into();
+        return fallback;
     };
     // Nothing is sent; connecting a UDP socket only asks the kernel which local
     // address the route would use.
     if socket.connect("8.8.8.8:80").is_err() {
-        return "localhost".into();
+        return fallback;
     }
-    socket
-        .local_addr()
-        .map(|addr| addr.ip().to_string())
-        .unwrap_or_else(|_| "localhost".into())
+    socket.local_addr().map(|addr| addr.ip()).unwrap_or(fallback)
 }
