@@ -76,7 +76,7 @@ impl Bridge {
             return crate::aa_client::usb::watch(self).await;
         }
         let listener = TcpListener::bind(("::", self.cfg.aa_tcp_port)).await?;
-        println!(
+        tracing::info!(
             "[aa] waiting for a head unit on tcp/{}",
             listener.local_addr()?.port()
         );
@@ -84,7 +84,7 @@ impl Bridge {
             let (socket, peer) = listener.accept().await?;
             socket.set_nodelay(true)?;
             let label = peer.to_string();
-            println!("[aa] {label}: head unit connected");
+            tracing::info!("[aa] {label}: head unit connected");
             let bridge = self.clone();
             tokio::spawn(async move { bridge.serve(socket, label).await });
         }
@@ -98,7 +98,7 @@ impl Bridge {
         // One session at a time: a second head unit would have nothing to
         // receive on, since there is only one CarPlay picture to give it.
         let Some(mut media_rx) = self.outlet.take_receiver() else {
-            eprintln!("[aa] {label}: a session is already running; refusing");
+            tracing::warn!("[aa] {label}: a session is already running; refusing");
             return;
         };
         let codec = if self.cfg.hevc {
@@ -129,14 +129,14 @@ impl Bridge {
         }
         // Handed back so a reconnection can use it.
         self.outlet.return_receiver(media_rx);
-        println!("[aa] {label}: session over");
+        tracing::info!("[aa] {label}: session over");
     }
 
     async fn handle(&self, label: &str, event: PhoneEvent) {
         match event {
             PhoneEvent::Discovered(d) => self.discovered(label, &d),
             PhoneEvent::VideoFocus(on) => {
-                println!(
+                tracing::info!(
                     "[aa] {label}: video focus {}",
                     if on { "gained" } else { "lost" }
                 );
@@ -152,7 +152,7 @@ impl Bridge {
                     self.send(cmd).await;
                 }
             }
-            PhoneEvent::Closed(reason) => println!("[aa] {label}: {reason}"),
+            PhoneEvent::Closed(reason) => tracing::info!("[aa] {label}: {reason}"),
         }
     }
 
@@ -175,7 +175,7 @@ impl Bridge {
             {
                 (width, height, fps) = (w, h, f);
             }
-            println!(
+            tracing::info!(
                 "[aa] {label}: video ch {:?} codec {} at {width}x{height}@{fps}",
                 video_ch, offer.codec
             );
@@ -188,10 +188,10 @@ impl Bridge {
                 .and_then(|a| a.configs.first())
                 .map(|c| format!("{}Hz/{}ch", c.sample_rate, c.channel_count))
                 .unwrap_or_else(|| "unspecified rate".into());
-            println!("[aa] {label}: audio ch {ch} {rate}");
+            tracing::info!("[aa] {label}: audio ch {ch} {rate}");
         }
         if let Some(input) = &d.input {
-            println!(
+            tracing::info!(
                 "[aa] {label}: input ch {} with {} buttons",
                 input.ch,
                 input.buttons.len()
@@ -216,7 +216,7 @@ impl Bridge {
                     .unwrap_or(self.cfg.hevc),
             });
         }
-        println!("[aa] {label}: asking the phone for {width}x{height}@{fps}");
+        tracing::info!("[aa] {label}: asking the phone for {width}x{height}@{fps}");
     }
 
     /// Android Auto input in, CarPlay HID commands out.
@@ -308,7 +308,7 @@ impl Bridge {
 
     async fn send(&self, cmd: Command) {
         if let Err(e) = self.events.dispatch(cmd).await {
-            eprintln!("[aa] input dropped: {e}");
+            tracing::warn!("[aa] input dropped: {e}");
         }
     }
 }

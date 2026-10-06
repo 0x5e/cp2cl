@@ -267,7 +267,7 @@ impl Session {
     ) -> Result<(), String> {
         self.splitter = std::mem::take(&mut self.parser).into_splitter();
         self.phase = Phase::Discovery;
-        println!("[aa] {}: tls up", self.label);
+        tracing::info!("[aa] {}: tls up", self.label);
         let body = control::service_discovery_request("cp2aa", "cp2aa");
         self.send_control(wr, CTRL_SERVICE_DISCOVERY_REQUEST, &body)
             .await
@@ -343,7 +343,7 @@ impl Session {
             // AV channel, so the answer there is what starts media.
             CTRL_AUDIO_FOCUS_REQUEST => {
                 let (audio_type, state) = control::parse_audio_focus_request(payload);
-                println!(
+                tracing::info!(
                     "[aa] {}: audio focus type={audio_type} state={state}",
                     self.label
                 );
@@ -368,7 +368,7 @@ impl Session {
         wr: &mut W,
     ) -> Result<(), String> {
         let discovered = control::parse_service_discovery_response(payload);
-        println!(
+        tracing::info!(
             "[aa] {}: head unit offers video={:?} audio={:?} input={:?}",
             self.label,
             discovered.video_channel(),
@@ -426,7 +426,7 @@ impl Session {
             CTRL_CHANNEL_OPEN_RESPONSE => {
                 let status = control::parse_channel_open_response(payload).unwrap_or(1);
                 if status != 0 {
-                    eprintln!("[aa] {}: channel open refused ({status})", self.label);
+                    tracing::warn!("[aa] {}: channel open refused ({status})", self.label);
                     return Ok(());
                 }
                 self.mark_opened(is_video);
@@ -443,13 +443,13 @@ impl Session {
                 let r = control::parse_av_setup_response(payload);
                 let kind = if is_video { "video" } else { "audio" };
                 if !r.ok() {
-                    eprintln!(
+                    tracing::warn!(
                         "[aa] {}: {kind} setup refused (status {})",
                         self.label, r.status
                     );
                     return Ok(());
                 }
-                println!(
+                tracing::info!(
                     "[aa] {}: {kind} set up (max_unacked {})",
                     self.label, r.max_unacked
                 );
@@ -484,7 +484,7 @@ impl Session {
             CTRL_CHANNEL_OPEN_RESPONSE => {
                 let status = control::parse_channel_open_response(payload).unwrap_or(1);
                 if status != 0 {
-                    eprintln!("[aa] {}: input channel refused ({status})", self.label);
+                    tracing::warn!("[aa] {}: input channel refused ({status})", self.label);
                     return Ok(());
                 }
                 // We claim the buttons the head unit said it has: claiming ones
@@ -501,7 +501,7 @@ impl Session {
                 Ok(())
             }
             INPUT_HANDSHAKE_RESPONSE => {
-                println!("[aa] {}: input channel ready", self.label);
+                tracing::info!("[aa] {}: input channel ready", self.label);
                 Ok(())
             }
             _ => Ok(()),
@@ -553,7 +553,7 @@ impl Session {
             return Ok(false);
         }
         self.av_mut(is_video).expect("just borrowed").started = true;
-        println!(
+        tracing::info!(
             "[aa] {}: {} starting on ch={ch}",
             self.label,
             if is_video { "video" } else { "audio" }
@@ -607,7 +607,7 @@ impl Session {
         if !started {
             if !self.complained {
                 self.complained = true;
-                eprintln!(
+                tracing::warn!(
                     "[aa] {}: ch={} not started yet, dropping media",
                     self.label, frame.ch
                 );
@@ -635,7 +635,7 @@ impl Session {
     }
 
     async fn closed(&mut self, reason: &str) {
-        println!("[aa] {}: closed ({reason})", self.label);
+        tracing::info!("[aa] {}: closed ({reason})", self.label);
         let _ = self
             .events
             .send(PhoneEvent::Closed(reason.to_owned()))

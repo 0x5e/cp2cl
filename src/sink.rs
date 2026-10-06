@@ -274,7 +274,7 @@ impl AaSink {
         let ch = self.ch.load(Ordering::Relaxed);
         if ch == 0 {
             if !self.no_channel.swap(true, Ordering::Relaxed) {
-                eprintln!(
+                tracing::warn!(
                     "[aa] {}: no Android Auto channel negotiated yet; dropping",
                     self.label
                 );
@@ -291,7 +291,7 @@ impl AaSink {
             // No session is draining the other end.
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 if !self.gone.swap(true, Ordering::Relaxed) {
-                    eprintln!(
+                    tracing::warn!(
                         "[aa] {}: no Android Auto session is reading; dropping",
                         self.label
                     );
@@ -299,7 +299,7 @@ impl AaSink {
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 if !self.dropped.swap(true, Ordering::Relaxed) {
-                    eprintln!(
+                    tracing::warn!(
                         "[aa] {}: head unit is behind; dropping to stay live",
                         self.label
                     );

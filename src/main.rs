@@ -53,13 +53,19 @@ async fn main() -> Result<()> {
     // exactly this reason.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    // Everything the program prints goes through this, so `CP2AA_LOG` is the
+    // only knob for how much of it is shown, and the levels are the usual ones:
+    // `error` is something we set out to do and could not, `warn` is something
+    // dropped or unexpected that we carried on from, `info` is the life of a
+    // session — connecting, pairing, streams opening and closing — and `debug`
+    // is the per-event detail that would otherwise drown all of it.
     let cfg = Arc::new(Config::from_env());
     tracing_subscriber::fmt()
         .with_env_filter(&cfg.log_filter)
         .with_target(false)
         .init();
 
-    println!("cp2aa — headless CarPlay receiver");
+    tracing::info!("cp2aa — headless CarPlay receiver");
 
     // Ask for a free port rather than picking one: whatever we get is what gets
     // advertised to the phone, so there is no way for the two to disagree.
@@ -67,7 +73,7 @@ async fn main() -> Result<()> {
         .await
         .context("bind airplay listener")?;
     let airplay_port = listener.local_addr()?.port() as u32;
-    println!("[cp2aa] airplay receiver listening on {airplay_port}");
+    tracing::info!("[cp2aa] airplay receiver listening on {airplay_port}");
 
     let codec = AudioCodec::default();
 
@@ -101,7 +107,7 @@ async fn main() -> Result<()> {
 
     let (video_sink, audio_sink): (Arc<dyn MediaSink>, Arc<dyn MediaSink>) = match &outlet {
         Some(outlet) => {
-            println!(
+            tracing::info!(
                 "[cp2aa] CP2AA_SINK=aa: streams go to Android Auto instead of the browser"
             );
             (outlet.video(), outlet.audio())
@@ -120,7 +126,7 @@ async fn main() -> Result<()> {
         let token = cfg.web_token.clone();
         tokio::spawn(async move {
             if let Err(e) = web::serve(hub, port, token).await {
-                eprintln!("[web] {e}");
+                tracing::error!("[web] {e}");
             }
         });
     }
@@ -144,7 +150,7 @@ async fn main() -> Result<()> {
         ));
         tokio::spawn(async move {
             if let Err(e) = bridge.run().await {
-                eprintln!("[aa] transport stopped: {e}");
+                tracing::error!("[aa] transport stopped: {e}");
             }
         });
     }
@@ -172,7 +178,7 @@ async fn main() -> Result<()> {
     ));
 
     if cfg.wireless {
-        println!(
+        tracing::info!(
             "[cp2aa] wireless: the phone will be told to join {:?} and reach us on \
              {} port {airplay_port}",
             cfg.ssid, cfg.wifi_iface
@@ -193,7 +199,7 @@ fn mfi_signer(cfg: &Config) -> Result<Box<dyn AuthCoprocessor + Send>> {
     match &cfg.auth_dir {
         Some(dir) => match LocalCoprocessor::load(dir) {
             Ok(signer) => {
-                println!(
+                tracing::info!(
                     "[cp2aa] local MFi credentials loaded from {}",
                     dir.display()
                 );
@@ -205,7 +211,7 @@ fn mfi_signer(cfg: &Config) -> Result<Box<dyn AuthCoprocessor + Send>> {
             )),
         },
         None => {
-            eprintln!(
+            tracing::warn!(
                 "[cp2aa] no MFi credentials found; the phone will reject us at \
                  authentication. Put identity.pk8 + certificate.p7b in ./authentication \
                  or set CP2AA_AUTH_DIR."

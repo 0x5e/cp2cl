@@ -182,7 +182,7 @@ decode. `CP2AA_HEVC` sets the default, and the panel overrides it per session.
 | `CP2AA_WIDTH_MM` / `CP2AA_HEIGHT_MM` | derived | physical size; drives UI scale |
 | `CP2AA_AV_IFACE` | auto | USB network interface carrying media |
 | `CP2AA_DEVICE_ID` / `CP2AA_BT_MAC` | `00:11:22:33:44:55` | identifiers in `/info` |
-| `CP2AA_LOG` | `info` | tracing filter |
+| `CP2AA_LOG` | `info` | log level: `error`, `warn`, `info`, `debug`, `trace` |
 | `CP2AA_WIRELESS` | off | take CarPlay over Bluetooth and Wi-Fi instead of USB |
 | `CP2AA_WIFI_SSID` / `CP2AA_WIFI_PASS` | — | the network the phone is told to join. Both are required once wireless is on |
 | `CP2AA_WIFI_IFACE` | `en0` on macOS, `wlan0` elsewhere | the interface facing that network; its IPv6 link-local address is what the phone connects back to |

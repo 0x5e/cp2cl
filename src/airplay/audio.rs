@@ -58,7 +58,7 @@ impl AudioReceiver {
         let sealed = &packet[RTP_HEADER_LEN..end];
 
         let Ok(payload) = open(&self.key, &nonce, sealed, aad) else {
-            eprintln!("[audio] packet failed to open");
+            tracing::warn!("[audio] packet failed to open");
             return None;
         };
         if payload.is_empty() {

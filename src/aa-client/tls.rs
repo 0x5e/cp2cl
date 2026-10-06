@@ -158,7 +158,7 @@ impl PhoneIdentity {
         for dir in candidates {
             match Self::from_dir(&dir) {
                 Ok(identity) => {
-                    println!("[aa] phone certificate from {}", dir.display());
+                    tracing::info!("[aa] phone certificate from {}", dir.display());
                     return Ok(identity);
                 }
                 Err(e) => tried.push(format!("{} ({e})", dir.display())),

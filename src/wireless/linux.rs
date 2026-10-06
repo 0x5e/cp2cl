@@ -25,7 +25,7 @@ pub async fn watch(
     restart: broadcast::Sender<()>,
 ) {
     if let Err(e) = ready(&cfg) {
-        eprintln!("[cp-wifi] {e}");
+        tracing::error!("[cp-wifi] {e}");
         return;
     }
 
@@ -33,7 +33,7 @@ pub async fn watch(
     {
         Ok(started) => started,
         Err(e) => {
-            eprintln!(
+            tracing::error!(
                 "[cp-wifi] bluetooth did not start on {}: {e}. Is bluetoothd \
                      running, and is {} the adapter?",
                 cfg.bt_adapter, cfg.bt_adapter
@@ -45,7 +45,7 @@ pub async fn watch(
     // unregisters them, so it has to be kept alive for as long as we are
     // listening — hence the binding rather than a bare `_`.
     let _conn = conn;
-    println!(
+    tracing::info!(
         "[cp-wifi] publishing the iAP service on {} as {:?}; pair the phone now",
         cfg.bt_adapter, cfg.name
     );
@@ -60,7 +60,7 @@ pub async fn watch(
             }
         }
         let peer = short(&peer_mac);
-        println!("[cp-wifi] {peer} opened a channel");
+        tracing::info!("[cp-wifi] {peer} opened a channel");
         let link = LinkConfig {
             max_outgoing: 4,
             control_version: 2,
@@ -82,9 +82,9 @@ pub async fn watch(
             &restart,
         )
         .await;
-        println!("[cp-wifi] {peer} done, waiting for the next one");
+        tracing::info!("[cp-wifi] {peer} done, waiting for the next one");
         if let Ended::Restart = ended {
-            println!("[cp-wifi] waiting for the phone to open the channel again");
+            tracing::info!("[cp-wifi] waiting for the phone to open the channel again");
         }
     }
 }

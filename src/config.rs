@@ -150,7 +150,7 @@ impl Config {
                 Some(text) => match Sink::parse(&text) {
                     Some(sink) => sink,
                     None => {
-                        eprintln!("[cp2aa] CP2AA_SINK={text} is neither `web` nor `aa`; using web");
+                        tracing::warn!("[cp2aa] CP2AA_SINK={text} is neither `web` nor `aa`; using web");
                         Sink::Web
                     }
                 },

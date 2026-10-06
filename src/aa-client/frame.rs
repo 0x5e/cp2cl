@@ -204,7 +204,7 @@ impl FrameParser {
                 continue;
             }
             if total != 0 && buf.len() != total as usize {
-                eprintln!(
+                tracing::warn!(
                     "[aa] ch={} reassembled {}B, announced {total}B",
                     f.ch,
                     buf.len()

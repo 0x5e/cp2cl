@@ -412,7 +412,7 @@ impl Hub {
         let input = self.input.clone();
         tokio::spawn(async move {
             if let Err(e) = input.dispatch(Command::KeyFrame).await {
-                eprintln!("[web] keyframe request failed: {e}");
+                tracing::warn!("[web] keyframe request failed: {e}");
             }
         });
     }
@@ -452,7 +452,7 @@ impl Hub {
         }
         for command in self.translate(message) {
             if let Err(e) = self.input.dispatch(command).await {
-                eprintln!("[web] input failed: {e}");
+                tracing::warn!("[web] input failed: {e}");
             }
         }
     }
@@ -794,7 +794,7 @@ async fn api_display_post(
         *slot = Some(params);
     }
     let (width, height) = params.canvas();
-    println!(
+    tracing::info!(
         "[web] display set to {}x{} @{}fps (uiScale {} -> canvas {width}x{height}, {}); \
          restarting the session",
         params.width,
@@ -916,8 +916,8 @@ pub async fn serve(hub: Arc<Hub>, port: u16, token: String) -> anyhow::Result<()
     let certificate = self_signed(&host).await?;
     let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
 
-    println!("[web] browser client: https://{host}:{port}/?token={token}");
-    println!("[web] accept the certificate warning once; WebCodecs needs HTTPS");
+    tracing::info!("[web] browser client: https://{host}:{port}/?token={token}");
+    tracing::info!("[web] accept the certificate warning once; WebCodecs needs HTTPS");
 
     axum_server::bind_rustls(address, certificate)
         .serve(app.into_make_service())

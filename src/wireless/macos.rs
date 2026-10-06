@@ -34,13 +34,13 @@ pub async fn watch(
     restart: broadcast::Sender<()>,
 ) {
     if let Err(e) = ready(&cfg) {
-        eprintln!("[cp-wifi] {e}");
+        tracing::error!("[cp-wifi] {e}");
         return;
     }
 
     let helper = PathBuf::from(env!("CP2AA_BT_HELPER"));
     if helper.as_os_str().is_empty() {
-        eprintln!(
+        tracing::error!(
             "[cp-wifi] the Bluetooth bridge was not built (clang is needed); \
              wireless CarPlay is unavailable"
         );
@@ -53,7 +53,7 @@ pub async fn watch(
     let listener = match UnixListener::bind(&path) {
         Ok(listener) => listener,
         Err(e) => {
-            eprintln!("[cp-wifi] could not open {}: {e}", path.display());
+            tracing::error!("[cp-wifi] could not open {}: {e}", path.display());
             return;
         }
     };
@@ -65,18 +65,18 @@ pub async fn watch(
     {
         Ok(child) => child,
         Err(e) => {
-            eprintln!("[cp-wifi] could not start the Bluetooth bridge: {e}");
+            tracing::error!("[cp-wifi] could not start the Bluetooth bridge: {e}");
             let _ = std::fs::remove_file(&path);
             return;
         }
     };
-    println!("[cp-wifi] Bluetooth bridge up; pair the iPhone in system settings");
+    tracing::info!("[cp-wifi] Bluetooth bridge up; pair the iPhone in system settings");
 
     loop {
         let accepted = tokio::select! {
             result = listener.accept() => result,
             result = child.wait() => {
-                eprintln!("[cp-wifi] the Bluetooth bridge ended: {result:?}");
+                tracing::warn!("[cp-wifi] the Bluetooth bridge ended: {result:?}");
                 break;
             }
         };
@@ -99,10 +99,10 @@ pub async fn watch(
 
         let mac = parse_mac(&local);
         if mac == [0u8; 6] {
-            eprintln!("[cp-wifi] the bridge sent an address we cannot read: {line:?}");
+            tracing::warn!("[cp-wifi] the bridge sent an address we cannot read: {line:?}");
             continue;
         }
-        println!(
+        tracing::info!(
             "[cp-wifi] {} opened a channel (this Mac is {local})",
             short(&peer)
         );
@@ -132,9 +132,9 @@ pub async fn watch(
         .await;
         shut.shutdown();
         drop(artwork);
-        println!("[cp-wifi] {} done, waiting for the next one", short(&peer));
+        tracing::info!("[cp-wifi] {} done, waiting for the next one", short(&peer));
         if let Ended::Restart = ended {
-            println!("[cp-wifi] waiting for the bridge to open the channel again");
+            tracing::info!("[cp-wifi] waiting for the bridge to open the channel again");
         }
     }
 

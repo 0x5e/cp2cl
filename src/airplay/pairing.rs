@@ -260,7 +260,7 @@ impl PairSetup {
         let state = tlv_state(&items).ok_or("missing state")?;
         match state {
             1 => {
-                println!("[pair] setup M1 -> M2 (SRP start)");
+                tracing::info!("[pair] setup M1 -> M2 (SRP start)");
                 Ok(tlv_encode(&vec![
                     (TYPE_STATE, vec![2]),
                     (TYPE_SALT, self.salt.to_vec()),
@@ -294,7 +294,7 @@ impl PairSetup {
                 if expected != proof[..] {
                     // Both sides are 64 bytes when the maths agrees; a length
                     // difference means the TLV was split, not that SRP failed.
-                    eprintln!(
+                    tracing::error!(
                         "[pair] proof mismatch: got {} bytes {}, want {}",
                         proof.len(),
                         hex::encode(&proof[..proof.len().min(8)]),
@@ -303,7 +303,7 @@ impl PairSetup {
                     return Err("controller proof mismatch".into());
                 }
                 let ours = crypto::sha512_all(&[&pad(&a), &expected, &key]);
-                println!("[pair] setup M3 -> M4 (SRP verified)");
+                tracing::info!("[pair] setup M3 -> M4 (SRP verified)");
                 Ok(tlv_encode(&vec![
                     (TYPE_STATE, vec![4]),
                     (TYPE_PROOF, ours.to_vec()),
@@ -397,7 +397,7 @@ impl PairSetup {
         ]);
         let sealed = seal(&sub_key, &nonce_label("PS-Msg06"), &inner, &[])
             .map_err(|_| String::from("could not seal PS-Msg06"))?;
-        println!(
+        tracing::info!(
             "[pair] setup M5 -> M6 paired (controller {})",
             String::from_utf8_lossy(&tlv_get(&sub, TYPE_IDENTIFIER).unwrap_or_default())
         );
@@ -498,7 +498,7 @@ impl PairVerify {
         let state = tlv_state(&items).ok_or("missing state")?;
         match state {
             1 => {
-                println!("[pair] verify M1 -> M2");
+                tracing::info!("[pair] verify M1 -> M2");
                 let client: [u8; 32] = tlv_get(&items, TYPE_PUBLIC_KEY)
                     .and_then(|v| v.try_into().ok())
                     .ok_or("M1 without public key")?;
@@ -533,7 +533,7 @@ impl PairVerify {
                 ]))
             }
             3 => {
-                println!("[pair] verify M3 -> M4");
+                tracing::info!("[pair] verify M3 -> M4");
                 let eph = self.eph.as_ref().ok_or("M3 before M1")?;
                 let shared: [u8; 32] = self.shared.ok_or("no shared secret")?.shared;
                 let _ = eph;

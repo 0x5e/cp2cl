@@ -64,7 +64,7 @@ pub async fn watch(
                 let current: Vec<String> = devices.iter().map(|d| d.udid.clone()).collect();
                 match &busy {
                     Some(udid) if !current.contains(udid) => {
-                        println!("[cp] {} unplugged", short(udid));
+                        tracing::info!("[cp] {} unplugged", short(udid));
                         busy = None;
                     }
                     _ => {}
@@ -72,10 +72,10 @@ pub async fn watch(
                 if busy.is_none() {
                     if let Some(device) = devices.into_iter().next() {
                         let udid = device.udid.clone();
-                        println!("[cp] {} found over usb", short(&udid));
+                        tracing::info!("[cp] {} found over usb", short(&udid));
                         match attach(&cfg, auth.clone(), &device, airplay_port, &restart).await {
                             Ok(()) => busy = Some(udid),
-                            Err(e) => eprintln!("[cp] {} could not attach: {e}", short(&udid)),
+                            Err(e) => tracing::warn!("[cp] {} could not attach: {e}", short(&udid)),
                         }
                     }
                 }
@@ -113,14 +113,14 @@ async fn attach(
     // The stream the phone sends its media over. On macOS this is the enX the
     // USB network function creates; on Linux it is whatever gadget we set up.
     let av_iface = av_interface(cfg, &device.udid).await;
-    println!("[cp] av interface: {:?}", av_iface);
+    tracing::info!("[cp] av interface: {:?}", av_iface);
 
     loop {
         // `ProbeError` is only Display, not std::error::Error, so go through format.
         let tunnel = iap2_wired::usbmuxd::open(device)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        println!("[cp] {} carkit up, starting iAP2", short(&device.udid));
+        tracing::info!("[cp] {} carkit up, starting iAP2", short(&device.udid));
 
         let identity = Identity {
             name: cfg.name.clone(),
@@ -186,7 +186,7 @@ async fn attach(
         let Ended::Restart = ended else {
             return Ok(());
         };
-        println!(
+        tracing::info!(
             "[cp] {} is being told to start over; reopening carkit",
             short(&device.udid)
         );
@@ -227,26 +227,26 @@ pub(crate) async fn run_bringup(
             }
         };
         match event {
-            Some(BringupEvent::Identified) => println!("{prefix} {peer} identified"),
+            Some(BringupEvent::Identified) => tracing::info!("{prefix} {peer} identified"),
             Some(BringupEvent::Authenticated) => {
-                println!("{prefix} {peer} MFi authentication passed")
+                tracing::info!("{prefix} {peer} MFi authentication passed")
             }
-            Some(BringupEvent::Subscribed) => println!("{prefix} {peer} subscriptions sent"),
+            Some(BringupEvent::Subscribed) => tracing::info!("{prefix} {peer} subscriptions sent"),
             Some(BringupEvent::WifiConfigSent) => {
                 if let Some(ssid) = ssid {
-                    println!("{prefix} {peer} told to join {ssid:?}");
+                    tracing::info!("{prefix} {peer} told to join {ssid:?}");
                 }
             }
-            Some(BringupEvent::CarPlayStartSent { ip }) => println!(
+            Some(BringupEvent::CarPlayStartSent { ip }) => tracing::info!(
                 "{prefix} {peer} CarPlayStartSession sent — the phone should knock on \
                  {ip}:{airplay_port}"
             ),
             Some(BringupEvent::Failed(reason)) => {
-                eprintln!("{prefix} {peer} session failed: {reason}");
+                tracing::error!("{prefix} {peer} session failed: {reason}");
                 return Ended::Finished;
             }
             Some(BringupEvent::Closed) => {
-                println!("{prefix} {peer} session closed");
+                tracing::info!("{prefix} {peer} session closed");
                 return Ended::Finished;
             }
             Some(_) => {}

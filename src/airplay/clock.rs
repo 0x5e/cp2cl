@@ -120,7 +120,7 @@ impl SyncedClock {
         } else {
             "residual"
         };
-        println!(
+        tracing::info!(
             "[timing] clock {what}: offset {offset:.3}s ({note}), rtt {:.1}ms",
             rtt * 1000.0
         );

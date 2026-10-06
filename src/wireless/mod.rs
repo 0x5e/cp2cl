@@ -115,7 +115,7 @@ pub(crate) async fn run_session(
     let _ = accessory.await;
 
     if let Ended::Restart = ended {
-        println!("[cp-wifi] {peer} is being told to start over; dropping the Bluetooth link");
+        tracing::info!("[cp-wifi] {peer} is being told to start over; dropping the Bluetooth link");
     }
     ended
 }
@@ -168,7 +168,7 @@ pub async fn watch(
     _airplay_port: u32,
     _restart: broadcast::Sender<()>,
 ) {
-    eprintln!(
+    tracing::error!(
         "[cp-wifi] wireless CarPlay needs Bluetooth, and this platform has no \
          backend for it: {}",
         std::env::consts::OS

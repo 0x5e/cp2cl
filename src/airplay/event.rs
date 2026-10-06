@@ -69,7 +69,7 @@ impl EventSink {
         // the switch to Wi-Fi, and every report after that would be dropped.
         let was = std::mem::replace(&mut *self.counter.lock().await, 0);
         if was != 0 {
-            println!("[event] new event channel; write counter reset from {was}");
+            tracing::info!("[event] new event channel; write counter reset from {was}");
         }
         *self.writer.lock().await = Some(writer);
     }
@@ -77,12 +77,12 @@ impl EventSink {
     pub async fn dispatch(self: &Arc<Self>, cmd: Command) -> std::io::Result<()> {
         let key = self.key.lock().await.clone();
         let Some(key) = key else {
-            eprintln!("[event] not paired yet — press ignored");
+            tracing::warn!("[event] not paired yet — press ignored");
             return Ok(());
         };
         let mut guard = self.writer.lock().await;
         let Some(writer) = guard.as_mut() else {
-            eprintln!("[event] phone has not opened the event channel yet");
+            tracing::warn!("[event] phone has not opened the event channel yet");
             return Ok(());
         };
         let mut counter = self.counter.lock().await;
@@ -145,7 +145,7 @@ pub(crate) async fn pump_events(
 
         // Same framing as the control channel: [2B length][ciphertext][tag].
         if let Err(e) = open_frames(&read_key, &mut ctr, &mut enc, &mut plain) {
-            eprintln!("[event] frame failed to open: {e}");
+            tracing::error!("[event] frame failed to open: {e}");
             break;
         }
 
@@ -156,24 +156,24 @@ pub(crate) async fn pump_events(
             // back — a loop that drowns the log in identical lines.
             if req.method.starts_with("RTSP/") || req.method.starts_with("HTTP/") {
                 if req.path != "200" {
-                    eprintln!("[event] response {} {}", req.path, req.version);
+                    tracing::warn!("[event] response {} {}", req.path, req.version);
                 }
                 continue;
             }
-            println!(
+            tracing::info!(
                 "[event] <- {} {} ({}B)",
                 req.method,
                 req.path,
                 req.body.len()
             );
             if let Err(e) = sink.reply(req.cseq()).await {
-                eprintln!("[event] reply failed: {e}");
+                tracing::error!("[event] reply failed: {e}");
                 break;
             }
         }
     }
     sink.detach_writer().await;
-    println!("[airplay] event channel closed");
+    tracing::info!("[airplay] event channel closed");
 }
 
 pub struct EventChannel<W> {
@@ -235,8 +235,10 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
         // A command that works otherwise leaves no trace: the phone's `200` is
         // filtered out by `pump_events` as chatter, so only failures reach the
         // log. One line here is the difference between "nothing happened" and
-        // "it worked".
-        println!("[event] -> {cmd:?}");
+        // "it worked" — which is why it exists, and why it is debug level
+        // rather than `println!`: a finger drag is one line per pointer move.
+        // `CP2AA_LOG=debug` brings it back.
+        tracing::debug!("[event] -> {cmd:?}");
 
         match cmd {
             Command::Play => self.media_momentary(MEDIA_PLAY).await?,

@@ -60,7 +60,7 @@ impl VideoReceiver {
             1 => {
                 match parse_video_config(body) {
                     Some(config) => {
-                        println!(
+                        tracing::info!(
                             "[video] config: {:?}, {} parameter set(s), {}-byte NAL lengths",
                             config.codec,
                             config.parameter_sets.len(),
@@ -75,7 +75,7 @@ impl VideoReceiver {
                         });
                     }
                     None => {
-                        eprintln!(
+                        tracing::warn!(
                             "[video] config not understood ({}B): {}",
                             body.len(),
                             hex::encode(&body[..body.len().min(32)])
@@ -106,7 +106,7 @@ impl VideoReceiver {
                         }
                     }
                     Err(e) => {
-                        eprintln!("[video] frame {} failed to open: {e}", self.counter);
+                        tracing::warn!("[video] frame {} failed to open: {e}", self.counter);
                     }
                 }
             }
@@ -276,8 +276,11 @@ fn length_prefixed_to_annex_b(payload: &[u8], codec: VideoCodec, nal_len: usize)
     if !wrote {
         return None;
     }
+    // Per frame, so it says nothing that the frame count does not — and at
+    // debug level it buried the input and audio lines, which are the ones that
+    // level is for. Trace keeps it reachable without that.
     if codec == VideoCodec::H265 {
-        tracing::debug!("h265 frame converted");
+        tracing::trace!("h265 frame converted");
     }
     Some(out)
 }

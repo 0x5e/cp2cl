@@ -62,17 +62,17 @@ const FFS_STRINGS_MAGIC: u32 = 2;
 /// pulled and plugged back in.
 pub async fn watch(bridge: std::sync::Arc<Bridge>) -> io::Result<()> {
     let gadget = Gadget::create()?;
-    println!("[aa] usb gadget {GADGET_NAME} bound to {}", gadget.udc);
+    tracing::info!("[aa] usb gadget {GADGET_NAME} bound to {}", gadget.udc);
     loop {
         let io = match gadget.connect() {
             Ok(io) => io,
             Err(e) => {
-                eprintln!("[aa] usb endpoints not ready: {e}");
+                tracing::warn!("[aa] usb endpoints not ready: {e}");
                 std::thread::sleep(Duration::from_secs(1));
                 continue;
             }
         };
-        println!("[aa] usb: head unit attached");
+        tracing::info!("[aa] usb: head unit attached");
         bridge.clone().serve(io, "usb".into()).await;
     }
 }
