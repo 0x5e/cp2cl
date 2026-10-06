@@ -21,6 +21,7 @@ use tokio::sync::broadcast;
 
 use super::{parse_mac, ready, run_session, short};
 use crate::config::Config;
+use crate::session::{Ended, Latched};
 
 /// The longest the helper's `local|remote` header line can be.
 const HEADER_LIMIT: usize = 80;
@@ -112,8 +113,14 @@ pub async fn watch(
             control_version: 2,
             ..LinkConfig::default()
         };
-        let (channel, _artwork) = spawn_link_stream(stream, link, false);
-        run_session(
+        // The helper watches this socket: when the receiver lets go of it, it
+        // closes the RFCOMM channel under the phone and asks for another one.
+        // That close is the whole point — the phone will not start CarPlay over
+        // until it sees the iAP2 session go — so the socket has to really close
+        // rather than merely be forgotten. Hence the latch.
+        let (stream, shut) = Latched::new(stream);
+        let (channel, artwork) = spawn_link_stream(stream, link, false);
+        let ended = run_session(
             &cfg,
             auth.clone(),
             channel,
@@ -123,7 +130,12 @@ pub async fn watch(
             &restart,
         )
         .await;
+        shut.shutdown();
+        drop(artwork);
         println!("[cp-wifi] {} done, waiting for the next one", short(&peer));
+        if let Ended::Restart = ended {
+            println!("[cp-wifi] waiting for the bridge to open the channel again");
+        }
     }
 
     let _ = std::fs::remove_file(&path);

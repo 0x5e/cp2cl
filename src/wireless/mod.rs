@@ -25,10 +25,10 @@ use livi_runtime::driver::LinkChannel;
 use livi_runtime::ident::{Identity, Transport};
 use livi_runtime::mfi_async::SharedCoprocessor;
 use livi_runtime::vehicle::Vehicle;
-use tokio::sync::{broadcast, mpsc, Notify};
+use tokio::sync::{broadcast, mpsc};
 
 use crate::config::Config;
-use crate::session::{forward_restarts, run_bringup};
+use crate::session::{run_bringup, Ended};
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -40,7 +40,8 @@ pub use linux::watch;
 #[cfg(target_os = "macos")]
 pub use macos::watch;
 
-/// Runs the iAP2 half of one wireless session on a channel that is already up.
+/// Runs the iAP2 half of one wireless session on a channel that is already up,
+/// and says whether the phone should be asked back for another one.
 ///
 /// `bt_mac` is this machine's own Bluetooth address: the phone checks that the
 /// accessory it is talking to is the one it paired with, so a made-up value
@@ -53,18 +54,16 @@ pub(crate) async fn run_session(
     bt_mac: [u8; 6],
     peer: &str,
     restart: &broadcast::Sender<()>,
-) {
+) -> Ended {
     // Subscribed before anything goes out, so a display change made while the
     // identification is still running is waiting for us rather than lost.
-    let changed = restart.subscribe();
+    let mut changed = restart.subscribe();
 
     let identity = Identity {
         name: cfg.name.clone(),
         ssid: cfg.ssid.clone(),
         bt_mac,
     };
-
-    let start_again = Arc::new(Notify::new());
 
     let cp = CpConfig {
         wifi_iface: cfg.wifi_iface.clone(),
@@ -92,23 +91,33 @@ pub(crate) async fn run_session(
         // as a wireless one, and if it is plugged in as well the wired watcher
         // is the one that will pick it up.
         on_cable: Some(OnCable(Arc::new(|_bt_mac: &str| false))),
-        // Same door as the wired half: a display change drops the AirPlay
-        // session, and this is what tells the phone to come back and read
-        // `/info` afresh. The start is re-sent over the iAP2 session already up,
-        // so Bluetooth is never reopened — and because nothing live is handed
-        // to `send_start`, the wireless attributes come from this config, which
-        // names the network the phone is already on.
-        start_again: Some(start_again.clone()),
+        // A display change drops the AirPlay session, and the phone then has to
+        // be given something to start CarPlay from. That cannot be done on this
+        // session: `CarPlayStartSession` is the answer to the phone's own offer,
+        // and it has already had one. So the whole session is torn down instead
+        // — ending this function drops the link, and the platform paging the
+        // phone again is what gets us a new one.
+        start_again: None,
     };
 
     let (tx, rx) = mpsc::channel(64);
     let vehicle = Vehicle::default().feed();
-    tokio::spawn(async move { run_accessory(channel, auth, identity, cp, tx, vehicle).await });
+    let accessory = tokio::spawn(async move {
+        run_accessory(channel, auth, identity, cp, tx, vehicle).await
+    });
 
-    let forward = tokio::spawn(forward_restarts(changed, start_again));
+    let ended = run_bringup("[cp-wifi]", peer, airplay_port, Some(&cfg.ssid), rx, &mut changed).await;
 
-    run_bringup("[cp-wifi]", peer, airplay_port, Some(&cfg.ssid), rx).await;
-    forward.abort();
+    // The session's handle to the link has to go for the link to close, and the
+    // driver's own read half has to be let go with it — `Latched`, which the
+    // caller wrapped the stream in, is what does the second half.
+    accessory.abort();
+    let _ = accessory.await;
+
+    if let Ended::Restart = ended {
+        println!("[cp-wifi] {peer} is being told to start over; dropping the Bluetooth link");
+    }
+    ended
 }
 
 /// `00:11:22:33:44:55` → bytes. Unparseable parts stay zero rather than

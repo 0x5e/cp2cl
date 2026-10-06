@@ -16,6 +16,7 @@ use tokio::sync::broadcast;
 
 use super::{parse_mac, ready, run_session, short};
 use crate::config::Config;
+use crate::session::Ended;
 
 pub async fn watch(
     cfg: Arc<Config>,
@@ -68,7 +69,10 @@ pub async fn watch(
         // Over RFCOMM the phone speaks first, so we must not open with a
         // negotiate of our own.
         let (channel, _artwork) = spawn_link(fd, link, false);
-        run_session(
+        // Ending the session drops the descriptor, which is the only way a
+        // BlueZ channel ever closes; the profile's `AutoConnect` is what brings
+        // the phone back.
+        let ended = run_session(
             &cfg,
             auth.clone(),
             channel,
@@ -79,6 +83,9 @@ pub async fn watch(
         )
         .await;
         println!("[cp-wifi] {peer} done, waiting for the next one");
+        if let Ended::Restart = ended {
+            println!("[cp-wifi] waiting for the phone to open the channel again");
+        }
     }
 }
 

@@ -103,6 +103,14 @@ static NSString *targetAddress(void) {
                 close(fd);
                 [channel closeChannel];
                 self.channel = nil;
+                // The receiver let go on purpose: it is restarting CarPlay, so
+                // the phone has to see this channel die and be asked for a new
+                // one. Reopening promptly is the point — waiting out the poll
+                // interval would leave a display change hanging for seconds.
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                    NSLog(@"cp2aa: reopening the iAP2 channel after the receiver restarted");
+                    [self scan];
+                });
             }
         });
     });

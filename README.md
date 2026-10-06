@@ -120,21 +120,38 @@ Two things have to happen, and closing the connection is only the first:
 
 1. the AirPlay session is dropped, so the phone cannot keep rendering the old
    size, and
-2. the phone is told to come back. It will not do that on its own — iAP2 is
-   still up, so as far as it is concerned nothing has ended — so
-   `CarPlayStartSession` is sent again over that same iAP2 session (LIVI's
-   `start_again`). The log line for it is `[cp] the phone hears the start once
-   more` (prefixed `[cp-wifi]` on a wireless session), followed by the usual
-   `CarPlayStartSession sent`.
+2. the iAP2 session is dropped with it, and a new one is started in its place.
+   The phone only revisits `/info` when it sees CarPlay end, and CarPlay ends
+   when the iAP2 session goes away — so the whole session is torn down and built
+   again. This is what unplugging and replugging does, minus the cable.
 
-The start waits half a second after the session drops, because a phone still
-closing the old one cannot act on a start that arrives early. Both transports do
-this, and over Bluetooth it is the same conversation: the iAP2 session that
-carried the first start is still open when the AirPlay one ends, so the second
-start goes out on it and the phone merely re-reads `/info`. Wireless needs no
-Wi-Fi parameters for the re-send — `send_start` falls back to the configured
-network, which is the one the phone is already on. The shared helper is
-`src/session.rs::forward_restarts`.
+**Sending the start again over the live session does not work.** `CarPlayStartSession`
+is the accessory's *answer* to the phone's own `CarPlayAvailability`, and a phone
+that has already started CarPlay has no question outstanding — it ignores a
+second start, which is exactly what the logs showed. (LIVI's `start_again` sends
+one, but for a different reason: it holds the answer back until the MFi chip is
+ready, still inside the phone's original request.)
+
+Tearing the link down is more than dropping a handle. LIVI's link driver splits
+the stream it is given and parks the read half in a task of its own, so a read
+has to be made to return before the socket actually closes —
+`src/session.rs::Latched` is that, and it is why the wired path wraps its carkit
+stream in it. On macOS wireless the same wrapper is around the bridge's unix
+socket, which is what makes the helper close the RFCOMM channel under the phone.
+
+The phone is left alone for 750ms between the two sessions, because it has to
+notice the first one ending before it will act on the second.
+
+| Log line | What it means |
+|---|---|
+| `[cp] ... is being told to start over; reopening carkit` | wired: the old tunnel is closed and another is being opened |
+| `[cp-wifi] ... is being told to start over; dropping the Bluetooth link` | wireless: the link is closed; the platform has to bring the phone back |
+| `cp2aa: reopening the iAP2 channel after the receiver restarted` | the macOS bridge noticed and is asking for the channel again |
+
+The wireless half depends on something outside this program bringing the phone
+back: on macOS the bridge polls the paired devices and opens the channel itself,
+and on Linux BlueZ's `AutoConnect` pages it. **Wired has been confirmed on
+hardware; wireless has not.**
 
 Asking for **more pixels and expecting a sharper picture does not work**: the
 phone keeps the bitrate, so twice the pixels means half the bits each and the
