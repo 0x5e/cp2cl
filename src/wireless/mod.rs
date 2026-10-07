@@ -101,9 +101,15 @@ pub(crate) async fn run_session(
     };
 
     let (tx, rx) = mpsc::channel(64);
-    let vehicle = Vehicle::default().feed();
+    // `Vehicle` owns the two watch senders and `feed` only hands out receivers,
+    // so the `Vehicle` has to outlive the session it feeds. As a temporary it
+    // would be dropped at the end of this statement, `changed()` would then
+    // report `Err` at once, and `run_accessory` spins on that until the session
+    // ends. Kept in this scope until the accessory is aborted, below.
+    let vehicle = Vehicle::default();
+    let feed = vehicle.feed();
     let accessory = tokio::spawn(async move {
-        run_accessory(channel, auth, identity, cp, tx, vehicle).await
+        run_accessory(channel, auth, identity, cp, tx, feed).await
     });
 
     let ended = run_bringup("[cp-wifi]", peer, airplay_port, Some(&cfg.ssid), rx, &mut changed).await;

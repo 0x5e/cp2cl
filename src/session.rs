@@ -245,9 +245,15 @@ async fn attach(
         };
 
         let (tx, rx) = mpsc::channel(64);
-        let vehicle = Vehicle::default().feed();
+        // `Vehicle` owns the two watch senders and `feed` only hands out
+        // receivers, so the `Vehicle` has to outlive the session it feeds. As a
+        // temporary it would be dropped at the end of this statement, `changed()`
+        // would then report `Err` at once, and `run_accessory` spins on that
+        // until the session ends.
+        let vehicle = Vehicle::default();
+        let feed = vehicle.feed();
         let accessory = tokio::spawn(async move {
-            run_accessory(channel, signer, identity, cp, tx, vehicle).await
+            run_accessory(channel, signer, identity, cp, tx, feed).await
         });
 
         let ended =
