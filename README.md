@@ -1,37 +1,29 @@
-# cp2aa
+# [WIP] cp2aa
 
-A headless CarPlay receiver: it presents itself to an iPhone as a wired CarPlay
-head unit, and hands whatever the phone sends to PlayPort's browser client,
-which decodes it with WebCodecs.
+CarPlay to Android Auto bridge service (cp2aa), running on Linux device.
 
-No window of our own, no UI, no Electron. The phone plugs into USB, you open one
-page, and you drive CarPlay from it — pointer, keyboard and all.
-
-The other half of the job — handing that picture on to an Android Auto head
-unit, which means being an Android phone — is under construction in
-`src/aa-client/`, see the end of this file.
+## How it works
+```
+            USB / Wi-Fi                             USB
+  iPhone  ----------------->  Bridge Device  ----------------->  Android Auto head unit
+                                   |                Web
+                                   └-------------------------->  PlayPort head unit (for debug)
 
 ```
-iPhone ──USB──▶ this process ──HTTPS/WSS──▶ browser client
-                                        └─▶ (or an Android Auto head unit)
-```
 
-## What actually happens
+## Features
 
-Two unrelated conversations with the phone, in this order:
+- Support both wired and wireless CarPlay.
+- No transcoding on bridge device.
+- No hard-coded audio/video encoding formats, negotiate directly between iPhone and head unit.
 
-1. **iAP2 over USB.** Lockdown opens `com.apple.carkit.service`, we run
-   identification, answer the MFi challenge with local credentials, and send
-   `CarPlayStartSession` naming the port our second listener is on.
-2. **AirPlay over TCP.** The phone calls back on that port, runs a pairing
-   handshake, asks who we are, opens the video and audio streams and starts
-   streaming. Every frame is sealed with ChaCha20-Poly1305.
+## Requirements
 
-Only step 1 uses LIVI. Step 2 is implemented here, because LIVI only has it in
-TypeScript.
-
-Nothing between them decodes anything: the sealed frames are opened and handed
-on as they are. The browser is the decoder, and so is the head unit.
+Bridge Device:
+- Running Linux system.
+- 1 USB OTG for Android Auto head unit.
+- 1 USB Host for wired CarPlay (optional).
+- WiFi + BLE for wireless CarPlay (optional).
 
 ## Build and run
 
@@ -461,3 +453,11 @@ plugged in. Expect to fix the UDC name and the endpoint ordering first.
 * The event channel's writer is held behind one lock and written without a
   timeout, so a connection that has gone quiet can stall input until TCP gives
   up. The same lock is what the next session has to take to attach its writer.
+
+### Credits and license
+
+cp2aa is free software, licensed under the GNU General Public License v3.0 or later (GPL-3.0-or-later).
+
+- [LIVI](https://github.com/f-io/LIVI)
+- [MacPlay](https://github.com/Roylyl/MacPlay)
+- [PlayPort](https://github.com/youcci/playport)
