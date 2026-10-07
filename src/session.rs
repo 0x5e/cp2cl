@@ -18,6 +18,10 @@
 //! `com.apple.carkit.service`. The Linux half therefore holds that claim for as long as
 //! the session lasts, because letting go hands the phone back to its default
 //! configuration.
+//!
+//! The Linux half also has to bring the phone's USB network function up itself: nothing
+//! else on a board gets there before the phone is answered. See `bridge`, and the second
+//! handle the session holds onto.
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -112,6 +116,26 @@ async fn claim(serial: String) -> anyhow::Result<Arc<iap2_usbmux::MuxDevice>> {
     Ok(Arc::new(device))
 }
 
+/// The phone's USB network function, carried by us rather than by the kernel.
+///
+/// `cdc_ncm` does make an interface for it, but every interface is born down and only
+/// gets a link-local once something brings it up — and on a board the only thing that
+/// would is NetworkManager, which gets there long after the phone has been answered. So
+/// the function is claimed here instead: `NcmBridge` takes the NCM control and data
+/// interfaces off `cdc_ncm`, lays a TAP over them, gives it the host MAC the phone
+/// expects and brings it up, which is the address `CarPlayStartSession` then hands back.
+///
+/// The handle has to outlive every session it serves, because letting go returns the
+/// interfaces to `cdc_ncm` and takes the interface — and so the address — with it.
+#[cfg(target_os = "linux")]
+async fn bridge(serial: String) -> anyhow::Result<iap2_usbmux::NcmBridge> {
+    // Claiming interfaces and bringing a link up are all blocking work.
+    tokio::task::spawn_blocking(move || iap2_usbmux::NcmBridge::start(&serial))
+        .await
+        .map_err(|e| anyhow::anyhow!("ncm task: {e}"))?
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
 /// The carkit stream for a phone we claimed ourselves.
 #[cfg(target_os = "linux")]
 async fn carkit(mux: &Arc<iap2_usbmux::MuxDevice>) -> anyhow::Result<Box<dyn idevice::ReadWrite>> {
@@ -182,16 +206,29 @@ async fn attach(
     // carkit is coming up is still waiting for us rather than lost.
     let mut changed = restart.subscribe();
 
-    // The stream the phone sends its media over. On macOS this is the enX the
-    // USB network function creates; on Linux it is the `usbN` the kernel's cdc_ncm
-    // makes out of the phone's CarPlay network function.
-    let av_iface = av_interface(cfg, &phone.id).await;
-    tracing::info!("[cp] av interface: {:?}", av_iface);
-
     // Linux owns the phone's USB configuration from here on, so it is claimed once and
     // held across every session this attach produces; macOS leaves it to the daemon.
     #[cfg(target_os = "linux")]
     let mux = claim(phone.id.clone()).await?;
+
+    // The stream the phone sends its media over. On macOS this is the enX the phone's USB
+    // network function shows up as; on Linux it is the interface we lay over that same
+    // function ourselves, because asking the kernel for it means asking nobody to bring
+    // it up in time. See `bridge` — and note the handle is kept, not just read: dropping
+    // it hands the function back to `cdc_ncm` and takes the interface with it.
+    #[cfg(target_os = "linux")]
+    let ncm = bridge(phone.id.clone()).await;
+    #[cfg(target_os = "linux")]
+    let av_iface = match &ncm {
+        Ok(ncm) => Some(ncm.ifname.clone()),
+        Err(e) => {
+            tracing::warn!("[cp] no NCM bridge ({e}); falling back to the kernel's interface");
+            av_interface(cfg, &phone.id).await
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let av_iface = av_interface(cfg, &phone.id).await;
+    tracing::info!("[cp] av interface: {:?}", av_iface);
 
     loop {
         #[cfg(target_os = "linux")]
