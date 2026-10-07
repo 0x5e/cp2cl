@@ -111,7 +111,7 @@ sees it, which is the one to use from another device.
 
 The page carries one in the URL, hands it back on the WebSocket and when
 changing the display, and anything without it is refused. It is fixed —
-sixteen zero bytes unless `CP2AA_WEB_TOKEN` says otherwise — so the printed URL,
+thirty-two zero bytes unless `CP2AA_WEB_TOKEN` says otherwise — so the printed URL,
 and any bookmark of it, works across restarts. The front end will not connect
 without a token, so there is no token-less mode to fall back to. This is a debug
 surface on a LAN, not something to expose: a fixed token is a convenience, not a
@@ -196,9 +196,9 @@ decode. `CP2AA_HEVC` sets the default, and the panel overrides it per session.
 | `CP2AA_AUTH_DIR` | `./authentication` | MFi credentials |
 | `CP2AA_SINK` | `web` | where the streams go: `web` serves the browser client, `aa` sends them to a connected Android Auto head unit |
 | `CP2AA_WEB_ADDR` | `0.0.0.0:8080` | where the browser client is served. HTTPS is not part of it because there is no other option — WebCodecs needs a secure context — and `0.0.0.0` is every interface |
-| `CP2AA_WEB_TOKEN` | sixteen zero bytes | the token the page has to carry; fixed, so the URL is stable. Set something shorter if typing it in is annoying |
+| `CP2AA_WEB_TOKEN` | thirty-two zero bytes | the token the page has to carry; fixed, so the URL is stable. Set something shorter if typing it in is annoying |
 | `CP2AA_WIDTH` / `CP2AA_HEIGHT` | `1280` / `720` | what the phone renders, until the display panel says otherwise |
-| `CP2AA_FPS` | `60` | frame rate上限 |
+| `CP2AA_FPS` | `60` | max frame rate |
 | `CP2AA_HEVC` | on | ask for H.265. At the bitrate the phone sends it is visibly sharper than H.264; set `0` to fall back |
 | `CP2AA_WIDTH_MM` / `CP2AA_HEIGHT_MM` | derived | physical size; drives UI scale |
 | `CP2AA_DEVICE_ID` / `CP2AA_BT_MAC` | `00:11:22:33:44:55` | identifiers in `/info` |

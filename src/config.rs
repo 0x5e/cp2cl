@@ -88,8 +88,8 @@ pub struct Config {
     pub web_addr: SocketAddr,
     /// The access token the page has to carry — on the socket, and when changing
     /// the display. Fixed rather than minted per run, so the URL to open, and
-    /// any bookmark of it, survives a restart. The default is sixteen zero bytes
-    /// in hex, which is what the debugging URL used to look like anyway.
+    /// any bookmark of it, survives a restart. The default is thirty-two zero
+    /// bytes, which is what the debugging URL used to look like anyway.
     pub web_token: String,
     /// Android Auto over TCP. The wireless protocol is TCP on this port, so a
     /// head unit that connects over the network works without a gadget — which
