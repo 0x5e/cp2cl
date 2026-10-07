@@ -71,6 +71,34 @@ Then plug the phone in and unlock it. You should see:
 [airplay] video stream attached
 ```
 
+### Cross-compiling for the board
+
+The board is aarch64 Alpine — musl, not glibc — and building for it from macOS
+does not work: `aws-lc-sys` does not get through its cmake step. Build inside a
+container that is already that platform instead, which turns it back into an
+ordinary native build:
+
+```bash
+docker run --rm --platform linux/arm64 -v "$PWD":/work -w /work \
+  -e CARGO_TARGET_DIR=/work/target/aarch64-unknown-linux-musl \
+  rust:1-alpine sh -c 'apk add build-base cmake perl linux-headers pkgconf git; cargo build --release'
+```
+
+There is no `--target` to pass, because the container's architecture is the one
+we want; the directory is named after that triple only so it sits beside the
+ones cargo files by itself. The result is
+`target/aarch64-unknown-linux-musl/release/cp2aa` — about 17 MB, static, linked
+against nothing.
+
+Every platform therefore gets a directory of its own under `target/`: a native
+build is `target/release/`, where cargo puts it anyway, and anything
+cross-compiled is filed under the triple it was built for. They cannot overwrite
+each other, and the single `target/` line in `.gitignore` covers all of them.
+
+The binary is not self-contained: `vendor/playport/web/dist` and
+`authentication/` are read relative to the working directory, so copy the tree,
+not just the file.
+
 ### Why HTTPS, and what to do about the certificate
 
 WebCodecs — the browser's hardware decoder — only exists in a **secure context**.
