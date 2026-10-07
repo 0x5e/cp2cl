@@ -209,7 +209,6 @@ decode. `CP2AA_HEVC` sets the default, and the panel overrides it per session.
 | `CP2AA_FPS` | `60` | frame rate上限 |
 | `CP2AA_HEVC` | on | ask for H.265. At the bitrate the phone sends it is visibly sharper than H.264; set `0` to fall back |
 | `CP2AA_WIDTH_MM` / `CP2AA_HEIGHT_MM` | derived | physical size; drives UI scale |
-| `CP2AA_AV_IFACE` | auto | USB network interface carrying media |
 | `CP2AA_DEVICE_ID` / `CP2AA_BT_MAC` | `00:11:22:33:44:55` | identifiers in `/info` |
 | `CP2AA_LOG` | `info` | log level: `error`, `warn`, `info`, `debug`, `trace` |
 | `CP2AA_WIRELESS` | off | take CarPlay over Bluetooth and Wi-Fi instead of USB |

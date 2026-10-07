@@ -223,11 +223,11 @@ async fn attach(
         Ok(ncm) => Some(ncm.ifname.clone()),
         Err(e) => {
             tracing::warn!("[cp] no NCM bridge ({e}); falling back to the kernel's interface");
-            av_interface(cfg, &phone.id).await
+            av_interface(&phone.id).await
         }
     };
     #[cfg(not(target_os = "linux"))]
-    let av_iface = av_interface(cfg, &phone.id).await;
+    let av_iface = av_interface(&phone.id).await;
     tracing::info!("[cp] av interface: {:?}", av_iface);
 
     loop {
@@ -472,10 +472,11 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Latched<S> {
 }
 
 /// Which interface carries CarPlay's own media, per platform.
-async fn av_interface(cfg: &Config, _udid: &str) -> Option<String> {
-    if let Some(iface) = &cfg.av_iface {
-        return Some(iface.clone());
-    }
+///
+/// Linux rarely needs this: the NCM bridge names the interface it builds and
+/// brings up itself. This is the fallback for when that bridge could not be
+/// started, and it is the primary answer on macOS.
+async fn av_interface(_udid: &str) -> Option<String> {
     #[cfg(target_os = "macos")]
     {
         // The phone's own USB network function, looked up by UDID.

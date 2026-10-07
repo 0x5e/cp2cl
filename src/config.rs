@@ -79,9 +79,6 @@ pub struct Config {
     pub bt_mac: String,
     /// Accessory name shown on the phone.
     pub name: String,
-    /// Linux only: which USB network gadget carries the airplay stream.
-    /// Auto-detected when unset.
-    pub av_iface: Option<String>,
     /// What consumes the streams: the browser client, or an Android Auto head unit.
     pub sink: Sink,
     /// Where the browser client is served, read from `CP2AA_WEB_ADDR` as
@@ -155,7 +152,6 @@ impl Config {
             device_id: env_or("CP2AA_DEVICE_ID", "00:11:22:33:44:55"),
             bt_mac: env_or("CP2AA_BT_MAC", "00:11:22:33:44:55"),
             name: env_or("CP2AA_NAME", "cp2aa"),
-            av_iface: env("CP2AA_AV_IFACE"),
             sink: match env("CP2AA_SINK") {
                 Some(text) => match Sink::parse(&text) {
                     Some(sink) => sink,
