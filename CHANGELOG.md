@@ -2,6 +2,31 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## v0.6.1 alpha — 2026-10-08
+
+Linux 有线链路跑通：手机自己 claim、网络功能自己扛；另修掉连接后 CPU 占满一核。
+
+### 新增
+
+- Linux 上自己 claim 手机：Alpine 没有 usbmuxd，改由 `iap2-usbmux` 把手机切到 CarPlay 的 USB 配置、
+  驱动其上的 mux，再经 lockdown 打开 `com.apple.carkit.service`（`9b64f7d`）。
+  claim 跨整轮会话持有：只有 CarPlay 配置带 mux 与网络功能，松手会让手机退回默认配置
+- `NcmBridge` 接手手机的网络功能：从内核 `cdc_ncm` 上取走 NCM 的控制与数据接口、盖一层 TAP、
+  按手机期望的 host MAC 建好并 up 起来，会话用它返回的接口名（`fad789b`）
+
+### 变更
+
+- 删除 `CP2AA_AV_IFACE`：接口名由 `NcmBridge` 直接返回，`av_interface()` 退化为兜底（macOS 按 UDID 查、
+  Linux 扫 `usb*`/`enp*`），两个平台都可以直接 `./cp2aa`（`d514498`）
+- 所有平台的构建产物统一收进 `target/`，交叉编译落 `target/aarch64-unknown-linux-musl/`，
+  那条 docker 命令一并写进 README（`62417d3`）
+
+### 修复
+
+- 连接后 CPU 占满一核（有线与无线都是）：`Vehicle` 被写成临时值，`feed()` 取出 receiver 后它立刻被 drop，
+  `watch::Receiver::changed()` 随之立即返回 `Err`，`run_accessory` 的 `select!` 从此永不挂起（`78d3932`）
+- `vendor/LIVI` 指针更新到 `9f829f0a`：`iap2-usbmux` 要它才编得过 musl（`b9c442e`）
+
 ## v0.6.0 alpha — 2026-10-06
 
 调试界面换成 PlayPort 的 web 界面，ffplay 与 stdin 两条旧通路删除。

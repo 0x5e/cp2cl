@@ -1,6 +1,6 @@
 [package]
 name = "cp2aa"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 description = "Headless CarPlay receiver that bridges an Android Auto head unit and an iPhone"
 license = "GPL-3.0-or-later"
