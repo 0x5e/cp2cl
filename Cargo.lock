@@ -491,6 +491,7 @@ dependencies = [
  "iap2-csm",
  "iap2-link",
  "iap2-mfi",
+ "iap2-usbmux",
  "iap2-wired",
  "idevice",
  "livi-aa",

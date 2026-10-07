@@ -14,6 +14,10 @@ license = "GPL-3.0-or-later"
 livi-runtime = { path = "vendor/LIVI/native/livi-helperd/crates/livi-runtime" }
 iap2-link = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-link" }
 iap2-wired = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-wired" }
+# Linux has no usbmuxd to ask — Alpine does not even package one — so the phone's
+# CarPlay USB configuration and its mux are claimed in-process instead. See
+# `src/session.rs`.
+iap2-usbmux = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-usbmux" }
 iap2-mfi = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-mfi" }
 iap2-csm = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-csm" }
 # LIVI's Android Auto implementation is the head-unit side; we are the phone.

@@ -9,6 +9,15 @@
 //!
 //! It also owns the two pieces both halves share rather than duplicate: the
 //! bringup loop, and the latch that lets a session be ended from the outside.
+//!
+//! Where the carkit stream comes from differs by platform. macOS asks the system
+//! `usbmuxd`, which already owns every iPhone plugged into the machine. A board has
+//! nothing to ask — Alpine does not even package a usbmuxd — so Linux claims the phone
+//! itself: `iap2_usbmux` puts it into its CarPlay USB configuration and drives the mux
+//! off it, and `iap2_wired::open_carkit` runs lockdown over that to open
+//! `com.apple.carkit.service`. The Linux half therefore holds that claim for as long as
+//! the session lasts, because letting go hands the phone back to its default
+//! configuration.
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,8 +40,8 @@ use tokio::sync::{broadcast, mpsc};
 use crate::config::Config;
 use crate::wireless::{parse_mac, short};
 
-/// How often the system usbmuxd is asked who is attached. Cheap enough that a
-/// second is not rude, and fast enough that plugging in feels immediate.
+/// How often we ask who is attached. Cheap enough that a second is not rude, and
+/// fast enough that plugging in feels immediate.
 const SCAN_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How long the phone is left alone between the old iAP2 session ending and a
@@ -50,6 +59,77 @@ pub(crate) enum Ended {
     Restart,
 }
 
+/// One phone on the cable, in whatever form this platform's transport wants it.
+struct Phone {
+    /// Names it in the log and in the "is it still plugged in" check.
+    id: String,
+    /// macOS: the daemon's own record, needed to open the channel again.
+    #[cfg(not(target_os = "linux"))]
+    daemon: idevice::usbmuxd::UsbmuxdDevice,
+}
+
+/// Who is on the cable right now.
+///
+/// Linux reads `/sys/bus/usb/devices` itself: a board has no usbmuxd to ask, so the
+/// phone is claimed in-process instead — see `claim` and `carkit` below.
+#[cfg(target_os = "linux")]
+async fn attached() -> Vec<Phone> {
+    iap2_usbmux::find_iphones()
+        .into_iter()
+        .map(|phone| Phone { id: phone.serial })
+        .collect()
+}
+
+/// Who is on the cable right now, according to the daemon that already owns it.
+#[cfg(not(target_os = "linux"))]
+async fn attached() -> Vec<Phone> {
+    match iap2_wired::usbmuxd::devices().await {
+        Ok(devices) => devices
+            .into_iter()
+            .map(|daemon| Phone { id: daemon.udid.clone(), daemon })
+            .collect(),
+        Err(e) => {
+            // Silence is normal before any phone has ever been trusted.
+            tracing::trace!("usbmuxd query failed: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// Claims the phone's CarPlay USB configuration and its mux, and keeps both.
+///
+/// Only the CarPlay configuration carries the mux and the network function, so this is
+/// what makes either reachable at all. The handle has to outlive every session it
+/// serves: dropping it hands the phone back to its default configuration.
+#[cfg(target_os = "linux")]
+async fn claim(serial: String) -> anyhow::Result<Arc<iap2_usbmux::MuxDevice>> {
+    // The phone is given up to five seconds to re-enumerate with the CarPlay
+    // configurations, so this sleeps — keep it off the runtime's threads.
+    let device = tokio::task::spawn_blocking(move || iap2_usbmux::MuxDevice::start(&serial))
+        .await
+        .map_err(|e| anyhow::anyhow!("mux task: {e}"))?
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(Arc::new(device))
+}
+
+/// The carkit stream for a phone we claimed ourselves.
+#[cfg(target_os = "linux")]
+async fn carkit(mux: &Arc<iap2_usbmux::MuxDevice>) -> anyhow::Result<Box<dyn idevice::ReadWrite>> {
+    iap2_wired::open_carkit(mux)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .into_stream()
+        .ok_or_else(|| anyhow::anyhow!("carkit stream unavailable after opening the service"))
+}
+
+/// The carkit stream for a phone the system daemon is holding.
+#[cfg(not(target_os = "linux"))]
+async fn carkit(phone: &Phone) -> anyhow::Result<Box<dyn idevice::ReadWrite>> {
+    iap2_wired::usbmuxd::open(&phone.daemon)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
 /// Keeps asking who is plugged in until we stop being asked to stop.
 pub async fn watch(
     cfg: Arc<Config>,
@@ -59,30 +139,22 @@ pub async fn watch(
 ) {
     let mut busy: Option<String> = None;
     loop {
-        match iap2_wired::usbmuxd::devices().await {
-            Ok(devices) => {
-                let current: Vec<String> = devices.iter().map(|d| d.udid.clone()).collect();
-                match &busy {
-                    Some(udid) if !current.contains(udid) => {
-                        tracing::info!("[cp] {} unplugged", short(udid));
-                        busy = None;
-                    }
-                    _ => {}
-                }
-                if busy.is_none() {
-                    if let Some(device) = devices.into_iter().next() {
-                        let udid = device.udid.clone();
-                        tracing::info!("[cp] {} found over usb", short(&udid));
-                        match attach(&cfg, auth.clone(), &device, airplay_port, &restart).await {
-                            Ok(()) => busy = Some(udid),
-                            Err(e) => tracing::warn!("[cp] {} could not attach: {e}", short(&udid)),
-                        }
-                    }
-                }
+        let phones = attached().await;
+        let current: Vec<String> = phones.iter().map(|p| p.id.clone()).collect();
+        match &busy {
+            Some(id) if !current.contains(id) => {
+                tracing::info!("[cp] {} unplugged", short(id));
+                busy = None;
             }
-            Err(e) => {
-                // Silence is normal before any phone has ever been trusted.
-                tracing::trace!("usbmuxd query failed: {e}");
+            _ => {}
+        }
+        if busy.is_none() {
+            if let Some(phone) = phones.into_iter().next() {
+                tracing::info!("[cp] {} found over usb", short(&phone.id));
+                match attach(&cfg, auth.clone(), &phone, airplay_port, &restart).await {
+                    Ok(()) => busy = Some(phone.id.clone()),
+                    Err(e) => tracing::warn!("[cp] {} could not attach: {e}", short(&phone.id)),
+                }
             }
         }
         tokio::time::sleep(SCAN_INTERVAL).await;
@@ -102,7 +174,7 @@ pub async fn watch(
 async fn attach(
     cfg: &Config,
     auth: SharedCoprocessor,
-    device: &idevice::usbmuxd::UsbmuxdDevice,
+    phone: &Phone,
     airplay_port: u32,
     restart: &broadcast::Sender<()>,
 ) -> anyhow::Result<()> {
@@ -111,16 +183,22 @@ async fn attach(
     let mut changed = restart.subscribe();
 
     // The stream the phone sends its media over. On macOS this is the enX the
-    // USB network function creates; on Linux it is whatever gadget we set up.
-    let av_iface = av_interface(cfg, &device.udid).await;
+    // USB network function creates; on Linux it is the `usbN` the kernel's cdc_ncm
+    // makes out of the phone's CarPlay network function.
+    let av_iface = av_interface(cfg, &phone.id).await;
     tracing::info!("[cp] av interface: {:?}", av_iface);
 
+    // Linux owns the phone's USB configuration from here on, so it is claimed once and
+    // held across every session this attach produces; macOS leaves it to the daemon.
+    #[cfg(target_os = "linux")]
+    let mux = claim(phone.id.clone()).await?;
+
     loop {
-        // `ProbeError` is only Display, not std::error::Error, so go through format.
-        let tunnel = iap2_wired::usbmuxd::open(device)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        tracing::info!("[cp] {} carkit up, starting iAP2", short(&device.udid));
+        #[cfg(target_os = "linux")]
+        let tunnel = carkit(&mux).await?;
+        #[cfg(not(target_os = "linux"))]
+        let tunnel = carkit(phone).await?;
+        tracing::info!("[cp] {} carkit up, starting iAP2", short(&phone.id));
 
         let identity = Identity {
             name: cfg.name.clone(),
@@ -173,7 +251,7 @@ async fn attach(
         });
 
         let ended =
-            run_bringup("[cp]", &short(&device.udid), airplay_port, None, rx, &mut changed).await;
+            run_bringup("[cp]", &short(&phone.id), airplay_port, None, rx, &mut changed).await;
 
         // Neither half of the link may outlive this round. Aborting the session
         // drops its handle to the link, and the latch is what makes the driver's
@@ -188,7 +266,7 @@ async fn attach(
         };
         tracing::info!(
             "[cp] {} is being told to start over; reopening carkit",
-            short(&device.udid)
+            short(&phone.id)
         );
         tokio::time::sleep(RESTART_PAUSE).await;
     }
