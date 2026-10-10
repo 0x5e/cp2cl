@@ -212,7 +212,7 @@ struct Client {
 pub struct Hub {
     device_name: String,
     /// What the phone is being asked to render. Written by the display panel and
-    /// read by `/info`, which is why it is the same slot the head unit writes.
+    /// read by `/info`, which is why one slot serves both.
     display: SharedScreen,
     /// The answer until something writes that slot: the size and codec the
     /// environment asked for.
@@ -255,10 +255,17 @@ impl Hub {
         let hub = Arc::new(Self {
             device_name: cfg.name.clone(),
             display,
+            // The panel knows nothing about the panel's physical size or about
+            // which audio codings the browser can decode, so both come from the
+            // environment: 0 millimetres lets `info` derive it from the aspect
+            // ratio, and every coding is offered because WebCodecs takes them
+            // all.
             default_display: ScreenParams {
                 width: cfg.width,
                 height: cfg.height,
                 fps: cfg.fps,
+                width_mm: cfg.width_mm,
+                height_mm: cfg.height_mm,
                 ui_scale: 100,
                 hevc: cfg.hevc,
             },
@@ -789,6 +796,9 @@ async fn api_display_post(
         fps: request.fps,
         ui_scale: request.ui_scale,
         hevc: request.hevc,
+        // Not part of the request: the panel has no say in the panel's physical
+        // size, and it decodes every audio coding there is.
+        ..state.hub.default_display
     };
     if let Ok(mut slot) = state.hub.display.lock() {
         *slot = Some(params);

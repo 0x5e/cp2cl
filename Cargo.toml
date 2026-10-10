@@ -2,7 +2,7 @@
 name = "cp2cl"
 version = "0.6.1"
 edition = "2021"
-description = "Headless CarPlay receiver that bridges an Android Auto head unit and an iPhone"
+description = "Headless CarPlay receiver that serves an iPhone's streams to a browser client"
 license = "GPL-3.0-or-later"
 
 # The LIVI crates come from the `vendor/LIVI` submodule, pinned to the
@@ -20,11 +20,6 @@ iap2-wired = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-wired" }
 iap2-usbmux = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-usbmux" }
 iap2-mfi = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-mfi" }
 iap2-csm = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-csm" }
-# LIVI's Android Auto implementation is the head-unit side; we are the phone.
-# Framing, the protobuf primitives and the channel constants know nothing about
-# which end they are on, so we take those from there instead of keeping a copy.
-# The TLS server and the session state machine are ours, in `src/aa-client`.
-livi-aa = { path = "vendor/LIVI/native/livi-helperd/crates/livi-aa" }
 # Needed directly to name `usbmuxd::UsbmuxdDevice` in our own function
 # signatures. Same version LIVI resolves, so these unify into one build.
 idevice = { version = "0.1", features = ["usbmuxd"] }
@@ -70,15 +65,12 @@ serde_json = "1"
 # a WebSocket carrying the same JSON control messages and binary media wire.
 #
 # `tls-rustls-no-provider` rather than `tls-rustls`: the latter would pull in
-# `aws-lc-rs` as a second crypto provider, and rustls then refuses to guess
-# which one the process wants. There is exactly one — `ring`, the provider the
-# Android Auto half already needs — and `main` installs it.
+# `aws-lc-rs` as the crypto provider, and rustls then refuses to guess which one
+# the process wants — the same refusal that keeps `aws-lc-sys` out of the
+# cross-compiled build. Naming no provider means the process has to install one
+# itself, which `main` does; `ring` is the one, and it is named here so the
+# binary can install it.
 axum = { version = "0.8", features = ["ws"] }
 axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 rcgen = "0.13"
-
-# Android Auto, phone side (src/aa-client): a TLS 1.2 server presenting the
-# phone's certificate. rustls is already in the lock file through LIVI, so this
-# resolves to the build that is there rather than pulling in a second one.
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-rustls-pemfile = "2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

@@ -176,7 +176,7 @@ pub async fn watch(
             if let Some(phone) = phones.into_iter().next() {
                 tracing::info!("[cp] {} found over usb", short(&phone.id));
                 match attach(&cfg, auth.clone(), &phone, airplay_port, &restart).await {
-                    Ok(()) => busy = Some(phone.id.clone()),
+                    Ok(_) => busy = Some(phone.id.clone()),
                     Err(e) => tracing::warn!("[cp] {} could not attach: {e}", short(&phone.id)),
                 }
             }
@@ -201,7 +201,7 @@ async fn attach(
     phone: &Phone,
     airplay_port: u32,
     restart: &broadcast::Sender<()>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Ended> {
     // Subscribed before anything opens, so a display change made while the
     // carkit is coming up is still waiting for us rather than lost.
     let mut changed = restart.subscribe();
@@ -304,14 +304,18 @@ async fn attach(
         drop(artwork);
         shut.shutdown();
 
-        let Ended::Restart = ended else {
-            return Ok(());
-        };
-        tracing::info!(
-            "[cp] {} is being told to start over; reopening carkit",
-            short(&phone.id)
-        );
-        tokio::time::sleep(RESTART_PAUSE).await;
+        match ended {
+            Ended::Restart => {
+                tracing::info!(
+                    "[cp] {} is being told to start over; reopening carkit",
+                    short(&phone.id)
+                );
+                tokio::time::sleep(RESTART_PAUSE).await;
+            }
+            // Nothing to reopen. The caller drops the phone claim along with us,
+            // and picking it up again is what starts a fresh session.
+            other => return Ok(other),
+        }
     }
 }
 
@@ -338,7 +342,7 @@ pub(crate) async fn run_bringup(
             signal = changed.recv() => {
                 return match signal {
                     // `Lagged` means more than one change arrived before this
-                    // one was read; either way one restart covers them all.
+                    // one was read; either way one new session covers them all.
                     Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => Ended::Restart,
                     // Every sender is gone, so nothing can ask for a restart
                     // again; ending is both correct and the only way to stop

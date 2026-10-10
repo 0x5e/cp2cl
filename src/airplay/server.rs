@@ -197,8 +197,7 @@ impl AudioStream {
 }
 
 /// What the phone should render at, when something other than the configuration
-/// knows better — an Android Auto head unit's declared resolution, or a size the
-/// operator picked in the browser's display panel.
+/// knows better — a size the operator picked in the browser's display panel.
 ///
 /// `GET /info` prefers this to `Config` once it is set. It only lands if it is
 /// written before the session starts, which is why changing it costs a session:
@@ -208,6 +207,11 @@ pub struct ScreenParams {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    /// Screen size in millimetres, or zero to let `info` work it out from the
+    /// aspect ratio. Nothing in the program measures a panel, so this is what
+    /// the environment says.
+    pub width_mm: u32,
+    pub height_mm: u32,
     /// Canvas scale in percent, the way PlayPort's "UI size" control means it:
     /// the phone is asked for a canvas of `100/percent` the size, and the
     /// browser fits the result back to its own surface, so a larger canvas
@@ -215,7 +219,7 @@ pub struct ScreenParams {
     pub ui_scale: u32,
     /// Whether to advertise HEVC. Part of the negotiated display rather than the
     /// environment because it has to match what the far end can decode: a browser
-    /// picking H.264, or a head unit that only lists H.264, would show nothing.
+    /// that will only take H.264 would show nothing.
     pub hevc: bool,
 }
 
@@ -264,12 +268,12 @@ pub struct Shared {
     pub pairings: Arc<Mutex<Pairings>>,
     pub video_sink: Arc<dyn MediaSink>,
     pub audio_sink: Arc<dyn MediaSink>,
-    /// Set by the Android Auto bridge once a head unit has said what it can
-    /// show, or by the browser's display panel. Read by `GET /info`.
+    /// Set by the browser's display panel once it has asked for a size of its
+    /// own. Read by `GET /info`.
     pub screen: SharedScreen,
     /// Fired when what the phone should be rendering has changed. `/info` is
     /// answered once per session, so dropping the session is the only way a
-    /// change lands: the phone reconnects, asks again, and gets the new size.
+    /// change lands: the phone reconnects, asks again, and gets the new answer.
     pub restart: tokio::sync::broadcast::Sender<()>,
     /// The same MFi signer the iAP2 side uses, for `/auth-setup`.
     pub mfi: livi_runtime::mfi_async::SharedCoprocessor,
@@ -281,8 +285,8 @@ pub struct Shared {
     pub timing: Arc<Mutex<SyncedClock>>,
     /// Announced to the phone so it knows what audio to send.
     pub audio_codec: Arc<Mutex<AudioCodec>>,
-    /// Where input lands; the browser and the AA bridge dispatch into this once
-    /// pairing completes.
+    /// Where input lands; the browser dispatches into this once pairing
+    /// completes.
     pub event_sink: Arc<EventSink>,
     /// The one stream that runs both ways. Opened when the phone asks for
     /// bidirectional audio, and where the browser's microphone audio goes.
@@ -419,8 +423,8 @@ struct Pump {
 
 struct Session {
     cfg: Arc<Config>,
-    /// What a head unit — or the browser's display panel — asked for, if either
-    /// has. Read when answering `/info`.
+    /// What the browser's display panel asked for, if it has. Read when
+    /// answering `/info`.
     screen: SharedScreen,
     /// Fires when the session should end so the phone re-reads `/info`.
     restart: tokio::sync::broadcast::Receiver<()>,
@@ -626,8 +630,8 @@ impl Session {
     }
 
     /// Whether HEVC is being advertised. The environment sets the default; a
-    /// head unit that cannot decode it, or a browser that picked H.264, writes
-    /// the negotiated display and overrides it.
+    /// browser that picked H.264 writes the negotiated display and overrides
+    /// it.
     fn hevc(&self) -> bool {
         self.negotiated().map(|s| s.hevc).unwrap_or(self.cfg.hevc)
     }
@@ -638,15 +642,23 @@ impl Session {
     }
 
     fn info(&self) -> Result<Response, String> {
-        // A head unit's declared resolution wins, and so does the browser's
-        // display panel: both are the end that has to decode the picture, so
-        // asking the phone for something else just makes it scale.
-        let (width, height, fps) = match self.negotiated() {
+        // The browser's display panel wins when it has been used: it is the end
+        // that has to decode the picture, so asking the phone for something else
+        // just makes it scale.
+        let negotiated = self.negotiated();
+        let (width, height, fps) = match negotiated {
             Some(s) => {
                 let (width, height) = s.canvas();
                 (width, height, s.fps)
             }
             None => (self.cfg.width, self.cfg.height, self.cfg.fps),
+        };
+        // The physical size is the other half of what the phone draws at: it
+        // turns millimetres back into a dpi, and a wrong one is a picture at the
+        // wrong scale. `CP2CL_WIDTH_MM` is what says it.
+        let (width_mm, height_mm) = match negotiated {
+            Some(s) => (s.width_mm, s.height_mm),
+            None => (self.cfg.width_mm, self.cfg.height_mm),
         };
         let plist = info::build(&info::Static {
             device_id: self.cfg.device_id.clone(),
@@ -655,13 +667,15 @@ impl Session {
             width,
             height,
             fps,
-            width_mm: self.cfg.width_mm,
-            height_mm: self.cfg.height_mm,
+            width_mm,
+            height_mm,
             hevc: self.hevc(),
         })
         .map_err(|e| e.to_string())?;
-        tracing::info!("[airplay] answered GET /info ({width}x{height}@{fps}, {})",
-            if self.hevc() { "HEVC" } else { "H.264" });
+        tracing::info!(
+            "[airplay] answered GET /info ({width}x{height}@{fps}, {width_mm}x{height_mm}mm, {})",
+            if self.hevc() { "HEVC" } else { "H.264" }
+        );
         Ok(Response::new(200).plist(plist))
     }
 
@@ -930,7 +944,7 @@ impl Session {
             // on, a Wi-Fi link holds the second report until the first is acked
             // and then flushes whatever piled up as one segment, which the phone
             // reads as a single tick — a d-pad nudge and its recentring cancel
-            // out. The Android Auto socket sets this for the same reason.
+            // out.
             let _ = socket.set_nodelay(true);
             let (read, write) = socket.into_split();
             sink.attach_writer(write).await;
@@ -1461,6 +1475,8 @@ mod tests {
             width,
             height,
             fps: 60,
+            width_mm: 0,
+            height_mm: 0,
             ui_scale,
             hevc: false,
         }

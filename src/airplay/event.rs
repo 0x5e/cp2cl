@@ -15,9 +15,8 @@
 //! control channel they are *not* read/write swapped (see `VerifyKeys`).
 //!
 //! The channel runs both ways. `EventSink` is the half the rest of the program
-//! talks to — the browser client and the Android Auto bridge both hand it
-//! commands — and `pump_events` is the half that reads what the phone posts back
-//! and answers it.
+//! talks to — the browser client hands it commands — and `pump_events` is the
+//! half that reads what the phone posts back and answers it.
 
 use std::sync::Arc;
 
@@ -268,11 +267,6 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
                 self.hid_report(TOUCH_HID_UID, touch_report(&contacts))
                     .await?
             }
-            // The three below come from the AA bridge, off the head unit's own
-            // call and media keys; the browser sends raw indices instead.
-            Command::Answer => self.telephony_momentary(PHONE_HOOK_SWITCH).await?,
-            Command::Hangup => self.telephony_momentary(PHONE_DROP).await?,
-            Command::Mute => self.telephony_momentary(PHONE_MUTE).await?,
             Command::Telephony(index) => self.telephony_momentary(index).await?,
             Command::KeyFrame => {
                 self.command("forceKeyFrame", "uuid", Value::String(MAIN_UUID.into()))
@@ -326,8 +320,7 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
 
     /// One wheel tick, press and release. A relative axis: the phone reads the
     /// sign and ignores the magnitude, and it follows the UI's own scroll
-    /// direction — horizontal on the app grid. Only the AA bridge produces
-    /// these; there is no stdin command.
+    /// direction — horizontal on the app grid.
     async fn wheel(&mut self, ticks: i8) -> std::io::Result<()> {
         self.knob(0x00, 0, 0, ticks).await?;
         self.knob(0x00, 0, 0, 0).await

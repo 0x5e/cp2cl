@@ -494,7 +494,6 @@ dependencies = [
  "iap2-usbmux",
  "iap2-wired",
  "idevice",
- "livi-aa",
  "livi-runtime",
  "num-bigint",
  "num-traits",
@@ -502,7 +501,6 @@ dependencies = [
  "rand 0.8.8",
  "rcgen",
  "rustls",
- "rustls-pemfile",
  "serde",
  "serde_json",
  "sha1",
@@ -1301,22 +1299,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
-name = "livi-aa"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "livi-host-proto",
- "livi-session-io",
- "nusb",
- "rustls",
- "rustls-pemfile",
- "rustls-pki-types",
- "serde_json",
- "socket2 0.5.10",
- "tokio",
-]
-
-[[package]]
 name = "livi-btd"
 version = "0.1.0"
 dependencies = [
@@ -1348,14 +1330,6 @@ dependencies = [
  "socket2 0.5.10",
  "tokio",
  "zbus",
-]
-
-[[package]]
-name = "livi-session-io"
-version = "0.1.0"
-dependencies = [
- "nusb",
- "tokio",
 ]
 
 [[package]]
@@ -1537,7 +1511,6 @@ dependencies = [
  "once_cell",
  "rustix",
  "slab",
- "tokio",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

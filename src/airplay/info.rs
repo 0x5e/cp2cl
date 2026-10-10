@@ -170,6 +170,8 @@ fn format_entry(type_: i64, audio_type: &str, output: i64, input: Option<i64>) -
     Value::Dictionary(d)
 }
 
+/// What the phone is offered, per stream type.
+///
 /// Wired CarPlay is the only place PCM shows up, and we are wired, so PCM is
 /// offered throughout. The phone then picks OPUS for the low-latency streams
 /// and AAC-LC for entertainment.
@@ -182,22 +184,23 @@ fn audio_formats(rate: u32) -> Value {
     let opus: i64 = 0x7000_0000;
     let aac_lc: i64 = if is48 { 0x800000 } else { 0x400000 };
 
-    Value::Array(vec![
-        format_entry(100, "compatibility", pcm, Some(pcm_mono)),
-        format_entry(101, "compatibility", pcm, None),
-        format_entry(100, "default", pcm | opus, Some(pcm_mono | opus)),
-        format_entry(100, "alert", pcm | opus, None),
-        format_entry(100, "media", pcm_media, None),
-        format_entry(100, "telephony", pcm_mono | opus, Some(pcm_mono | opus)),
-        format_entry(
-            100,
-            "speechRecognition",
-            pcm_mono | opus,
-            Some(pcm_mono | opus),
-        ),
-        format_entry(101, "default", pcm | opus, None),
-        format_entry(102, "media", aac_lc, None),
-    ])
+    let entries: [(i64, &str, i64, Option<i64>); 9] = [
+        (100, "compatibility", pcm, Some(pcm_mono)),
+        (101, "compatibility", pcm, None),
+        (100, "default", pcm | opus, Some(pcm_mono | opus)),
+        (100, "alert", pcm | opus, None),
+        (100, "media", pcm_media, None),
+        (100, "telephony", pcm_mono | opus, Some(pcm_mono | opus)),
+        (100, "speechRecognition", pcm_mono | opus, Some(pcm_mono | opus)),
+        (101, "default", pcm | opus, None),
+        (102, "media", aac_lc, None),
+    ];
+    Value::Array(
+        entries
+            .into_iter()
+            .map(|(type_, name, output, input)| format_entry(type_, name, output, input))
+            .collect(),
+    )
 }
 
 fn display_entry(s: &Static) -> Value {
@@ -341,3 +344,56 @@ const TELEPHONY_DESCRIPTOR: &[u8] = &[
     0x09,0xb5,0x09,0xb6,0x09,0xb7,0x09,0xb8,0x09,0xb9,0x09,0xba,0x09,0xbb,0x05,0x07,
     0x09,0x2a,0x75,0x08,0x95,0x01,0x81,0x00,0xc0,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One entry's output formats, or `None` when that entry is not offered.
+    fn offered(value: &Value, type_: i64, audio_type: &str) -> Option<i64> {
+        let Value::Array(items) = value else {
+            panic!("audioFormats is an array");
+        };
+        items
+            .iter()
+            .filter_map(|item| item.as_dictionary())
+            .find(|d| {
+                d.get("type").and_then(|v| v.as_signed_integer()) == Some(type_)
+                    && d.get("audioType").and_then(|v| v.as_string()) == Some(audio_type)
+            })
+            .and_then(|d| d.get("audioOutputFormats"))
+            .and_then(|v| v.as_signed_integer())
+    }
+
+    /// The bitmaps a 48 kHz offer names: the full-band PCM family, and the
+    /// mono one the low-latency streams are offered.
+    const PCM_48K: i64 = 0x3fc | 0xc000;
+    const PCM_MONO_48K: i64 = 0x154 | 0x4000;
+
+    fn count(value: &Value) -> usize {
+        let Value::Array(items) = value else {
+            panic!("audioFormats is an array");
+        };
+        items.len()
+    }
+
+    /// The offer as it stands: every stream type, with the codings the phone
+    /// picks from. A missing entry is a stream the phone will not open at all,
+    /// so the shape of this table is part of the protocol rather than a detail.
+    #[test]
+    fn every_stream_type_is_offered_its_codings() {
+        let table = audio_formats(48_000);
+        assert_eq!(count(&table), 9);
+        assert_eq!(offered_entry(&table, 102, "media"), 0x80_0000);
+        assert_eq!(offered_entry(&table, 100, "media"), 0x8000);
+        assert_eq!(offered_entry(&table, 100, "alert"), PCM_48K | 0x7000_0000);
+        assert_eq!(
+            offered_entry(&table, 100, "telephony"),
+            PCM_MONO_48K | 0x7000_0000
+        );
+    }
+
+    fn offered_entry(value: &Value, type_: i64, audio_type: &str) -> i64 {
+        offered(value, type_, audio_type).expect("that entry is offered")
+    }
+}

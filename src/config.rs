@@ -30,32 +30,6 @@ fn env_num<T: std::str::FromStr>(key: &str, default: T) -> T {
     env(key).and_then(|s| s.parse().ok()).unwrap_or(default)
 }
 
-/// Where a decoded stream goes, once CarPlay has handed it over.
-///
-/// Both ends of this are the same media, so the choice is only about who
-/// consumes it: the browser client on this machine, or a head unit that thinks
-/// we are an Android phone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Sink {
-    /// Serve PlayPort's browser client over HTTPS and push the streams to it.
-    /// The default.
-    Web,
-    /// Send to a connected Android Auto head unit over `aa_client`.
-    Aa,
-}
-
-impl Sink {
-    fn parse(text: &str) -> Option<Self> {
-        if text.eq_ignore_ascii_case("web") {
-            Some(Self::Web)
-        } else if text.eq_ignore_ascii_case("aa") {
-            Some(Self::Aa)
-        } else {
-            None
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Directory holding identity.pk8 + certificate.p7b (the MFi credentials).
@@ -79,8 +53,6 @@ pub struct Config {
     pub bt_mac: String,
     /// Accessory name shown on the phone.
     pub name: String,
-    /// What consumes the streams: the browser client, or an Android Auto head unit.
-    pub sink: Sink,
     /// Where the browser client is served, read from `CP2CL_WEB_ADDR` as
     /// `address:port`. The scheme is not part of it because there is only one:
     /// the page decodes with WebCodecs, which a browser only offers in a secure
@@ -91,15 +63,6 @@ pub struct Config {
     /// any bookmark of it, survives a restart. The default is thirty-two zero
     /// bytes, which is what the debugging URL used to look like anyway.
     pub web_token: String,
-    /// Android Auto over TCP. The wireless protocol is TCP on this port, so a
-    /// head unit that connects over the network works without a gadget — which
-    /// is also the only way to try any of this from a Mac.
-    pub aa_tcp_port: u16,
-    /// Android Auto over a USB gadget instead: the board plays an Android phone,
-    /// the head unit is the host. Linux only, and it needs configfs — which is
-    /// why the field only exists there.
-    #[cfg(target_os = "linux")]
-    pub aa_usb: bool,
 
     /// Take CarPlay over Bluetooth and Wi-Fi instead of the cable.
     ///
@@ -152,24 +115,8 @@ impl Config {
             device_id: env_or("CP2CL_DEVICE_ID", "00:11:22:33:44:55"),
             bt_mac: env_or("CP2CL_BT_MAC", "00:11:22:33:44:55"),
             name: env_or("CP2CL_NAME", "cp2cl"),
-            sink: match env("CP2CL_SINK") {
-                Some(text) => match Sink::parse(&text) {
-                    Some(sink) => sink,
-                    None => {
-                        tracing::warn!("[cp2cl] CP2CL_SINK={text} is neither `web` nor `aa`; using web");
-                        Sink::Web
-                    }
-                },
-                None => Sink::Web,
-            },
             web_addr: web_addr_from_env(),
             web_token: env_or("CP2CL_WEB_TOKEN", "00000000000000000000000000000000"),
-            // 5288 is the port Android Auto uses for wireless.
-            aa_tcp_port: env_num("CP2CL_AA_TCP_PORT", 5288),
-            #[cfg(target_os = "linux")]
-            aa_usb: std::env::var("CP2CL_AA_USB")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
             // Wired stays the default: it needs nothing the operator has to
             // look up first.
             wireless: std::env::var("CP2CL_WIRELESS")
