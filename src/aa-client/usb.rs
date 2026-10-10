@@ -20,7 +20,7 @@
 //!
 //! Written against the documented configfs and FunctionFS layout, and compiled,
 //! but no board has been plugged in yet — expect to debug the UDC name and the
-//! endpoint ordering before it works. `CP2AA_AA_USB=1` selects it.
+//! endpoint ordering before it works. `CP2CL_AA_USB=1` selects it.
 
 use std::fs::{self, OpenOptions};
 use std::io;
@@ -35,8 +35,8 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::bridge::Bridge;
 
 const CONFIGFS: &str = "/sys/kernel/config";
-const GADGET_DIR: &str = "/sys/kernel/config/usb_gadget/cp2aa";
-const GADGET_NAME: &str = "cp2aa";
+const GADGET_DIR: &str = "/sys/kernel/config/usb_gadget/cp2cl";
+const GADGET_NAME: &str = "cp2cl";
 /// Where the function filesystem is mounted. Its name has to match the
 /// `functions/ffs.<name>` directory in configfs.
 const FFS_DIR: &str = "/dev/ffs-aa";
@@ -96,8 +96,8 @@ impl Gadget {
 
         let strings = g.join("strings/0x409");
         mkdir(&strings)?;
-        write_sys(&strings, "manufacturer", "cp2aa")?;
-        write_sys(&strings, "product", "cp2aa")?;
+        write_sys(&strings, "manufacturer", "cp2cl")?;
+        write_sys(&strings, "product", "cp2cl")?;
         write_sys(&strings, "serialnumber", "000001")?;
 
         let config = g.join("configs/c.1");
@@ -246,7 +246,7 @@ fn write_descriptors(ep0: &mut fs::File) -> io::Result<()> {
     // Strings: one language, one interface string. Optional, but a host that
     // asks for a missing string descriptor gets a stall for its trouble.
     let lang = 0x0409u16.to_le_bytes();
-    let string = b"cp2aa Android Auto\0";
+    let string = b"cp2cl Android Auto\0";
     let length = 16 + lang.len() + string.len();
     let mut out = Vec::with_capacity(length);
     out.extend_from_slice(&FFS_STRINGS_MAGIC.to_le_bytes());

@@ -114,7 +114,7 @@ impl Pairings {
                         PathBuf::from(std::env::var("HOME").unwrap_or_default())
                             .join(".local/share")
                     });
-                let dir = base.join("cp2aa");
+                let dir = base.join("cp2cl");
                 std::fs::create_dir_all(&dir)?;
                 dir.join("pairings.json")
             }

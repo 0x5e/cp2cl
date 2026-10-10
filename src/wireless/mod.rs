@@ -152,13 +152,13 @@ pub(crate) fn short(mac: &str) -> String {
 pub(crate) fn ready(cfg: &Config) -> Result<(), String> {
     if cfg.ssid.is_empty() {
         return Err(
-            "CP2AA_WIFI_SSID is empty — the phone is told to join a network, \
+            "CP2CL_WIFI_SSID is empty — the phone is told to join a network, \
                     so name the one both ends are on"
                 .into(),
         );
     }
     if cfg.passphrase.len() < 8 {
-        return Err("CP2AA_WIFI_PASS is shorter than the 8 characters WPA needs".into());
+        return Err("CP2CL_WIFI_PASS is shorter than the 8 characters WPA needs".into());
     }
     Ok(())
 }

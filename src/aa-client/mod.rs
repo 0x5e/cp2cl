@@ -1,7 +1,7 @@
 //! `aa_client` — the Android Auto protocol from the **phone's** side.
 //!
 //! A head unit (HU) is the display, the knobs and the speakers; the phone (MD)
-//! is everything else. This module is the phone half, so cp2aa can be plugged
+//! is everything else. This module is the phone half, so cp2cl can be plugged
 //! into a car and be treated as an Android handset:
 //!
 //! ```text
@@ -45,6 +45,6 @@ pub mod proto;
 pub mod session;
 pub mod tls;
 // The USB gadget is the only transport a head unit will accept, and only Linux
-// has one to offer. TCP (`CP2AA_AA_TCP_PORT`) is the cross-platform stand-in.
+// has one to offer. TCP (`CP2CL_AA_TCP_PORT`) is the cross-platform stand-in.
 #[cfg(target_os = "linux")]
 pub mod usb;

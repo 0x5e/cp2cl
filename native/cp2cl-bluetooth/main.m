@@ -38,7 +38,7 @@ static unsigned char kCarPlayUUID[]   = {0xec,0x88,0x43,0x48,0xcd,0x41,0x40,0xa2
 @end
 
 static NSString *targetAddress(void) {
-    NSString *target = NSProcessInfo.processInfo.environment[@"CP2AA_TARGET_BT"];
+    NSString *target = NSProcessInfo.processInfo.environment[@"CP2CL_TARGET_BT"];
     return [[target stringByReplacingOccurrencesOfString:@"-" withString:@":"] lowercaseString];
 }
 
@@ -76,7 +76,7 @@ static NSString *targetAddress(void) {
         [[channel getDevice] addressString]];
     NSData *header = [line dataUsingEncoding:NSUTF8StringEncoding];
     send(fd, header.bytes, header.length, 0);
-    NSLog(@"cp2aa: RFCOMM connected: %@", [[channel getDevice] name]);
+    NSLog(@"cp2cl: RFCOMM connected: %@", [[channel getDevice] name]);
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         uint8_t buf[1024];
@@ -108,7 +108,7 @@ static NSString *targetAddress(void) {
                 // one. Reopening promptly is the point — waiting out the poll
                 // interval would leave a display change hanging for seconds.
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-                    NSLog(@"cp2aa: reopening the iAP2 channel after the receiver restarted");
+                    NSLog(@"cp2cl: reopening the iAP2 channel after the receiver restarted");
                     [self scan];
                 });
             }
@@ -126,7 +126,7 @@ static NSString *targetAddress(void) {
         [self attach:channel];
     } else {
         self.channel = nil;
-        NSLog(@"cp2aa: RFCOMM open error: %d", status);
+        NSLog(@"cp2cl: RFCOMM open error: %d", status);
     }
 }
 
@@ -151,7 +151,7 @@ static NSString *targetAddress(void) {
     NSString *result;
     if (status != kIOReturnSuccess) {
         result = [NSString stringWithFormat:@"Bluetooth SDP failed for %@: %d", device.name, status];
-        if (![self.results[device.addressString] isEqual:result]) NSLog(@"cp2aa: %@", result);
+        if (![self.results[device.addressString] isEqual:result]) NSLog(@"cp2cl: %@", result);
         self.results[device.addressString] = result;
         return;
     }
@@ -159,7 +159,7 @@ static NSString *targetAddress(void) {
     IOBluetoothSDPServiceRecord *record = [device getServiceRecordForUUID:serviceUUID];
     BluetoothRFCOMMChannelID channelID = 0;
     if (record && [record getRFCOMMChannelID:&channelID] == kIOReturnSuccess) {
-        NSLog(@"cp2aa: iAP2 service found on %@ channel=%u", device.name, channelID);
+        NSLog(@"cp2cl: iAP2 service found on %@ channel=%u", device.name, channelID);
         IOBluetoothRFCOMMChannel *channel = nil;
         IOReturn opened = [device openRFCOMMChannelAsync:&channel withChannelID:channelID delegate:self];
         if (opened == kIOReturnSuccess) {
@@ -168,7 +168,7 @@ static NSString *targetAddress(void) {
             // on the phone; drop it and ask again.
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
                 if (self.channel == channel && self.fd < 0) {
-                    NSLog(@"cp2aa: RFCOMM timed out; refreshing iPhone service records");
+                    NSLog(@"cp2cl: RFCOMM timed out; refreshing iPhone service records");
                     [channel closeChannel];
                     self.channel = nil;
                     self.results[device.addressString] = @"refresh";
@@ -177,11 +177,11 @@ static NSString *targetAddress(void) {
                 }
             });
         } else {
-            NSLog(@"cp2aa: RFCOMM request failed: %d", opened);
+            NSLog(@"cp2cl: RFCOMM request failed: %d", opened);
         }
     } else {
         result = [NSString stringWithFormat:@"Bluetooth iAP2 service unavailable for %@; open CarPlay settings on iPhone", device.name];
-        if (![self.results[device.addressString] isEqual:result]) NSLog(@"cp2aa: %@", result);
+        if (![self.results[device.addressString] isEqual:result]) NSLog(@"cp2cl: %@", result);
         self.results[device.addressString] = result;
     }
 }
@@ -201,7 +201,7 @@ static NSString *targetAddress(void) {
             continue;
         }
         if (!self.results[device.addressString]) {
-            NSLog(@"cp2aa: querying iPhone Bluetooth service: %@", device.name);
+            NSLog(@"cp2cl: querying iPhone Bluetooth service: %@", device.name);
             self.results[device.addressString] = @"querying";
         }
         IOReturn status = [device performSDPQuery:self uuids:@[uuid]];
@@ -212,7 +212,7 @@ static NSString *targetAddress(void) {
             NSString *pending = device.addressString;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 25 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
                 if ([self.pending containsObject:pending]) {
-                    NSLog(@"cp2aa: Bluetooth SDP timed out; confirm pairing on both devices");
+                    NSLog(@"cp2cl: Bluetooth SDP timed out; confirm pairing on both devices");
                 }
             });
         }
@@ -223,17 +223,17 @@ static NSString *targetAddress(void) {
     self.fd = -1;
     self.pending = [NSMutableSet set];
     self.results = [NSMutableDictionary dictionary];
-    NSLog(@"cp2aa: paired Bluetooth devices: %lu", (unsigned long)[IOBluetoothDevice pairedDevices].count);
+    NSLog(@"cp2cl: paired Bluetooth devices: %lu", (unsigned long)[IOBluetoothDevice pairedDevices].count);
 
     // Apple's public API can advertise us as in-car audio/video, but only for a
     // while at a time — the controller restores its real class afterwards, so
     // it has to be renewed. Without this the phone does not treat us as a car.
     self.advertiseResult = [[IOBluetoothHostController defaultController] setClassOfDevice:0x200408 forTimeInterval:120];
-    NSLog(@"cp2aa: CarPlay device class result: %d", self.advertiseResult);
+    NSLog(@"cp2cl: CarPlay device class result: %d", self.advertiseResult);
     if (self.advertiseResult == kIOReturnSuccess) {
         [NSTimer scheduledTimerWithTimeInterval:60 repeats:YES block:^(NSTimer *timer) {
             IOReturn result = [[IOBluetoothHostController defaultController] setClassOfDevice:0x200408 forTimeInterval:120];
-            if (result != self.advertiseResult) NSLog(@"cp2aa: CarPlay device class result: %d", result);
+            if (result != self.advertiseResult) NSLog(@"cp2cl: CarPlay device class result: %d", result);
             self.advertiseResult = result;
         }];
     }
@@ -243,7 +243,7 @@ static NSString *targetAddress(void) {
         @"0004": @[@[[IOBluetoothSDPUUID uuid16:0x0100]],
                    @[[IOBluetoothSDPUUID uuid16:0x0003],
                      @{@"DataElementType": @1, @"DataElementSize": @1, @"DataElementValue": @18}]],
-        @"0100": @"cp2aa",
+        @"0100": @"cp2cl",
         @"LocalAttributes": @{@"Persistent": @NO}
     }];
 
@@ -253,7 +253,7 @@ static NSString *targetAddress(void) {
                    @[[IOBluetoothSDPUUID uuid16:0x0003],
                      @{@"DataElementType": @1, @"DataElementSize": @1, @"DataElementValue": @19}]],
         @"0005": @[[IOBluetoothSDPUUID uuid16:0x1002]],
-        @"0100": @"cp2aa CarPlay"
+        @"0100": @"cp2cl CarPlay"
     }];
 
     BluetoothRFCOMMChannelID cpChannel = 0;
@@ -271,9 +271,9 @@ static NSString *targetAddress(void) {
                                        selector:@selector(opened:channel:)
                                   withChannelID:channelID
                                       direction:kIOBluetoothUserNotificationChannelDirectionIncoming];
-        NSLog(@"cp2aa: Bluetooth service registered on channel %u", channelID);
+        NSLog(@"cp2cl: Bluetooth service registered on channel %u", channelID);
     } else {
-        NSLog(@"cp2aa: Bluetooth service registration failed");
+        NSLog(@"cp2cl: Bluetooth service registration failed");
     }
 
     [NSTimer scheduledTimerWithTimeInterval:12 repeats:YES block:^(NSTimer *timer) { [self scan]; }];
@@ -291,7 +291,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
     // IOBluetooth initialises CoreBluetooth synchronously and waits for
     // callbacks, so bootstrap off the main thread and let AppKit service the
     // run loop. Doing this the other way round deadlocks.
-    NSLog(@"cp2aa: Bluetooth bridge starting");
+    NSLog(@"cp2cl: Bluetooth bridge starting");
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         [IOBluetoothDevice pairedDevices];
         dispatch_async(dispatch_get_main_queue(), ^{ [bridge start]; });

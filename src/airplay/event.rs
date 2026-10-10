@@ -237,7 +237,7 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
         // log. One line here is the difference between "nothing happened" and
         // "it worked" — which is why it exists, and why it is debug level
         // rather than `println!`: a finger drag is one line per pointer move.
-        // `CP2AA_LOG=debug` brings it back.
+        // `CP2CL_LOG=debug` brings it back.
         tracing::debug!("[event] -> {cmd:?}");
 
         match cmd {

@@ -878,7 +878,7 @@ async fn serve_file(State(state): State<Arc<ServerState>>, uri: axum::http::Uri)
         Ok(bytes) => ([(header::CONTENT_TYPE, content_type(&path))], bytes).into_response(),
         Err(_) => (
             StatusCode::NOT_FOUND,
-            "cp2aa: the browser client is not built. Run \
+            "cp2cl: the browser client is not built. Run \
              `cd vendor/playport/web && npm install && npm run build`.",
         )
             .into_response(),

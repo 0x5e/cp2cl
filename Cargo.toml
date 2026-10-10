@@ -1,5 +1,5 @@
 [package]
-name = "cp2aa"
+name = "cp2cl"
 version = "0.6.1"
 edition = "2021"
 description = "Headless CarPlay receiver that bridges an Android Auto head unit and an iPhone"

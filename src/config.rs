@@ -17,13 +17,13 @@ fn env_or(key: &str, default: &str) -> String {
     env(key).unwrap_or_else(|| default.to_string())
 }
 
-/// `CP2AA_LOG`, or `info`.
+/// `CP2CL_LOG`, or `info`.
 ///
 /// Read on its own rather than with the rest, because it has to be known before
 /// the config is: a setting that could not be used is reported by a log line,
 /// and that line needs a subscriber to already exist.
 pub fn log_filter() -> String {
-    env_or("CP2AA_LOG", "info")
+    env_or("CP2CL_LOG", "info")
 }
 
 fn env_num<T: std::str::FromStr>(key: &str, default: T) -> T {
@@ -81,7 +81,7 @@ pub struct Config {
     pub name: String,
     /// What consumes the streams: the browser client, or an Android Auto head unit.
     pub sink: Sink,
-    /// Where the browser client is served, read from `CP2AA_WEB_ADDR` as
+    /// Where the browser client is served, read from `CP2CL_WEB_ADDR` as
     /// `address:port`. The scheme is not part of it because there is only one:
     /// the page decodes with WebCodecs, which a browser only offers in a secure
     /// context, so this is HTTPS whether or not anyone says so.
@@ -132,67 +132,67 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Self {
         // Named first so the window and the physical size can default to them.
-        let width = env_num("CP2AA_WIDTH", 1280);
-        let height = env_num("CP2AA_HEIGHT", 720);
-        let width_mm = env_num("CP2AA_WIDTH_MM", 0);
+        let width = env_num("CP2CL_WIDTH", 1280);
+        let height = env_num("CP2CL_HEIGHT", 720);
+        let width_mm = env_num("CP2CL_WIDTH_MM", 0);
         Self {
             auth_dir: Self::resolve_auth_dir(),
             width,
             height,
-            fps: env_num("CP2AA_FPS", 60),
+            fps: env_num("CP2CL_FPS", 60),
             width_mm,
             // Left to `info.rs` to derive from the aspect ratio when zero.
-            height_mm: env_num("CP2AA_HEIGHT_MM", 0),
+            height_mm: env_num("CP2CL_HEIGHT_MM", 0),
             // HEVC by default: at the bitrate the phone sends, H.265 is visibly
             // sharper than H.264. MacPlay reports `codec=h265` for the same
             // session, which is where the difference in clarity comes from.
-            hevc: std::env::var("CP2AA_HEVC")
+            hevc: std::env::var("CP2CL_HEVC")
                 .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
                 .unwrap_or(true),
-            device_id: env_or("CP2AA_DEVICE_ID", "00:11:22:33:44:55"),
-            bt_mac: env_or("CP2AA_BT_MAC", "00:11:22:33:44:55"),
-            name: env_or("CP2AA_NAME", "cp2aa"),
-            sink: match env("CP2AA_SINK") {
+            device_id: env_or("CP2CL_DEVICE_ID", "00:11:22:33:44:55"),
+            bt_mac: env_or("CP2CL_BT_MAC", "00:11:22:33:44:55"),
+            name: env_or("CP2CL_NAME", "cp2cl"),
+            sink: match env("CP2CL_SINK") {
                 Some(text) => match Sink::parse(&text) {
                     Some(sink) => sink,
                     None => {
-                        tracing::warn!("[cp2aa] CP2AA_SINK={text} is neither `web` nor `aa`; using web");
+                        tracing::warn!("[cp2cl] CP2CL_SINK={text} is neither `web` nor `aa`; using web");
                         Sink::Web
                     }
                 },
                 None => Sink::Web,
             },
             web_addr: web_addr_from_env(),
-            web_token: env_or("CP2AA_WEB_TOKEN", "00000000000000000000000000000000"),
+            web_token: env_or("CP2CL_WEB_TOKEN", "00000000000000000000000000000000"),
             // 5288 is the port Android Auto uses for wireless.
-            aa_tcp_port: env_num("CP2AA_AA_TCP_PORT", 5288),
+            aa_tcp_port: env_num("CP2CL_AA_TCP_PORT", 5288),
             #[cfg(target_os = "linux")]
-            aa_usb: std::env::var("CP2AA_AA_USB")
+            aa_usb: std::env::var("CP2CL_AA_USB")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
             // Wired stays the default: it needs nothing the operator has to
             // look up first.
-            wireless: std::env::var("CP2AA_WIRELESS")
+            wireless: std::env::var("CP2CL_WIRELESS")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
-            ssid: env_or("CP2AA_WIFI_SSID", ""),
-            passphrase: env_or("CP2AA_WIFI_PASS", ""),
-            wifi_channel: env_num("CP2AA_WIFI_CHANNEL", 36),
-            wifi_iface: env_or("CP2AA_WIFI_IFACE", default_wifi_iface()),
-            ap_mac: env("CP2AA_AP_MAC"),
-            target_bt: env("CP2AA_TARGET_BT"),
-            bt_adapter: env_or("CP2AA_BT_ADAPTER", "hci0"),
+            ssid: env_or("CP2CL_WIFI_SSID", ""),
+            passphrase: env_or("CP2CL_WIFI_PASS", ""),
+            wifi_channel: env_num("CP2CL_WIFI_CHANNEL", 36),
+            wifi_iface: env_or("CP2CL_WIFI_IFACE", default_wifi_iface()),
+            ap_mac: env("CP2CL_AP_MAC"),
+            target_bt: env("CP2CL_TARGET_BT"),
+            bt_adapter: env_or("CP2CL_BT_ADAPTER", "hci0"),
         }
     }
 
     /// Look for credentials next to the binary, then in the working directory,
-    /// then wherever CP2AA_AUTH_DIR points. Same idea as LIVI's resolveAuthDir,
+    /// then wherever CP2CL_AUTH_DIR points. Same idea as LIVI's resolveAuthDir,
     /// minus Electron: order is explicit override first, then a couple of
     /// sensible spots so `cargo run` works from a clone with credentials
     /// dropped in `authentication/`.
     fn resolve_auth_dir() -> Option<PathBuf> {
         let mut candidates: Vec<PathBuf> = Vec::new();
-        if let Some(dir) = env("CP2AA_AUTH_DIR") {
+        if let Some(dir) = env("CP2CL_AUTH_DIR") {
             candidates.push(PathBuf::from(dir));
         }
         if let Ok(exe) = std::env::current_exe() {
@@ -216,13 +216,13 @@ impl Config {
 /// interface, which is what makes the page reachable from another device.
 const DEFAULT_WEB_ADDR: &str = "0.0.0.0:8080";
 
-/// `CP2AA_WEB_ADDR`, or the default when it is unset or not an `address:port`.
+/// `CP2CL_WEB_ADDR`, or the default when it is unset or not an `address:port`.
 fn web_addr_from_env() -> SocketAddr {
-    let Some(text) = env("CP2AA_WEB_ADDR") else {
+    let Some(text) = env("CP2CL_WEB_ADDR") else {
         return default_web_addr();
     };
     text.parse().unwrap_or_else(|_| {
-        tracing::warn!("[cp2aa] CP2AA_WEB_ADDR={text} is not `address:port`; using {DEFAULT_WEB_ADDR}");
+        tracing::warn!("[cp2cl] CP2CL_WEB_ADDR={text} is not `address:port`; using {DEFAULT_WEB_ADDR}");
         default_web_addr()
     })
 }

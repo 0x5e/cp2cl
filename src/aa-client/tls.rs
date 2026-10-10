@@ -145,7 +145,7 @@ impl PhoneIdentity {
     /// look: an override, next to the binary, next to the MFi credentials, then
     /// the AACS checkout these came from.
     pub fn load_default() -> Result<Self, Error> {
-        let mut candidates: Vec<PathBuf> = match std::env::var_os("CP2AA_AA_CERT_DIR") {
+        let mut candidates: Vec<PathBuf> = match std::env::var_os("CP2CL_AA_CERT_DIR") {
             Some(dir) => vec![PathBuf::from(dir)],
             None => Vec::new(),
         };
@@ -404,7 +404,7 @@ mod tests {
         // are about, not the credentials.
         let identity = PhoneIdentity::load_default().expect(
             "no phone certificate found — put android_auto.crt + android_auto.key in ./aa, or \
-             set CP2AA_AA_CERT_DIR",
+             set CP2CL_AA_CERT_DIR",
         );
         let mut phone = TlsEngine::new(&identity).unwrap();
         let mut hu = hu();

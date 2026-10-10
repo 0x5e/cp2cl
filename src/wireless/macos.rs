@@ -38,7 +38,7 @@ pub async fn watch(
         return;
     }
 
-    let helper = PathBuf::from(env!("CP2AA_BT_HELPER"));
+    let helper = PathBuf::from(env!("CP2CL_BT_HELPER"));
     if helper.as_os_str().is_empty() {
         tracing::error!(
             "[cp-wifi] the Bluetooth bridge was not built (clang is needed); \
@@ -48,7 +48,7 @@ pub async fn watch(
     }
 
     // Named for this process so two receivers on one machine do not collide.
-    let path = std::env::temp_dir().join(format!("cp2aa-bluetooth-{}.sock", std::process::id()));
+    let path = std::env::temp_dir().join(format!("cp2cl-bluetooth-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&path);
     let listener = match UnixListener::bind(&path) {
         Ok(listener) => listener,

@@ -1,14 +1,14 @@
-//! `cp2aa` — a headless CarPlay receiver that hands what the phone sends to
+//! `cp2cl` — a headless CarPlay receiver that hands what the phone sends to
 //! whoever is watching.
 //!
 //! Nothing here draws anything itself. Four pieces run concurrently:
 //!
 //! * a session watcher that carries iAP2 over USB — or over Bluetooth, when
-//!   `CP2AA_WIRELESS` is set — and starts CarPlay,
+//!   `CP2CL_WIRELESS` is set — and starts CarPlay,
 //! * an airplay receiver that accepts the phone's return call and decrypts its
 //!   media,
 //! * the browser client's server, which fans those streams out over one
-//!   WebSocket and takes input back — unless `CP2AA_SINK=aa`, in which case the
+//!   WebSocket and takes input back — unless `CP2CL_SINK=aa`, in which case the
 //!   bridge below is the consumer instead.
 
 mod airplay;
@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
     // exactly this reason.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    // Everything the program prints goes through this, so `CP2AA_LOG` is the
+    // Everything the program prints goes through this, so `CP2CL_LOG` is the
     // only knob for how much of it is shown, and the levels are the usual ones:
     // `error` is something we set out to do and could not, `warn` is something
     // dropped or unexpected that we carried on from, `info` is the life of a
@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
 
     let cfg = Arc::new(Config::from_env());
 
-    tracing::info!("cp2aa — headless CarPlay receiver");
+    tracing::info!("cp2cl — headless CarPlay receiver");
 
     // Ask for a free port rather than picking one: whatever we get is what gets
     // advertised to the phone, so there is no way for the two to disagree.
@@ -77,7 +77,7 @@ async fn main() -> Result<()> {
         .await
         .context("bind airplay listener")?;
     let airplay_port = listener.local_addr()?.port() as u32;
-    tracing::info!("[cp2aa] airplay receiver listening on {airplay_port}");
+    tracing::info!("[cp2cl] airplay receiver listening on {airplay_port}");
 
     let codec = AudioCodec::default();
 
@@ -112,7 +112,7 @@ async fn main() -> Result<()> {
     let (video_sink, audio_sink): (Arc<dyn MediaSink>, Arc<dyn MediaSink>) = match &outlet {
         Some(outlet) => {
             tracing::info!(
-                "[cp2aa] CP2AA_SINK=aa: streams go to Android Auto instead of the browser"
+                "[cp2cl] CP2CL_SINK=aa: streams go to Android Auto instead of the browser"
             );
             (outlet.video(), outlet.audio())
         }
@@ -143,7 +143,7 @@ async fn main() -> Result<()> {
     if let Some(outlet) = &outlet {
         let identity = Arc::new(PhoneIdentity::load_default().with_context(|| {
             "no Android Auto phone certificate; put android_auto.crt + \
-             android_auto.key in ./aa, or set CP2AA_AA_CERT_DIR"
+             android_auto.key in ./aa, or set CP2CL_AA_CERT_DIR"
         })?);
         let bridge = Arc::new(Bridge::new(
             cfg.clone(),
@@ -183,7 +183,7 @@ async fn main() -> Result<()> {
 
     if cfg.wireless {
         tracing::info!(
-            "[cp2aa] wireless: the phone will be told to join {:?} and reach us on \
+            "[cp2cl] wireless: the phone will be told to join {:?} and reach us on \
              {} port {airplay_port}",
             cfg.ssid, cfg.wifi_iface
         );
@@ -204,7 +204,7 @@ fn mfi_signer(cfg: &Config) -> Result<Box<dyn AuthCoprocessor + Send>> {
         Some(dir) => match LocalCoprocessor::load(dir) {
             Ok(signer) => {
                 tracing::info!(
-                    "[cp2aa] local MFi credentials loaded from {}",
+                    "[cp2cl] local MFi credentials loaded from {}",
                     dir.display()
                 );
                 Ok(Box::new(signer))
@@ -216,9 +216,9 @@ fn mfi_signer(cfg: &Config) -> Result<Box<dyn AuthCoprocessor + Send>> {
         },
         None => {
             tracing::warn!(
-                "[cp2aa] no MFi credentials found; the phone will reject us at \
+                "[cp2cl] no MFi credentials found; the phone will reject us at \
                  authentication. Put identity.pk8 + certificate.p7b in ./authentication \
-                 or set CP2AA_AUTH_DIR."
+                 or set CP2CL_AUTH_DIR."
             );
             Ok(Box::new(NoCoprocessor))
         }

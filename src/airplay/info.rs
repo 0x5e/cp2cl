@@ -53,8 +53,8 @@ pub fn build(static_: &Static) -> Result<Vec<u8>, plist::Error> {
     d.insert("sourceVersion".into(), Value::String(SOURCE_VERSION.into()));
     d.insert("features".into(), Value::Integer(CARPLAY_FEATURES.into()));
     d.insert("statusFlags".into(), Value::Integer(4.into()));
-    d.insert("model".into(), Value::String("cp2aa".into()));
-    d.insert("manufacturer".into(), Value::String("cp2aa".into()));
+    d.insert("model".into(), Value::String("cp2cl".into()));
+    d.insert("manufacturer".into(), Value::String("cp2cl".into()));
     d.insert("deviceID".into(), Value::String(static_.device_id.clone()));
     d.insert(
         "bluetoothIDs".into(),
@@ -272,14 +272,14 @@ fn hid_devices(s: &Static) -> Value {
     Value::Array(vec![
         hid_device(
             TOUCH_HID_UID,
-            "cp2aa Touchscreen",
+            "cp2cl Touchscreen",
             multitouch_descriptor(s.width, s.height),
         ),
-        hid_device(KNOB_HID_UID, "cp2aa Knob", KNOB_DESCRIPTOR.to_vec()),
-        hid_device(MEDIA_HID_UID, "cp2aa Media", MEDIA_DESCRIPTOR.to_vec()),
+        hid_device(KNOB_HID_UID, "cp2cl Knob", KNOB_DESCRIPTOR.to_vec()),
+        hid_device(MEDIA_HID_UID, "cp2cl Media", MEDIA_DESCRIPTOR.to_vec()),
         hid_device(
             TELEPHONY_HID_UID,
-            "cp2aa Telephony",
+            "cp2cl Telephony",
             TELEPHONY_DESCRIPTOR.to_vec(),
         ),
     ])

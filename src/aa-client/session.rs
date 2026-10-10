@@ -268,7 +268,7 @@ impl Session {
         self.splitter = std::mem::take(&mut self.parser).into_splitter();
         self.phase = Phase::Discovery;
         tracing::info!("[aa] {}: tls up", self.label);
-        let body = control::service_discovery_request("cp2aa", "cp2aa");
+        let body = control::service_discovery_request("cp2cl", "cp2cl");
         self.send_control(wr, CTRL_SERVICE_DISCOVERY_REQUEST, &body)
             .await
     }

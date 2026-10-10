@@ -1,6 +1,6 @@
 //! The wired half: find the phone, carry iAP2 over USB, start the session.
 //!
-//! This is the only place cp2aa touches LIVI. Everything up to and including
+//! This is the only place cp2cl touches LIVI. Everything up to and including
 //! `CarPlayStartSession` is LIVI's `bringup::run_accessory`; we supply a control
 //! channel (the USB carkit stream wrapped in the iAP2 link) and an auth source
 //! (local MFi credentials), then watch the event stream until the phone leaves.
