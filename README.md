@@ -17,10 +17,6 @@ Only CarLife draws full-bleed, so CarLife is the target: the bridge takes the
 CarPlay session an iPhone offers and hands it to the head unit over the one
 protocol it will render full screen.
 
-Work in this repository previously went the other way, CarPlay to Android Auto,
-and has been removed. Android Auto is confined to the same windowed area as
-CarPlay on this head unit, so bridging to it would gain nothing here.
-
 ## How it works
 
 ```
@@ -47,7 +43,8 @@ driven at all — is not written yet.
 
 Bridge device:
 
-- Running Linux.
+- Running Linux. The board this is developed against is a **NanoPi Duo2**,
+  armv7 hard-float.
 - 1 USB host for wired CarPlay.
 - 1 USB OTG for the CarLife head unit (planned; one controller cannot be both).
 - WiFi + BLE for wireless CarPlay (optional).
@@ -75,7 +72,10 @@ It prints the page to open. The token is fixed, so it is the same URL every run:
 ```
 
 Run it from the repository root: the browser client is served out of
-`vendor/playport/web/dist`, relative to the working directory.
+`vendor/playport/web/dist`, relative to the working directory. That is the build
+for the machine you are on; the board is built in a container instead, since it
+cannot build this itself — see [Cross-compiling for the
+board](#cross-compiling-for-the-board).
 
 Then plug the phone in and unlock it. You should see:
 
@@ -276,8 +276,8 @@ stale, which the bridge recovers from by asking again.
 
 ## Input
 
-There is no keyboard grammar of our own any more: the browser client is the
-control surface, and its bindings are the ones that count.
+Input goes through the browser client, which is the control surface: the
+bindings below are the ones that count.
 
 | | In the browser |
 |---|---|
