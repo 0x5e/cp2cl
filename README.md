@@ -370,6 +370,7 @@ this a derivative work, so cp2cl inherits that.
 | `src/sink.rs` | what a stream *is* — codec and description as well as bytes |
 | `src/commands.rs` | the vocabulary of input the browser client produces |
 | `src/web/mod.rs` | the browser client's server: the wire framing, the API, the WebSocket, TLS |
+| `docker/` | the image that cross-compiles for the board, and the CMake toolchain it needs |
 
 ## Expected behaviour, not bugs
 
