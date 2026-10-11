@@ -70,7 +70,7 @@ It prints the page to open. The token is fixed, so it is the same URL every run:
 
 ```
 [cp2cl] airplay receiver listening on 52843
-[web] browser client: https://192.168.40.2:8080/?token=00000000000000000000000000000000
+[web] browser client: https://192.168.40.2:8080/?token=0
 [web] accept the certificate warning once; WebCodecs needs HTTPS
 ```
 
@@ -138,7 +138,7 @@ sees it, which is the one to use from another device.
 
 The page carries one in the URL, hands it back on the WebSocket and when
 changing the display, and anything without it is refused. It is fixed —
-thirty-two zero bytes unless `CP2CL_WEB_TOKEN` says otherwise — so the printed URL,
+`0` unless `CP2CL_WEB_TOKEN` says otherwise — so the printed URL,
 and any bookmark of it, works across restarts. The front end will not connect
 without a token, so there is no token-less mode to fall back to. This is a debug
 surface on a LAN, not something to expose: a fixed token is a convenience, not a
@@ -222,7 +222,7 @@ decode. `CP2CL_HEVC` sets the default, and the panel overrides it per session.
 |---|---|---|
 | `CP2CL_AUTH_DIR` | `./authentication` | MFi credentials |
 | `CP2CL_WEB_ADDR` | `0.0.0.0:8080` | where the browser client is served. HTTPS is not part of it because there is no other option — WebCodecs needs a secure context — and `0.0.0.0` is every interface |
-| `CP2CL_WEB_TOKEN` | thirty-two zero bytes | the token the page has to carry; fixed, so the URL is stable. Set something shorter if typing it in is annoying |
+| `CP2CL_WEB_TOKEN` | `0` | the token the page has to carry; fixed, so the URL is stable and short enough to type. Give it a real value before the port is reachable from anywhere but this LAN |
 | `CP2CL_WIDTH` / `CP2CL_HEIGHT` | `1280` / `720` | what the phone renders, until the display panel says otherwise |
 | `CP2CL_FPS` | `60` | max frame rate |
 | `CP2CL_HEVC` | on | ask for H.265. At the bitrate the phone sends it is visibly sharper than H.264; set `0` to fall back |

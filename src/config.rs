@@ -60,8 +60,9 @@ pub struct Config {
     pub web_addr: SocketAddr,
     /// The access token the page has to carry — on the socket, and when changing
     /// the display. Fixed rather than minted per run, so the URL to open, and
-    /// any bookmark of it, survives a restart. The default is thirty-two zero
-    /// bytes, which is what the debugging URL used to look like anyway.
+    /// any bookmark of it, survives a restart. The default is a single `0`: the
+    /// URL gets typed in by hand often enough that a long token is a nuisance,
+    /// and this is a debug surface on a LAN either way.
     pub web_token: String,
 
     /// Take CarPlay over Bluetooth and Wi-Fi instead of the cable.
@@ -116,7 +117,7 @@ impl Config {
             bt_mac: env_or("CP2CL_BT_MAC", "00:11:22:33:44:55"),
             name: env_or("CP2CL_NAME", "cp2cl"),
             web_addr: web_addr_from_env(),
-            web_token: env_or("CP2CL_WEB_TOKEN", "00000000000000000000000000000000"),
+            web_token: env_or("CP2CL_WEB_TOKEN", "0"),
             // Wired stays the default: it needs nothing the operator has to
             // look up first.
             wireless: std::env::var("CP2CL_WIRELESS")
