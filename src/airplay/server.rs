@@ -1232,7 +1232,13 @@ impl Session {
             frames += 1;
         }
         sink.push(StreamEvent::ScreenActive(false));
-        tracing::info!("[airplay] video stream closed after {frames} frames");
+        // Both counts, because they differ: `frames` counts messages read off
+        // the socket, and the codec description and the keepalives are messages
+        // too. Only the second is pictures.
+        tracing::info!(
+            "[airplay] video stream closed after {frames} messages, {} frames",
+            rx.frames()
+        );
     }
 
     /// Audio arrives on UDP, one frame per datagram.

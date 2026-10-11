@@ -31,6 +31,9 @@ pub const HEADER_LEN: usize = 128;
 pub struct VideoReceiver {
     key: SymKey,
     counter: u64,
+    /// Frames handed on. Its only reader is the one line that says a stream
+    /// carried pictures at all: everything else about a frame is per-frame.
+    frames: u64,
     sink: Arc<dyn MediaSink>,
     codec: VideoCodec,
     /// Bytes in front of each NAL unit; whatever the avcC record said.
@@ -46,11 +49,18 @@ impl VideoReceiver {
         Self {
             key,
             counter: 0,
+            frames: 0,
             sink,
             codec: VideoCodec::H264,
             // Only a guess until the config arrives; four is the usual value.
             nal_length_size: 4,
         }
+    }
+
+    /// How many frames this connection has carried. Zero means the phone
+    /// opened the stream and sent nothing that decodes.
+    pub fn frames(&self) -> u64 {
+        self.frames
     }
 
     /// Handles one complete message, having already split it into header + body.
@@ -98,10 +108,23 @@ impl VideoReceiver {
                             return;
                         };
                         if !annex_b.is_empty() {
-                            self.sink.push(StreamEvent::VideoFrame {
-                                keyframe: is_key_frame(&annex_b, self.codec),
-                                data: annex_b,
-                            });
+                            let keyframe = is_key_frame(&annex_b, self.codec);
+                            // The frame count is only printed when the stream
+                            // closes, which for a stream that never delivers
+                            // anything is a line nobody waits for. This one says
+                            // the phone is sending; the page decoding it or not
+                            // is a separate question.
+                            if self.frames == 0 {
+                                tracing::info!(
+                                    "[video] first frame: {:?}, keyframe={keyframe}, \
+                                     {} bytes, {}-byte NAL lengths",
+                                    self.codec,
+                                    annex_b.len(),
+                                    self.nal_length_size
+                                );
+                            }
+                            self.frames += 1;
+                            self.sink.push(StreamEvent::VideoFrame { keyframe, data: annex_b });
                         }
                     }
                     Err(e) => {
