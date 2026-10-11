@@ -92,31 +92,30 @@ Then plug the phone in and unlock it. You should see:
 
 ### Cross-compiling for the board
 
-The board is aarch64 Alpine — musl, not glibc — and building for it from macOS
-does not work: `aws-lc-sys` does not get through its cmake step. Build inside a
-container that is already that platform instead, which turns it back into an
-ordinary native build:
+The board is a **NanoPi Duo2** — armv7 hard-float, Ubuntu 24.04, glibc 2.39. It
+cannot build this crate itself, and macOS has no armv7 toolchain, so the build
+runs in the container defined by `docker/`. Build the image once:
 
 ```bash
-docker run --rm --platform linux/arm64 -v "$PWD":/work -w /work \
-  -e CARGO_TARGET_DIR=/work/target/aarch64-unknown-linux-musl \
-  rust:1-alpine sh -c 'apk add build-base cmake perl linux-headers pkgconf git; cargo build --release'
+docker build --platform linux/arm64 -t cp2cl-armv7-builder docker/
 ```
 
-There is no `--target` to pass, because the container's architecture is the one
-we want; the directory is named after that triple only so it sits beside the
-ones cargo files by itself. The result is
-`target/aarch64-unknown-linux-musl/release/cp2cl` — about 17 MB, static, linked
-against nothing.
+Then, from the repository root:
 
-Every platform therefore gets a directory of its own under `target/`: a native
-build is `target/release/`, where cargo puts it anyway, and anything
-cross-compiled is filed under the triple it was built for. They cannot overwrite
-each other, and the single `target/` line in `.gitignore` covers all of them.
+```bash
+docker run --rm --platform linux/arm64 -u "$(id -u):$(id -g)" \
+  -v "$PWD":/work -v cp2cl-cargo:/cargo \
+  cp2cl-armv7-builder cargo build --release --target armv7-unknown-linux-gnueabihf
+```
 
-The binary is not self-contained: `vendor/playport/web/dist` and
-`authentication/` are read relative to the working directory, so copy the tree,
-not just the file.
+`cp2cl-cargo` is a named volume holding the cargo cache, so only the first build
+downloads anything. `-u` keeps the build products owned by you rather than by
+root. Use `cargo check` in place of `cargo build --release` to type-check the
+Linux-only `#[cfg]` branches — the only way to reach them from macOS.
+
+The result is `target/armv7-unknown-linux-gnueabihf/release/cp2cl`. It is not
+self-contained: `vendor/playport/web/dist` and `authentication/` are read
+relative to the working directory, so copy the tree, not just the file.
 
 ### Why HTTPS, and what to do about the certificate
 
