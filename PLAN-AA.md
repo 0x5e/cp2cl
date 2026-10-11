@@ -8,8 +8,8 @@
 >
 > **本文档保留作 CL 方案的技术底稿**：§0.1（角色与传输）、§0.2（硬件前提）、§3（协议核对方法）与 §4 的
 > 「仍待硬件确认」项仍可复用。已过时的部分：§1/§4/§5/附录 A 里「已实现」的位置标注（代码已不存在）、
-> 环境变量名（当时是 `CP2AA_*`，现在是 `CP2CL_*`）、以及 §0.2 的网络与系统结论——Armbian 已无 Duo2 现成
-> 镜像，平台改为 FriendlyElec 官方 Ubuntu（4.14 BSP 内核），交叉编译目标是 `armv7-unknown-linux-gnueabihf`。
+> 环境变量名（当时是 `CP2AA_*`，现在是 `CP2CL_*`）。§0.2 的系统结论已按当前平台更新（FriendlyElec 官方
+> Ubuntu，4.14 BSP 内核，交叉编译 `armv7-unknown-linux-gnueabihf`）。
 
 > Linux 设备通过 USB 连接 Android Auto 车机，扮演 Android 手机角色；iPhone 通过 CarPlay 连接同一台设备。  
 > 音视频参数由车机侧上报的能力决定，可协商项不硬编码，且不得在单次会话中途变更。
@@ -53,9 +53,8 @@ USB 侧有两个相互独立的控制器，这是端到端的前提：
 
 两者不共用控制器 ⇒ iPhone 与车机可同时接入，端到端在同一块板上完成。
 
-**系统用 Armbian（2026-10-08 定）。** H3 = Cortex-A7，**只有 32 位** ⇒ 交叉编译目标是
-`armv7-unknown-linux-musleabihf`（不是 aarch64）。该板自内核 5.5 起进主线，Armbian 的 musb、configfs 与
-FunctionFS 支持最完整；官方 FriendlyCore 16.04（内核 4.14）不作为开发平台。功能全部调通后再用 Buildroot
+**系统用 FriendlyElec 官方 Ubuntu（4.14 BSP 内核，systemd）。** H3 = Cortex-A7，**只有 32 位** ⇒ 交叉编译
+目标是 `armv7-unknown-linux-gnueabihf`。Armbian 没有这块板的现成镜像。功能全部调通后再用 Buildroot
 自行打包固件。
 
 **供电取自车机 USB 口（2026-10-08 定）。** Duo2 的 USB-C 是 DRP 兼电源输入，厂商标称 5V/2A。实测不足时
@@ -430,10 +429,9 @@ iPhone 与车机同时接入：iPhone 画面显示在车机上，车机触摸与
 
 ## 6. 风险
 
-1. **新板的 gadget 支持需先确认**（§0.2 的三条命令）。系统已定 Armbian（32 位，`armv7-unknown-linux-musleabihf`），
-   但它的内核仍必须按 `usb.rs` 的用法启用 configfs、FunctionFS 与 musb OTG 三件套；缺项只能换内核或换发行版。
-   另有一项镜像侧的坑：论坛有报告称 **Armbian 23.5 的 `sun8i-h3-nanopi-duo2.dtb` 加载失败**（U-Boot 报
-   `FDT_ERR_BADMAGIC`），起步直接用较新的镜像，不要从旧镜像往上试。
+1. **新板的 gadget 支持需先确认**（§0.2 的三条命令）。系统用 FriendlyElec 官方 Ubuntu（32 位，
+   `armv7-unknown-linux-gnueabihf`，4.14 BSP 内核），它的内核仍必须按 `usb.rs` 的用法启用 configfs、
+   FunctionFS 与 musb OTG 三件套；缺项只能换内核或换发行版。
 2. **OTG 口兼作供电**：Duo2 由 OTG 口取电，作 gadget 时供电来自车机 USB 口。车机口的供电能力与 H3 板（含
    WiFi）的峰值功耗是否匹配需实测；不足时改由扩展板独立供电，让 OTG 只走数据——已按此作为既定退路（§0.2）。
 3. **推迟 Setup 可能被车机判定超时**（D19）。LIVI 对端与真车都要验；若不可行，退回「先按最佳参数 Setup、
@@ -457,8 +455,8 @@ iPhone 与车机同时接入：iPhone 画面显示在车机上，车机触摸与
 4. **先分别在现有板上验证**（host 模式测 CarPlay、gadget 模式测 AA），NanoPi Duo2 到货后做端到端。
 5. **不支持 `CP2AA_SINK=web,aa` 同时启用。**
 6. **抖动宽限不做**：立即终止的实现更简单，与 §2.1 规则 2 一致。
-7. **NanoPi Duo2 上运行 Armbian**：H3 是 32 位 Cortex-A7，交叉编译目标 `armv7-unknown-linux-musleabihf`；
-   官方 FriendlyCore 16.04（内核 4.14）不作开发平台，调通后再用 Buildroot 自行打包（§0.2）。
+7. **NanoPi Duo2 上运行 FriendlyElec 官方 Ubuntu**：H3 是 32 位 Cortex-A7，交叉编译目标
+   `armv7-unknown-linux-gnueabihf`；Armbian 没有这块板的现成镜像（§0.2）。
 8. **OTG 口供电取自车机 USB 口**（厂商标称 5V/2A），实测不足时改由扩展板独立供电（§0.2、风险 2）。
 9. **D7 保留本地单调时钟**：AirPlay 画面头的时间戳在参考实现中没有读取点，取错反而引入无法排查的偏移（§4 D7）。
 10. **本轮不发布**：按仓库约定「版本号与 tag 一一对应，未打 tag 不写 CHANGELOG」，`Cargo.toml` 停在 `0.6.1`。
