@@ -19,7 +19,7 @@
 //! HTTPS even on a LAN address.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -922,17 +922,27 @@ pub fn web_root() -> PathBuf {
 /// first visit is a warning to click through.
 pub async fn serve(hub: Arc<Hub>, address: SocketAddr, token: String) -> anyhow::Result<()> {
     // What the page is opened at is not always what we listen on: `0.0.0.0` is
-    // every interface, and no browser can open that.
-    let host = advertised_ip(address);
+    // every interface, and no browser can open that. Which of them the browser
+    // is on the other side of is not ours to guess, so all of them are named.
+    let hosts = advertised_hosts(address);
     let port = address.port();
     let app = router(hub, token.clone(), web_root());
-    let certificate = self_signed(host).await?;
+    let certificate = self_signed(&hosts).await?;
 
-    let authority = match host {
-        IpAddr::V4(ip) => ip.to_string(),
-        IpAddr::V6(ip) => format!("[{ip}]"),
-    };
-    tracing::info!("[web] browser client: https://{authority}:{port}/?token={token}");
+    for host in &hosts {
+        let authority = match host.ip {
+            IpAddr::V4(ip) => ip.to_string(),
+            IpAddr::V6(ip) => format!("[{ip}]"),
+        };
+        match &host.iface {
+            Some(iface) => tracing::info!(
+                "[web] browser client on {iface}: https://{authority}:{port}/?token={token}"
+            ),
+            None => {
+                tracing::info!("[web] browser client: https://{authority}:{port}/?token={token}")
+            }
+        }
+    }
     tracing::info!("[web] accept the certificate warning once; WebCodecs needs HTTPS");
 
     axum_server::bind_rustls(address, certificate)
@@ -942,14 +952,21 @@ pub async fn serve(hub: Arc<Hub>, address: SocketAddr, token: String) -> anyhow:
 }
 
 /// A certificate for this machine, made here so there is nothing to configure.
-/// Self-signed, so the browser has to be told once that it is fine.
-async fn self_signed(host: IpAddr) -> anyhow::Result<axum_server::tls_rustls::RustlsConfig> {
+/// Self-signed, so the browser has to be told once that it is fine. Every
+/// advertised address goes in it, so any of them works after that one visit.
+async fn self_signed(hosts: &[Host]) -> anyhow::Result<axum_server::tls_rustls::RustlsConfig> {
     let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()])?;
     params
         .subject_alt_names
         .push(rcgen::SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST)));
-    if host != IpAddr::V4(Ipv4Addr::LOCALHOST) {
-        params.subject_alt_names.push(rcgen::SanType::IpAddress(host));
+    for host in hosts {
+        if host.ip.is_loopback() {
+            continue;
+        }
+        let san = rcgen::SanType::IpAddress(host.ip);
+        if !params.subject_alt_names.contains(&san) {
+            params.subject_alt_names.push(san);
+        }
     }
     let key = rcgen::KeyPair::generate()?;
     let cert = params.self_signed(&key)?;
@@ -960,26 +977,54 @@ async fn self_signed(host: IpAddr) -> anyhow::Result<axum_server::tls_rustls::Ru
     Ok(config.await?)
 }
 
-/// The address to advertise: the one bound when it names an interface, and this
-/// machine's LAN address when we listen on all of them.
-fn advertised_ip(address: SocketAddr) -> IpAddr {
-    if address.ip().is_unspecified() {
-        local_ipv4()
-    } else {
-        address.ip()
-    }
+/// An address the page can be opened at, and the interface it belongs to when
+/// it belongs to one.
+struct Host {
+    iface: Option<String>,
+    ip: IpAddr,
 }
 
-/// This machine's LAN address, as seen by the route the phone is told to use.
-fn local_ipv4() -> IpAddr {
-    let fallback = IpAddr::V4(Ipv4Addr::LOCALHOST);
-    let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") else {
-        return fallback;
-    };
-    // Nothing is sent; connecting a UDP socket only asks the kernel which local
-    // address the route would use.
-    if socket.connect("8.8.8.8:80").is_err() {
-        return fallback;
+/// The addresses to advertise. A listener bound to one of them gets exactly
+/// that one; a listener bound to every interface gets loopback, then each
+/// interface that is up — on a machine with more than one, or with no route
+/// out, the only way to know which of them works is to try it.
+fn advertised_hosts(address: SocketAddr) -> Vec<Host> {
+    if !address.ip().is_unspecified() {
+        return vec![Host {
+            iface: None,
+            ip: address.ip(),
+        }];
     }
-    socket.local_addr().map(|addr| addr.ip()).unwrap_or(fallback)
+    let localhost = if address.is_ipv4() {
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    } else {
+        IpAddr::V6(Ipv6Addr::LOCALHOST)
+    };
+    let mut hosts = vec![Host {
+        iface: None,
+        ip: localhost,
+    }];
+    hosts.extend(interface_hosts(address.is_ipv4()));
+    hosts
+}
+
+/// The addresses of the interfaces that are up, in the family we listen on.
+/// Link-local ones are left out: nothing off this machine can reach them.
+fn interface_hosts(ipv4: bool) -> Vec<Host> {
+    let Ok(interfaces) = if_addrs::get_if_addrs() else {
+        return Vec::new();
+    };
+    interfaces
+        .into_iter()
+        .filter(|i| {
+            i.addr.ip().is_ipv4() == ipv4
+                && !i.addr.is_loopback()
+                && !i.addr.is_link_local()
+                && i.oper_status == if_addrs::IfOperStatus::Up
+        })
+        .map(|i| Host {
+            iface: Some(i.name),
+            ip: i.addr.ip(),
+        })
+        .collect()
 }

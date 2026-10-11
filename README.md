@@ -63,11 +63,14 @@ export CP2CL_AUTH_DIR=./authentication         # identity.pk8 + certificate.p7b
 ./target/release/cp2cl
 ```
 
-It prints the page to open. The token is fixed, so it is the same URL every run:
+It prints an address per interface, since which of them the browser is on the
+other side of depends on where you are. All of them carry the same token:
 
 ```
 [cp2cl] airplay receiver listening on 52843
-[web] browser client: https://192.168.40.2:8080/?token=0
+[web] browser client: https://127.0.0.1:8080/?token=0
+[web] browser client on wlan0: https://192.168.4.1:8080/?token=0
+[web] browser client on usb0: https://172.16.0.1:8080/?token=0
 [web] accept the certificate warning once; WebCodecs needs HTTPS
 ```
 
@@ -128,10 +131,10 @@ That certificate is self-signed by us, so the browser does not know it. Click
 through the warning once and the page works. The certificate is regenerated on
 every start, so nothing has to be stored or renewed.
 
-The server listens wherever `CP2CL_WEB_ADDR` says — `0.0.0.0:8080` by default —
-and the address printed is this machine's LAN address as the route to the phone
-sees it, which is the one to use from another device.
-`https://localhost:8080` works too, on the machine itself.
+The server listens wherever `CP2CL_WEB_ADDR` says — `0.0.0.0:8080` by default.
+Every address it prints is named in the certificate, so any of them works once
+the warning has been accepted: the loopback one on the machine itself, the rest
+from other devices.
 
 ### The token
 

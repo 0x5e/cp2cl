@@ -74,3 +74,5 @@ axum = { version = "0.8", features = ["ws"] }
 axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 rcgen = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# Enumerating the interfaces, to print every address the page can be opened at.
+if-addrs = "0.15"
