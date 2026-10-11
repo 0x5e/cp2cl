@@ -230,9 +230,10 @@ decode. `CP2CL_HEVC` sets the default, and the panel overrides it per session.
 | `CP2CL_DEVICE_ID` / `CP2CL_BT_MAC` | `00:11:22:33:44:55` | identifiers in `/info` |
 | `CP2CL_LOG` | `info` | log level: `error`, `warn`, `info`, `debug`, `trace` |
 | `CP2CL_WIRELESS` | off | take CarPlay over Bluetooth and Wi-Fi instead of USB |
-| `CP2CL_WIFI_SSID` / `CP2CL_WIFI_PASS` | — | the network the phone is told to join. Both are required once wireless is on |
-| `CP2CL_WIFI_IFACE` | `en0` on macOS, `wlan0` elsewhere | the interface facing that network; its IPv6 link-local address is what the phone connects back to |
-| `CP2CL_WIFI_CHANNEL` | `36` | channel reported to the phone |
+| `CP2CL_WIFI_PASS` | — | the passphrase of the network the phone is told to join. Required once wireless is on: it is the one value no reading can supply |
+| `CP2CL_WIFI_SSID` | — | the same network, for when no access point is on air. An interface that is beaconing answers this itself |
+| `CP2CL_WIFI_IFACE` | `en0` on macOS, `wlan0` elsewhere | the interface facing that network; its IPv6 link-local address is what the phone connects back to, and on Linux it is the one asked about an access point |
+| `CP2CL_WIFI_CHANNEL` | `36` | channel reported to the phone, for when no access point is on air |
 | `CP2CL_AP_MAC` | this machine's Wi-Fi MAC | the router's BSSID, sent as the accessory identifier |
 | `CP2CL_TARGET_BT` | any | only accept this phone's Bluetooth address |
 | `CP2CL_BT_ADAPTER` | `hci0` | Linux: which Bluetooth adapter |
@@ -250,9 +251,13 @@ What it needs:
 
 * the phone and this machine paired in the OS, on the same Wi-Fi — one that lets
   devices reach each other, so not a guest network with client isolation
-* `CP2CL_WIFI_SSID` and `CP2CL_WIFI_PASS` for that network. WPA2 personal only:
-  the message has nowhere to put an 802.1X username, so enterprise networks are
-  refused up front rather than failing at the phone
+* `CP2CL_WIFI_PASS` for that network — the passphrase, which no reading can
+  supply. WPA2 personal only: the message has nowhere to put an 802.1X username,
+  so enterprise networks are refused up front rather than failing at the phone
+* `CP2CL_WIFI_SSID` and `CP2CL_WIFI_CHANNEL` only when nothing is beaconing:
+  the interface is asked what it is on air with, and that answer is what the
+  phone is told. macOS cannot make that reading, so the two variables are
+  always the answer there
 * macOS: the Bluetooth bridge is compiled by `build.rs` with clang, and the first
   run asks for Bluetooth permission
 

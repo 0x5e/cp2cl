@@ -59,7 +59,11 @@ pub(crate) async fn run_session(
     // identification is still running is waiting for us rather than lost.
     let mut changed = restart.subscribe();
 
-    log_wifi(cfg);
+    // What the phone is told to join. Read here rather than left to the
+    // environment, because an interface that is on air as an access point is
+    // the authority on the network the phone will actually find — see
+    // `wifi_parameters`. Not named `channel`: that is this link's.
+    let (ssid, passphrase, wifi_channel) = wifi_parameters(cfg);
 
     let identity = Identity {
         name: cfg.name.clone(),
@@ -69,9 +73,9 @@ pub(crate) async fn run_session(
 
     let cp = CpConfig {
         wifi_iface: cfg.wifi_iface.clone(),
-        ssid: cfg.ssid.clone(),
-        passphrase: cfg.passphrase.clone(),
-        channel: cfg.wifi_channel,
+        ssid: ssid.clone(),
+        passphrase,
+        channel: wifi_channel,
         security_type: SecurityType::WpaWpa2,
         airplay_port,
         source_version: "320.17".into(),
@@ -114,7 +118,8 @@ pub(crate) async fn run_session(
         run_accessory(channel, auth, identity, cp, tx, feed).await
     });
 
-    let ended = run_bringup("[cp-wifi]", peer, airplay_port, Some(&cfg.ssid), rx, &mut changed).await;
+    let ended =
+        run_bringup("[cp-wifi]", peer, airplay_port, Some(ssid.as_str()), rx, &mut changed).await;
 
     // The session's handle to the link has to go for the link to close, and the
     // driver's own read half has to be let go with it — `Latched`, which the
@@ -128,39 +133,67 @@ pub(crate) async fn run_session(
     ended
 }
 
-/// Reports the network this session is about to name, next to what the
-/// interface says about itself.
+/// The SSID and channel an interface is on air with. Linux answers from
+/// nl80211; a platform without it never has an answer.
+#[cfg(target_os = "linux")]
+fn on_air(iface: &str) -> Option<(String, u8)> {
+    let (ssid, channel) = livi_runtime::net::ap_ssid_channel(iface);
+    ssid.zip(channel)
+}
+
+/// There is no reading here — what an interface beacons is asked of nl80211 —
+/// so this is always nothing.
+#[cfg(not(target_os = "linux"))]
+fn on_air(_iface: &str) -> Option<(String, u8)> {
+    None
+}
+
+/// The SSID and channel of the access point `cfg.wifi_iface` is on air with,
+/// or nothing when it is not one. What an interface beacons is the network the
+/// phone will find, which is what makes this the authority on it.
+fn access_point(cfg: &Config) -> Option<(String, u8)> {
+    on_air(&cfg.wifi_iface)
+}
+
+/// What the phone is told to join: an SSID, its passphrase, and the channel to
+/// look for it on.
 ///
-/// `CarPlayStartSession` carries an SSID, a channel and a passphrase. The
-/// channel is the one part of that neither the environment nor any other line
-/// in the run reports — and LIVI reads the interface itself, falling back to
-/// `CP2CL_WIFI_CHANNEL` whenever the reading comes back empty. Printing both
-/// numbers is what tells a session that named the wrong network apart from one
-/// that named the right one and failed for another reason.
-fn log_wifi(cfg: &Config) {
-    let (live_ssid, live_channel) = livi_runtime::net::ap_ssid_channel(&cfg.wifi_iface);
-    let ssid = live_ssid
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(cfg.ssid.as_str());
-    let channel = live_channel.filter(|c| *c != 0).unwrap_or(cfg.wifi_channel);
-    tracing::info!(
-        "[cp-wifi] {} on air: ssid {live_ssid:?}, channel {live_channel:?}; \
-         the phone is told {ssid:?} on channel {channel}",
-        cfg.wifi_iface
-    );
-    // The kernel is the only source on Linux, and an interface beaconing
-    // nothing is exactly the case the fallback above exists for. Elsewhere
-    // there is no reading at all, so an empty one says nothing.
-    #[cfg(target_os = "linux")]
-    if live_ssid.is_none() {
-        tracing::warn!(
-            "[cp-wifi] {} is not beaconing a network, so the phone is given the \
-             configured one: CP2CL_WIFI_SSID and CP2CL_WIFI_CHANNEL have to name \
-             what is really on air",
+/// The SSID and the channel come from the interface whenever it is on air as
+/// an access point, and from `CP2CL_WIFI_SSID` / `CP2CL_WIFI_CHANNEL` when it
+/// is not. The passphrase is not part of any reading — nl80211 never hands one
+/// back — so it is always `CP2CL_WIFI_PASS`.
+///
+/// LIVI builds this answer again when the phone offers CarPlay, reading the
+/// same interface to do it. The two agree unless the access point comes up
+/// between the two readings.
+fn wifi_parameters(cfg: &Config) -> (String, String, u8) {
+    if let Some((ssid, channel)) = access_point(cfg) {
+        tracing::info!(
+            "[cp-wifi] {} is on air as {ssid:?} on channel {channel}; the phone is told that \
+             network, with the passphrase from CP2CL_WIFI_PASS",
             cfg.wifi_iface
         );
+        return (ssid, cfg.passphrase.clone(), channel);
     }
+    #[cfg(target_os = "linux")]
+    tracing::info!(
+        "[cp-wifi] {} is not on air as an access point; the phone is told {:?} on channel {} \
+         from CP2CL_WIFI_SSID / CP2CL_WIFI_CHANNEL",
+        cfg.wifi_iface,
+        cfg.ssid,
+        cfg.wifi_channel
+    );
+    // Nothing to read with on a Mac, so the environment is the whole of the
+    // answer there.
+    #[cfg(not(target_os = "linux"))]
+    tracing::info!(
+        "[cp-wifi] {} cannot be read on this platform; the phone is told {:?} on channel {} \
+         from CP2CL_WIFI_SSID / CP2CL_WIFI_CHANNEL",
+        cfg.wifi_iface,
+        cfg.ssid,
+        cfg.wifi_channel
+    );
+    (cfg.ssid.clone(), cfg.passphrase.clone(), cfg.wifi_channel)
 }
 
 /// `00:11:22:33:44:55` → bytes. Unparseable parts stay zero rather than
@@ -186,16 +219,20 @@ pub(crate) fn short(mac: &str) -> String {
 
 /// Refuse to start a session we cannot finish: without a network to name, the
 /// phone gets a start-session message it cannot act on.
+///
+/// An access point that is already on air supplies the SSID and the channel
+/// itself, so `CP2CL_WIFI_SSID` is only required when there is none. The
+/// passphrase is required either way: it is the one value no reading supplies.
 pub(crate) fn ready(cfg: &Config) -> Result<(), String> {
-    if cfg.ssid.is_empty() {
-        return Err(
-            "CP2CL_WIFI_SSID is empty — the phone is told to join a network, \
-                    so name the one both ends are on"
-                .into(),
-        );
-    }
     if cfg.passphrase.len() < 8 {
         return Err("CP2CL_WIFI_PASS is shorter than the 8 characters WPA needs".into());
+    }
+    if cfg.ssid.is_empty() && access_point(cfg).is_none() {
+        return Err(
+            "CP2CL_WIFI_SSID is empty and no access point is on air — the phone is told to \
+             join a network, so either name the one both ends are on or bring it up first"
+                .into(),
+        );
     }
     Ok(())
 }
