@@ -59,6 +59,8 @@ pub(crate) async fn run_session(
     // identification is still running is waiting for us rather than lost.
     let mut changed = restart.subscribe();
 
+    log_wifi(cfg);
+
     let identity = Identity {
         name: cfg.name.clone(),
         ssid: cfg.ssid.clone(),
@@ -124,6 +126,41 @@ pub(crate) async fn run_session(
         tracing::info!("[cp-wifi] {peer} is being told to start over; dropping the Bluetooth link");
     }
     ended
+}
+
+/// Reports the network this session is about to name, next to what the
+/// interface says about itself.
+///
+/// `CarPlayStartSession` carries an SSID, a channel and a passphrase. The
+/// channel is the one part of that neither the environment nor any other line
+/// in the run reports — and LIVI reads the interface itself, falling back to
+/// `CP2CL_WIFI_CHANNEL` whenever the reading comes back empty. Printing both
+/// numbers is what tells a session that named the wrong network apart from one
+/// that named the right one and failed for another reason.
+fn log_wifi(cfg: &Config) {
+    let (live_ssid, live_channel) = livi_runtime::net::ap_ssid_channel(&cfg.wifi_iface);
+    let ssid = live_ssid
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(cfg.ssid.as_str());
+    let channel = live_channel.filter(|c| *c != 0).unwrap_or(cfg.wifi_channel);
+    tracing::info!(
+        "[cp-wifi] {} on air: ssid {live_ssid:?}, channel {live_channel:?}; \
+         the phone is told {ssid:?} on channel {channel}",
+        cfg.wifi_iface
+    );
+    // The kernel is the only source on Linux, and an interface beaconing
+    // nothing is exactly the case the fallback above exists for. Elsewhere
+    // there is no reading at all, so an empty one says nothing.
+    #[cfg(target_os = "linux")]
+    if live_ssid.is_none() {
+        tracing::warn!(
+            "[cp-wifi] {} is not beaconing a network, so the phone is given the \
+             configured one: CP2CL_WIFI_SSID and CP2CL_WIFI_CHANNEL have to name \
+             what is really on air",
+            cfg.wifi_iface
+        );
+    }
 }
 
 /// `00:11:22:33:44:55` → bytes. Unparseable parts stay zero rather than
