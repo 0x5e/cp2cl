@@ -23,10 +23,20 @@ pub async fn watch(
     auth: SharedCoprocessor,
     airplay_port: u32,
     restart: broadcast::Sender<()>,
+    mut gate: tokio::sync::watch::Receiver<bool>,
 ) {
     if let Err(e) = ready(&cfg) {
         tracing::error!("[cp-wifi] {e}");
         return;
+    }
+
+    // The iAP service is what tells the phone there is CarPlay here, so it is
+    // not published until there is: with CarLife in the picture the CarPlay half
+    // only exists for as long as the car's session does.
+    while !*gate.borrow() {
+        if gate.changed().await.is_err() {
+            return;
+        }
     }
 
     let (conn, mut incoming) = match livi_runtime::bt::start(&cfg.bt_adapter, &cfg.name, true).await

@@ -29,15 +29,22 @@ protocol it will render full screen.
                                                 +------------------------------->  browser client
 ```
 
-The CarPlay half and the browser client exist today. The CarLife half — the
-device acting as a phone on a second USB controller, so the head unit can be
-driven at all — is not written yet.
+The CarPlay half and the browser client exist and work. The CarLife half — this
+device presenting itself to a head unit as a phone — is written as far as its
+protocol: the USB interface, the AOA control requests, and the session a head
+unit drives. What it does not do yet is carry CarPlay's streams into it, so the
+video channel repeats whatever a file holds and the audio channels stay empty.
 
 ## Features
 
 - Support both wired and wireless CarPlay.
-- No transcoding on the bridge device.
-- No hard-coded audio/video encoding formats, negotiate directly between the iPhone and the far end.
+- Video is passed through untouched.
+- Media audio is decoded to PCM, not re-encoded: wireless CarPlay hands media
+  over as AAC-LC and CarLife wants PCM, so the two ends do not agree.
+- No hard-coded audio/video encoding formats — what the phone offers is
+  negotiated with it directly, and the far end's request is answered with what
+  this device can actually do.
+- Present the device to a CarLife head unit as a phone, so the car can be driven at all.
 
 ## Requirements
 
@@ -45,8 +52,9 @@ Bridge device:
 
 - Running Linux. The board this is developed against is a **NanoPi Duo2**,
   armv7 hard-float.
-- 1 USB host for wired CarPlay.
-- 1 USB OTG for the CarLife head unit (planned; one controller cannot be both).
+- 1 USB OTG for the CarLife head unit, which is the host on that side. With
+  CarPlay taken wirelessly this is the only USB port the device needs.
+- 1 USB host for wired CarPlay, on a board that has a second controller.
 - WiFi + BLE for wireless CarPlay (optional).
 
 ## Build and run
@@ -239,6 +247,12 @@ decode. `CP2CL_HEVC` sets the default, and the panel overrides it per session.
 | `CP2CL_AP_MAC` | this machine's Wi-Fi MAC | the router's BSSID, sent as the accessory identifier |
 | `CP2CL_TARGET_BT` | any | only accept this phone's Bluetooth address |
 | `CP2CL_BT_ADAPTER` | `hci0` | Linux: which Bluetooth adapter |
+| `CP2CL_CARLIFE` | off | also present this device to a head unit as a phone, and hold the CarPlay side shut until the car's session is up. See [CarLife](#carlife) |
+| `CP2CL_CARLIFE_FRAME` | — | an annex-B file the video channel repeats; without it that channel carries heartbeats only |
+| `CP2CL_CARLIFE_AUTH` | `ignore` | the car's authentication challenge: `ignore` says nothing, `empty` answers it as a device too old to be authenticated |
+| `CP2CL_CARLIFE_VIDPID` | `18d1:2d00` | the identity the gadget is lent; `none` leaves the gadget's own alone |
+| `CP2CL_CARLIFE_GADGET` / `CP2CL_CARLIFE_UDC` | the only one there is | which gadget and which controller to use, when the board has more than one |
+| `CP2CL_CARLIFE_FFS` | `carlife` | the FunctionFS instance name, which is also where it is mounted under `/dev/usb-ffs` |
 
 ## Wireless CarPlay
 
@@ -276,6 +290,67 @@ stale, which the bridge recovers from by asking again.
 
 `CP2CL_TARGET_BT` narrows it to one phone when several are paired, and
 `CP2CL_LOG=debug` brings up the bridge's own lines.
+
+## CarLife
+
+`CP2CL_CARLIFE=1` adds the other half. The device also presents itself to a head
+unit as a phone over the micro-USB port, and the two halves become one thing:
+the CarPlay side is held shut until the car's session is up, and is torn down
+when the car's session ends. Without the variable nothing about CarPlay changes.
+
+What is there: the USB interface the car enumerates, the AOA control requests,
+and the session a head unit drives — the version handshake, device information,
+feature configuration, the video encoder's negotiation, and the heartbeat that
+keeps the channel alive. What is not: the streams themselves. The video channel
+repeats one access unit read from a file, nothing is sent on the audio channels,
+and what the car sends back is reported and dropped.
+
+### Trying it without a car
+
+`../CarLifePort` is a head unit implementation that runs on macOS, and the
+topology matches the real thing — the Mac is the host, the board is the device —
+so everything up to the picture can be exercised without one:
+
+```bash
+CP2CL_CARLIFE=1 CP2CL_CARLIFE_FRAME=/root/idr.h264 ./target/release/cp2cl
+```
+
+`CP2CL_CARLIFE_FRAME` is what the video channel sends, over and over. Any
+annex-B stream will do:
+
+```bash
+ffmpeg -f lavfi -i testsrc=size=1280x720:rate=30 -frames:v 1 -c:v libx264 \
+  -profile:v baseline -x264-params keyint=1 -f h264 idr.h264
+```
+
+Without it the video channel carries heartbeats only, which is still enough to
+see the session come up and the encoder negotiation happen.
+
+### The gadget it borrows
+
+This device does not own the USB gadget: the board already has one, made at boot
+to provide the ECM link the board is normally reached over. CarLife adds a
+FunctionFS function to that gadget and binds it again, which means two things
+worth knowing before the first run:
+
+* **The management link drops while the gadget is unbound.** It comes back with
+  the function added, and everything is undone on the way out — but a run that
+  ends badly leaves the gadget changed. configfs lives in memory, so a reboot is
+  a clean slate.
+* **The gadget's identity is replaced** with the accessory one the guide expects,
+  `18d1:2d00`. A host that keys its network settings off the USB identity may
+  treat the link as a new device and not reapply them, which on macOS could mean
+  losing the management link. `CP2CL_CARLIFE_VIDPID=none` leaves the identity
+  alone; that is the setting to try if it happens.
+
+### Authentication
+
+The car may ask this device to prove it is a phone, by presenting a challenge
+that only an actual phone can encrypt. That key is not obtainable, so the default
+is to report the request and answer nothing — the first thing to try.
+`CP2CL_CARLIFE_AUTH=empty` instead answers the way the guide prescribes for a
+device too old to be authenticated. What the car makes of either is the car's
+decision, and finding out is what the hardware is for.
 
 ## Input
 
@@ -363,6 +438,11 @@ this a derivative work, so cp2cl inherits that.
 | `src/wireless/linux.rs` | BlueZ, through LIVI's `livi_runtime::bt` |
 | `src/wireless/macos.rs` | the unix socket the IOBluetooth helper relays into |
 | `native/cp2cl-bluetooth/main.m` | macOS: SDP records, device class, RFCOMM → unix socket |
+| `src/carlife/mod.rs` | the CarLife half: this device standing in for a phone |
+| `src/carlife/gadget.rs` | Linux only — configfs, FunctionFS, the accessory control requests |
+| `src/carlife/session.rs` | the session a head unit drives: handshake, heartbeats, touch |
+| `src/carlife/frame.rs` | the USB framing — the outer chunk header and the per-channel message head |
+| `src/carlife/proto.rs` | as much protobuf as these messages need, written by hand |
 | `src/airplay/mod.rs` | RTSP server: pairing, SETUP, `/info`, streams |
 | `src/airplay/pairing.rs` | SRP-6a pair-setup, X25519/Ed25519 pair-verify, every key HKDF derives |
 | `src/airplay/crypto.rs` | HKDF-SHA512, ChaCha20-Poly1305, the two nonce shapes |
@@ -404,8 +484,17 @@ this a derivative work, so cp2cl inherits that.
 
 ## Known gaps
 
-* The CarLife half is not written. The head unit sees nothing yet; the streams
-  go to the browser client only.
+* The CarLife half speaks the protocol and carries no streams yet: the video
+  channel repeats one access unit from a file, the audio channels stay empty, and
+  what the car sends back is logged and dropped. Until the bridge is written the
+  head unit sees a session come up and nothing on it.
+* Whether a head unit accepts a device that is not a phone is not known — the
+  authentication challenge cannot be answered, and no hardware has been tried on
+  yet. See `PLAN-CL.md` §3.5.
+* The CarLife audio cannot be passed through: a phone on wireless CarPlay hands
+  media over as AAC-LC, which the CarLife media channel does not take, so it has
+  to be decoded on the way across. That decoder is not written, and whether the
+  board can do it in real time is not measured.
 * `up`/`down` overshoot. The knob's absolute Y axis is a *position* to the phone
   rather than a step, so a full throw scrolls several rows. Wired it is reliable,
   wireless it is intermittent. The knob's wheel axis cannot stand in for it: that

@@ -155,14 +155,24 @@ async fn carkit(phone: &Phone) -> anyhow::Result<Box<dyn idevice::ReadWrite>> {
 }
 
 /// Keeps asking who is plugged in until we stop being asked to stop.
+///
+/// `gate` is the CarLife session. While it is shut nothing is looked for at all:
+/// the phone has no CarPlay to start, and starting one would only produce an
+/// AirPlay connection the receiver is not accepting yet.
 pub async fn watch(
     cfg: Arc<Config>,
     auth: SharedCoprocessor,
     airplay_port: u32,
     restart: broadcast::Sender<()>,
+    mut gate: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut busy: Option<String> = None;
     loop {
+        while !*gate.borrow() {
+            if gate.changed().await.is_err() {
+                return;
+            }
+        }
         let phones = attached().await;
         let current: Vec<String> = phones.iter().map(|p| p.id.clone()).collect();
         match &busy {

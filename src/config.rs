@@ -86,6 +86,15 @@ pub struct Config {
     /// it the phone falls back to this machine's Wi-Fi MAC, which on recent
     /// macOS SDKs comes back as a placeholder.
     pub ap_mac: Option<String>,
+    /// Serve CarLife to a head unit over the micro-USB port, and hold the
+    /// CarPlay side until it is there.
+    ///
+    /// Off by default, because with it on nothing about CarPlay changes except
+    /// *when* it starts: the phone is not accepted until the car's session is up
+    /// and is dropped when that session ends. On its own — which is the setting
+    /// the wireless CarPlay work is done with — the phone is free to connect at
+    /// any time.
+    pub car_life: bool,
     /// Only talk to this Bluetooth MAC. Several iPhones paired with the same
     /// machine otherwise race for the session.
     pub target_bt: Option<String>,
@@ -128,6 +137,9 @@ impl Config {
             wifi_channel: env_num("CP2CL_WIFI_CHANNEL", 36),
             wifi_iface: env_or("CP2CL_WIFI_IFACE", default_wifi_iface()),
             ap_mac: env("CP2CL_AP_MAC"),
+            car_life: std::env::var("CP2CL_CARLIFE")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
             target_bt: env("CP2CL_TARGET_BT"),
             bt_adapter: env_or("CP2CL_BT_ADAPTER", "hci0"),
         }

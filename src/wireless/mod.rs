@@ -247,6 +247,7 @@ pub async fn watch(
     _auth: SharedCoprocessor,
     _airplay_port: u32,
     _restart: broadcast::Sender<()>,
+    _gate: tokio::sync::watch::Receiver<bool>,
 ) {
     tracing::error!(
         "[cp-wifi] wireless CarPlay needs Bluetooth, and this platform has no \

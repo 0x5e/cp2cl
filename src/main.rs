@@ -11,6 +11,11 @@
 //!   WebSocket and takes input back.
 
 mod airplay;
+// The protocol half of CarLife is plain code and its tests run anywhere, but
+// presenting a USB device is something only Linux does, so off Linux nothing
+// reaches into the module and most of it would be reported as unused.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod carlife;
 mod commands;
 mod config;
 mod session;
@@ -64,7 +69,6 @@ async fn main() -> Result<()> {
         .await
         .context("bind airplay listener")?;
     let airplay_port = listener.local_addr()?.port() as u32;
-    tracing::info!("[cp2cl] airplay receiver listening on {airplay_port}");
 
     let codec = AudioCodec::default();
 
@@ -82,6 +86,11 @@ async fn main() -> Result<()> {
     // only the newest signal is worth anything — a session acting on a change
     // that has already been superseded is worse than not acting at all.
     let (restart, _) = tokio::sync::broadcast::channel(1);
+
+    // And what a running session is told when the CarLife session it feeds has
+    // ended, which is the one thing a restart cannot say: there is nothing to
+    // restart for. See `airplay::serve`.
+    let (shutdown, _) = tokio::sync::broadcast::channel(1);
 
     let mic = MicSink::new();
     let hub = web::Hub::new(
@@ -112,6 +121,27 @@ async fn main() -> Result<()> {
     // answer the phone's challenge, and airplay to answer /auth-setup.
     let auth = SharedCoprocessor::new(mfi_signer(&cfg)?);
 
+    // Whether the CarPlay half is open for the phone at all. With CarLife in the
+    // picture it starts shut, and the car's session is the only thing that opens
+    // it; on its own it starts open and nothing touches it again.
+    let (carplay, gate) = tokio::sync::watch::channel(!cfg.car_life);
+    tracing::debug!(
+        "[cp2cl] the CarPlay side starts {}",
+        if *carplay.borrow() { "open" } else { "shut" }
+    );
+
+    // Bound either way, and bound now: this port is what the phone is told, so
+    // it has to be known before the car turns up and before the watcher below
+    // has anything to advertise. Whether anything is accepted on it is the
+    // gate's business.
+    tracing::info!(
+        "[cp2cl] airplay receiver on {airplay_port}, {}",
+        if *carplay.borrow() {
+            "listening"
+        } else {
+            "held until the car's session is up"
+        }
+    );
     tokio::spawn(airplay::serve(
         listener,
         airplay::Shared {
@@ -122,13 +152,55 @@ async fn main() -> Result<()> {
             audio_codec: Arc::new(Mutex::new(codec)),
             screen,
             restart: restart.clone(),
+            shutdown,
             event_sink,
             mic,
             mfi: auth.clone(),
             audio_clock: Arc::new(Mutex::new(AudioClock::default())),
             timing: Arc::new(Mutex::new(SyncedClock::new())),
         },
+        gate.clone(),
     ));
+
+    // With CarLife on, the car comes first and CarPlay follows it: nothing is
+    // published and nothing is accepted until there is a head unit on the other
+    // end of the bridge, and both go away again when it does.
+    #[cfg(target_os = "linux")]
+    if cfg.car_life {
+        let opening = carplay.clone();
+        let nudge = restart.clone();
+        let mut report = move |up: bool| {
+            let _ = opening.send(up);
+            if up {
+                // The phone will not start CarPlay on its own — it has to be told
+                // again — and a fresh iAP2 session is how it is told.
+                let _ = nudge.send(());
+            }
+        };
+        tracing::info!("[cp2cl] CarLife is on; the CarPlay side waits for the car");
+        let frames = carlife::session::Frames::from_env();
+        let auth_policy = carlife::session::AuthPolicy::from_env();
+        // In the background, because the two sides are each other's condition:
+        // this task is what opens the gate, and the watcher below is the only
+        // thing that acts on it. Waiting for `serve` to return here would leave
+        // nobody to answer the gate it opens.
+        let carried = cfg.clone();
+        let alone = carplay.clone();
+        tokio::spawn(async move {
+            if let Err(e) = carlife::serve(carried, &frames, auth_policy, &mut report).await {
+                tracing::error!("[cp2cl] CarLife stopped: {e}");
+                tracing::warn!("[cp2cl] carrying on with the CarPlay side on its own");
+                let _ = alone.send(true);
+            }
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    if cfg.car_life {
+        tracing::warn!(
+            "[cp2cl] CarLife needs a USB device and only Linux can present one; \
+             running the CarPlay side on its own"
+        );
+    }
 
     if cfg.wireless {
         tracing::info!(
@@ -136,9 +208,9 @@ async fn main() -> Result<()> {
              {} port {airplay_port}",
             cfg.ssid, cfg.wifi_iface
         );
-        wireless::watch(cfg, auth, airplay_port, restart).await;
+        wireless::watch(cfg, auth, airplay_port, restart, gate).await;
     } else {
-        session::watch(cfg, auth, airplay_port, restart).await;
+        session::watch(cfg, auth, airplay_port, restart, gate).await;
     }
     Ok(())
 }

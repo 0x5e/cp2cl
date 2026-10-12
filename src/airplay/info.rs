@@ -172,9 +172,11 @@ fn format_entry(type_: i64, audio_type: &str, output: i64, input: Option<i64>) -
 
 /// What the phone is offered, per stream type.
 ///
-/// Wired CarPlay is the only place PCM shows up, and we are wired, so PCM is
-/// offered throughout. The phone then picks OPUS for the low-latency streams
-/// and AAC-LC for entertainment.
+/// PCM is offered throughout, but a phone on wireless CarPlay answers this by
+/// naming AAC-LC for the entertainment stream and does not take any of the PCM
+/// entries: measured on 2026-10-13. The low-latency streams still come back as
+/// OPUS. Whatever the phone names is what `audio_formats` has to be read
+/// alongside — see `PLAN-CL.md` §4.2 for what that costs on the CarLife side.
 fn audio_formats(rate: u32) -> Value {
     let pcm_voice: i64 = 0x3fc;
     let is48 = rate == 48_000;

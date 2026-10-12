@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use plist::{dictionary::Dictionary, from_bytes, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, watch, Mutex};
 
 use livi_runtime::AsyncAuth;
 
@@ -275,6 +275,11 @@ pub struct Shared {
     /// answered once per session, so dropping the session is the only way a
     /// change lands: the phone reconnects, asks again, and gets the new answer.
     pub restart: tokio::sync::broadcast::Sender<()>,
+    /// Fired when the CarLife session this half of the bridge exists for has
+    /// ended. Different from `restart` on purpose: a restart means "start over",
+    /// and this means "there is nothing to start over for", so it closes a
+    /// running session without expecting another.
+    pub shutdown: tokio::sync::broadcast::Sender<()>,
     /// The same MFi signer the iAP2 side uses, for `/auth-setup`.
     pub mfi: livi_runtime::mfi_async::SharedCoprocessor,
     /// Where the audio playout position is tracked, for `/feedback`.
@@ -294,64 +299,96 @@ pub struct Shared {
 }
 
 /// Accepts connections and runs each one to completion.
-pub async fn serve(listener: TcpListener, shared: Shared) {
+///
+/// `gate` is the CarLife session, and what it controls is when this half is open
+/// for business at all. While it is shut nothing is accepted: an AirPlay
+/// connection taken before the car is talking has nowhere for its streams to go
+/// and would sit in the handshake until the phone gave up. When it shuts again,
+/// what is already running is dropped as well — that is what makes the phone's
+/// CarPlay session end when the car's CarLife session does, which is the
+/// behaviour the bridge is supposed to have.
+pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Receiver<bool>) {
     loop {
-        let (socket, peer) = match listener.accept().await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!("[airplay] accept failed: {e}");
+        if !*gate.borrow() {
+            tracing::info!("[airplay] holding: the CarLife session is not up");
+            if gate.changed().await.is_err() {
                 return;
             }
-        };
-        tracing::info!("[airplay] {peer} connected");
-        let cfg = shared.cfg.clone();
-        let screen = shared.screen.clone();
-        let restart = shared.restart.subscribe();
-        let pairings = shared.pairings.clone();
-        let video_sink = shared.video_sink.clone();
-        let audio_sink = shared.audio_sink.clone();
-        let codec = shared.audio_codec.clone();
-        let event_sink = shared.event_sink.clone();
-        let mic = shared.mic.clone();
-        let mfi = shared.mfi.clone();
-        let audio_clock = shared.audio_clock.clone();
-        let timing = shared.timing.clone();
+            continue;
+        }
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (socket, peer) = match accepted {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!("[airplay] accept failed: {e}");
+                        return;
+                    }
+                };
+                tracing::info!("[airplay] {peer} connected");
+                let cfg = shared.cfg.clone();
+                let screen = shared.screen.clone();
+                let restart = shared.restart.subscribe();
+                let shutdown = shared.shutdown.subscribe();
+                let pairings = shared.pairings.clone();
+                let video_sink = shared.video_sink.clone();
+                let audio_sink = shared.audio_sink.clone();
+                let codec = shared.audio_codec.clone();
+                let event_sink = shared.event_sink.clone();
+                let mic = shared.mic.clone();
+                let mfi = shared.mfi.clone();
+                let audio_clock = shared.audio_clock.clone();
+                let timing = shared.timing.clone();
 
-        tokio::spawn(async move {
-            let mut session = Session {
-                cfg,
-                screen,
-                restart,
-                pairings,
-                video_sink,
-                audio_sink,
-                codec,
-                event_sink,
-                mic,
-                mfi,
-                audio_clock,
-                timing,
-                peer,
-                setup: None,
-                verify: None,
-                keys: None,
-                cipher_read: None,
-                cipher_write: None,
-                _timing: Vec::new(),
-                streams: HashMap::new(),
-                pumps: HashMap::new(),
-                in_buf: Vec::new(),
-                frame_buf: Vec::new(),
-                plain_buf: Vec::new(),
-                read_ctr: 0,
-                write_ctr: 0,
-                cseq: 0,
-                feedback_log: String::new(),
-            };
-            if let Err(e) = session.run(socket).await {
-                tracing::info!("[airplay] {peer} ended: {e}");
+                tokio::spawn(async move {
+                    let mut session = Session {
+                        cfg,
+                        screen,
+                        restart,
+                        shutdown,
+                        pairings,
+                        video_sink,
+                        audio_sink,
+                        codec,
+                        event_sink,
+                        mic,
+                        mfi,
+                        audio_clock,
+                        timing,
+                        peer,
+                        setup: None,
+                        verify: None,
+                        keys: None,
+                        cipher_read: None,
+                        cipher_write: None,
+                        _timing: Vec::new(),
+                        streams: HashMap::new(),
+                        pumps: HashMap::new(),
+                        in_buf: Vec::new(),
+                        frame_buf: Vec::new(),
+                        plain_buf: Vec::new(),
+                        read_ctr: 0,
+                        write_ctr: 0,
+                        cseq: 0,
+                        feedback_log: String::new(),
+                    };
+                    if let Err(e) = session.run(socket).await {
+                        tracing::info!("[airplay] {peer} ended: {e}");
+                    }
+                });
             }
-        });
+            changed = gate.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                if !*gate.borrow() {
+                    tracing::info!(
+                        "[airplay] the CarLife session ended; closing the CarPlay side"
+                    );
+                    let _ = shared.shutdown.send(());
+                }
+            }
+        }
     }
 }
 
@@ -428,6 +465,9 @@ struct Session {
     screen: SharedScreen,
     /// Fires when the session should end so the phone re-reads `/info`.
     restart: tokio::sync::broadcast::Receiver<()>,
+    /// Fires when the CarLife session that this one feeds has ended, which is
+    /// also the end of this one.
+    shutdown: tokio::sync::broadcast::Receiver<()>,
     pairings: Arc<Mutex<Pairings>>,
     video_sink: Arc<dyn MediaSink>,
     audio_sink: Arc<dyn MediaSink>,
@@ -469,6 +509,20 @@ struct Session {
     feedback_log: String,
 }
 
+/// Why a session stopped waiting for the phone to say something.
+///
+/// Two of the three are signals from outside that mean the same thing to the
+/// phone — the connection goes away — but they are not the same thing to us, and
+/// keeping them apart is what lets each say so in the log.
+enum Wakeup {
+    /// The phone sent bytes, or nothing at all because it hung up.
+    Read(usize),
+    /// What to render changed, so this session is replaced by another.
+    Restart,
+    /// The CarLife session ended and this one has nothing left to feed.
+    Shutdown,
+}
+
 impl Session {
     async fn run(
         &mut self,
@@ -478,24 +532,39 @@ impl Session {
         let mut buf = [0u8; 8192];
 
         loop {
-            let n = tokio::select! {
-                result = reader.read(&mut buf) => result?,
+            let wakeup = tokio::select! {
+                result = reader.read(&mut buf) => Wakeup::Read(result?),
                 signal = self.restart.recv() => match signal {
                     // `Lagged` means a second change arrived before this one was
                     // read; either way the answer is the same session restart.
-                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
-                        tracing::info!(
-                            "[airplay] {}: what to render changed; dropping the session so \
-                             the phone asks again",
-                            self.peer
-                        );
-                        self.close_streams().await;
-                        return Ok(());
-                    }
+                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => Wakeup::Restart,
                     // Unreachable while any sender lives, and dropping a healthy
                     // session over it would be the wrong answer.
                     Err(broadcast::error::RecvError::Closed) => continue,
                 },
+                signal = self.shutdown.recv() => match signal {
+                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => Wakeup::Shutdown,
+                    Err(broadcast::error::RecvError::Closed) => continue,
+                },
+            };
+            let n = match wakeup {
+                Wakeup::Read(n) => n,
+                Wakeup::Restart => {
+                    tracing::info!(
+                        "[airplay] {}: what to render changed; dropping the session so \
+                         the phone asks again",
+                        self.peer
+                    );
+                    self.close_streams().await;
+                    return Ok(());
+                }
+                // There is nothing left for the phone to send us: the session it
+                // was feeding is over on the other side of the bridge.
+                Wakeup::Shutdown => {
+                    tracing::info!("[airplay] {}: the CarLife session is over", self.peer);
+                    self.close_streams().await;
+                    return Ok(());
+                }
             };
             if n == 0 {
                 tracing::info!("[airplay] {} disconnected", self.peer);
