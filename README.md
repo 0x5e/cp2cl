@@ -312,7 +312,10 @@ topology matches the real thing — the Mac is the host, the board is the device
 so everything up to the picture can be exercised without one:
 
 ```bash
-CP2CL_CARLIFE=1 CP2CL_CARLIFE_FRAME=/root/idr.h264 ./target/release/cp2cl
+# On the board. Wireless CarPlay, because the micro-USB port is CarLife's.
+CP2CL_CARLIFE=1 CP2CL_WIRELESS=1 \
+CP2CL_WIFI_SSID=<the network> CP2CL_WIFI_PASS=<its passphrase> \
+CP2CL_CARLIFE_FRAME=/root/idr.h264 ./target/release/cp2cl
 ```
 
 `CP2CL_CARLIFE_FRAME` is what the video channel sends, over and over. Any
@@ -325,6 +328,33 @@ ffmpeg -f lavfi -i testsrc=size=1280x720:rate=30 -frames:v 1 -c:v libx264 \
 
 Without it the video channel carries heartbeats only, which is still enough to
 see the session come up and the encoder negotiation happen.
+
+What to watch for, in the order it happens. The first line that does not appear
+is where it stopped:
+
+```bash
+[cl-usb] the gadget is up; waiting for the car to enumerate us
+[cl-usb] control request 51 in, type 0xc0, value 0, index 0, length 2
+[cl-usb] answered with AOA 2
+[cl-usb] the car has enumerated us; starting the session
+[cl] the car speaks CarLife 1.0
+[cl] the car has our device information; the session is up   # the gate opens here
+[cl] the car set VOICE_MIC = 0                               # whatever it asks for
+[cl] the car asked for 1280x720 at 30 fps; agreeing to 1280x720 at 30
+[cl] the car started the encoder; video begins
+```
+
+`[cl]` is the session, `[cl-usb]` is the USB side under it. The other half of the
+bridge says so too, and its two lines bracket the one above:
+
+```bash
+[airplay] holding: the CarLife session is not up   # until "the session is up"
+[airplay] <phone> connected                        # and only after it
+```
+
+If the car goes quiet and nothing from `[cl]` follows, the last line printed says
+what it was waiting on. A stop at `the car asked us to authenticate` is the next
+section's subject.
 
 ### The gadget it borrows
 
