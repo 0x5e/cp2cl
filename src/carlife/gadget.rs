@@ -58,6 +58,7 @@ const ACCESSORY_VERSION: u16 = 2;
 
 // `include/uapi/linux/usb/functionfs.h`.
 const DESCRIPTORS_MAGIC_V2: u32 = 3;
+const STRINGS_MAGIC: u32 = 2;
 const HAS_FS_DESC: u32 = 1;
 const HAS_HS_DESC: u32 = 2;
 const ALL_CTRL_RECIP: u32 = 64;
@@ -92,10 +93,10 @@ where
 {
     let rig = Rig::prepare()?;
     let mut ep0 = tokio::fs::File::from_std(rig.open_control()?);
-    // The descriptors come first and the bind comes second, and the order is not
-    // a choice: the kernel refuses to bind a FunctionFS function that has not
-    // been told what it looks like.
-    write_descriptors(&mut ep0).await?;
+    // Registration comes first and the bind comes second, and the order is not a
+    // choice: the kernel refuses to bind a FunctionFS function that has not been
+    // told what it looks like.
+    register(&mut ep0).await?;
     rig.bind()?;
     tracing::info!("[cl-usb] the gadget is up; waiting for the car to enumerate us");
 
@@ -275,7 +276,7 @@ impl Rig {
         // Taking the gadget down is what may interrupt the management link, and
         // it cannot be avoided: configfs will not let a bound configuration be
         // changed. What can be avoided is the identity change below.
-        write_attr(&gadget.join("UDC"), "")?;
+        unbind(&gadget)?;
 
         let changing_identity = env("CP2CL_CARLIFE_VIDPID").as_deref() != Some("none");
         let identity = if changing_identity {
@@ -385,7 +386,7 @@ impl Drop for Rig {
     /// next boot starts from the script that made the gadget in the first place,
     /// so a run that ends badly costs a replug and not a reflash.
     fn drop(&mut self) {
-        let _ = write_attr(&self.gadget.join("UDC"), "");
+        let _ = unbind(&self.gadget);
         let _ = fs::remove_file(&self.link);
         let _ = fs::remove_dir(self.gadget.join("functions").join(format!("ffs.{}", self.instance)));
         if let Some((vid, pid)) = &self.identity {
@@ -444,16 +445,40 @@ fn descriptors() -> Vec<u8> {
     blob
 }
 
-/// Writes the descriptors to the control endpoint, which is also what brings the
-/// endpoints into existence and so unblocks a setup event arriving.
-async fn write_descriptors(ep0: &mut tokio::fs::File) -> Result<()> {
-    let blob = descriptors();
-    ep0.write_all(&blob)
-        .await
-        .context("write the functionfs descriptors")?;
+/// The strings blob, which is what the second of the two registration writes
+/// carries.
+///
+/// Registration is two writes and not one: the descriptors say what the
+/// endpoints are and this says what the strings are, and the instance only
+/// reaches the state a bind accepts once it has been given both. Written empty,
+/// because the strings a head unit cares about — what the device calls itself —
+/// travel over the accessory requests below rather than over USB string
+/// descriptors.
+fn strings() -> Vec<u8> {
+    let mut blob = Vec::with_capacity(16);
+    blob.extend_from_slice(&STRINGS_MAGIC.to_le_bytes());
+    blob.extend_from_slice(&16u32.to_le_bytes());
+    blob.extend_from_slice(&0u32.to_le_bytes());
+    blob.extend_from_slice(&0u32.to_le_bytes());
+    blob
+}
+
+/// Registers the instance: both blobs, in the order the kernel reads them.
+///
+/// Until the second one lands the instance is not active, and a bind of the
+/// gadget would be refused — which is the whole reason the bind comes after this
+/// rather than before it.
+async fn register(ep0: &mut tokio::fs::File) -> Result<()> {
+    let descriptors = descriptors();
     // The blob below is what the kernel reads; keeping the two in step matters
     // more than what the numbers are, so it is checked rather than trusted.
-    debug_assert_eq!(blob.len(), 20 + 23 + 23);
+    debug_assert_eq!(descriptors.len(), 20 + 23 + 23);
+    ep0.write_all(&descriptors)
+        .await
+        .context("write the functionfs descriptors")?;
+    ep0.write_all(&strings())
+        .await
+        .context("write the functionfs strings")?;
     Ok(())
 }
 
@@ -510,8 +535,33 @@ fn mount_is_ready(mount: &Path) -> bool {
 
 /// Writes one of configfs' single-value attributes, which is the only way most
 /// of the gadget is configured.
+///
+/// The newline is what makes the write happen. configfs reads a value out of the
+/// bytes written to the file, and `fs::write` with an empty string writes no
+/// bytes — it makes no call into the kernel at all — so an empty `write_attr` is
+/// a silent no-op rather than a write of nothing. Unbinding is the attribute
+/// that depends on this: it has to be told something, and what the kernel reads
+/// as "the empty name" is a newline.
 fn write_attr(path: &Path, value: &str) -> Result<()> {
-    fs::write(path, value).with_context(|| format!("write {value:?} to {}", path.display()))
+    fs::write(path, format!("{value}\n"))
+        .with_context(|| format!("write {value:?} to {}", path.display()))
+}
+
+/// Takes the gadget off the controller, if it is on one.
+///
+/// It has to come off before it is changed: configfs will not add a function to
+/// a configuration that is in use, and the bind at the far end of the change is
+/// then refused with a `-EBUSY` that reaches nothing but the write's own return
+/// value. A gadget that is already off is not an error — a run that ended badly
+/// leaves one, and that is the state to carry on from.
+fn unbind(gadget: &Path) -> Result<()> {
+    let udc = gadget.join("UDC");
+    let bound = fs::read_to_string(&udc).unwrap_or_default();
+    if bound.trim().is_empty() {
+        return Ok(());
+    }
+    tracing::info!("[cl-usb] taking {} off {}", gadget.display(), bound.trim());
+    write_attr(&udc, "")
 }
 
 #[cfg(test)]
@@ -550,5 +600,31 @@ mod tests {
     #[test]
     fn a_mount_that_is_not_there_is_not_claimed_to_be_a_mount() {
         assert!(!mount_is_ready(Path::new("/nonexistent/usb-ffs/carlife")));
+    }
+
+    #[test]
+    fn the_empty_value_is_written_as_a_newline_rather_than_not_at_all() {
+        // Unbinding is this call with an empty value, and it only works because
+        // the newline makes it a write: an empty slice writes no bytes and
+        // reaches no kernel at all, which is how the gadget stayed bound.
+        let path = std::env::temp_dir().join("cp2cl-write-attr");
+        write_attr(&path, "").expect("a plain file can be written");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "\n");
+
+        write_attr(&path, "musb-hdrc.4.auto").expect("a plain file can be written");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "musb-hdrc.4.auto\n");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_strings_blob_says_there_are_none() {
+        let blob = strings();
+        let word = |at: usize| u32::from_le_bytes([blob[at], blob[at + 1], blob[at + 2], blob[at + 3]]);
+
+        assert_eq!(word(0), STRINGS_MAGIC, "the strings magic, not the descriptors one");
+        assert_eq!(word(4) as usize, blob.len(), "the length field covers the blob");
+        assert_eq!(word(8), 0, "no strings");
+        assert_eq!(word(12), 0, "and so no languages either");
     }
 }
