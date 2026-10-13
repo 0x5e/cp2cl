@@ -74,7 +74,7 @@ pub enum Frames {
     /// Not a picture a person would watch — every frame is a keyframe and none
     /// of them change — but it is a real H.264 stream, so it is enough to prove
     /// the channel and the car's decoder end to end with no encoder and no phone
-    /// in the picture. `CP2CL_CARLIFE_FRAME` names the file it comes from.
+    /// in the picture. `CP2CL_INPUT_FILE` names the file it comes from.
     Still(Vec<u8>),
     /// The CarPlay side, as it arrives. Frames are written to the car as they
     /// come in rather than on the session's own clock: they are a coded stream,
@@ -83,18 +83,18 @@ pub enum Frames {
 }
 
 impl Frames {
-    /// One access unit from the file `CP2CL_CARLIFE_FRAME` names.
+    /// One access unit from the file `CP2CL_INPUT_FILE` names.
     ///
     /// A file that cannot be read is worth a warning and not a failure: the
     /// session is still useful without it, and saying so beats refusing to start.
     pub fn from_file() -> Self {
-        let Some(path) = std::env::var("CP2CL_CARLIFE_FRAME")
+        let Some(path) = std::env::var("CP2CL_INPUT_FILE")
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
         else {
             tracing::warn!(
-                "[cl] CP2CL_INPUT=file, but CP2CL_CARLIFE_FRAME names no file; \
+                "[cl] CP2CL_INPUT=file, but CP2CL_INPUT_FILE names no file; \
                  sending heartbeats only"
             );
             return Self::None;

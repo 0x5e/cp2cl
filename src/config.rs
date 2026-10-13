@@ -62,7 +62,7 @@ impl Sink {
 pub enum Input {
     /// The CarPlay session. The default.
     Cp,
-    /// One access unit, read from the file `CP2CL_CARLIFE_FRAME` names and sent
+    /// One access unit, read from the file `CP2CL_INPUT_FILE` names and sent
     /// over and over. Nothing to do with a phone: it is how the channel and the
     /// car's decoder are exercised without one.
     File,
@@ -85,6 +85,12 @@ pub struct Config {
     /// Directory holding identity.pk8 + certificate.p7b (the MFi credentials).
     pub auth_dir: Option<PathBuf>,
     /// What the phone is asked to render. 1280x720 is the safe CarPlay default.
+    ///
+    /// These are the web sink's screen, which is what the `CP2CL_WEB_` prefix on
+    /// them says: they are the four settings that describe the surface the
+    /// browser client draws on. A CarLife head unit describes its own screen —
+    /// `VIDEO_ENCODER_INIT` names the width, height and frame rate it wants — so
+    /// there is nothing here for the operator to state in that mode.
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -93,6 +99,9 @@ pub struct Config {
     /// sharp picture and a blurry one: MacPlay reports the window's real share
     /// of the panel and gets ~254 dpi, while inventing a large value drops it to
     /// ~162 and the phone quietly renders at 1×.
+    ///
+    /// No CarLife message carries a physical size, so this one stays the
+    /// operator's in both modes.
     pub width_mm: u32,
     pub height_mm: u32,
     /// Advertise HEVC. Video then arrives as hvcC / H.265 NALs.
@@ -150,8 +159,8 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Self {
         // Named first so the window and the physical size can default to them.
-        let width = env_num("CP2CL_WIDTH", 1280);
-        let height = env_num("CP2CL_HEIGHT", 720);
+        let width = env_num("CP2CL_WEB_WIDTH", 1280);
+        let height = env_num("CP2CL_WEB_HEIGHT", 720);
         let width_mm = env_num("CP2CL_WIDTH_MM", 0);
         let sink = match env("CP2CL_SINK") {
             Some(text) => Sink::parse(&text).unwrap_or_else(|| {
@@ -185,14 +194,14 @@ impl Config {
             auth_dir: Self::resolve_auth_dir(),
             width,
             height,
-            fps: env_num("CP2CL_FPS", 60),
+            fps: env_num("CP2CL_WEB_FPS", 60),
             width_mm,
             // Left to `info.rs` to derive from the aspect ratio when zero.
             height_mm: env_num("CP2CL_HEIGHT_MM", 0),
             // HEVC by default: at the bitrate the phone sends, H.265 is visibly
             // sharper than H.264. MacPlay reports `codec=h265` for the same
             // session, which is where the difference in clarity comes from.
-            hevc: std::env::var("CP2CL_HEVC")
+            hevc: std::env::var("CP2CL_WEB_HEVC")
                 .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
                 .unwrap_or(true),
             device_id: env_or("CP2CL_DEVICE_ID", "00:11:22:33:44:55"),

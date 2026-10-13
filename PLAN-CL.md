@@ -300,7 +300,7 @@ MD 收到 `GO_TO_FOREGROUND` 后 5 秒没切前台要回 `0x0001004C`。**都是
 AirPlay 侧交出来的是 **annex-B** 访问单元（`src/airplay/screen.rs` 已在内部转好），CarLife 视频通道吃的是  
 「编码后视频数据」并配 12 字节头。所以只要能满足下面三条，就是**逐帧搬运**：
 
-1. **编码家族一致**：CarPlay 侧关掉 HEVC（`CP2CL_HEVC=0`，或者由 CarLife 会话决定 `ScreenParams.hevc=false`），  
+1. **编码家族一致**：CarPlay 侧关掉 HEVC（`CP2CL_WEB_HEVC=0`，或者由 CarLife 会话决定 `ScreenParams.hevc=false`），  
    两端都 H.264。
 2. **profile 兼容**：指南只保证 baseline L3.1。CarPlay 侧实际多为 Main/High，可能带 B 帧。**先直通试，  
    车机不接受再想办法**（§8 风险 3）。
@@ -364,7 +364,7 @@ CarLife `VOICE_MIC=0` 时麦克风在车机侧，HU 会把 16 kHz 单声道 PCM 
 这条规则。`CP2CL_SINK=web`（默认）时消费者在本机上，没有可等的一方，闸门恒开。
 
 同一个开关也决定消费的是谁，所以两者互斥：`cl` 不建浏览器客户端，也就没有页面、没有显示面板。**代价是几何只能  
-靠 `CP2CL_WIDTH`/`CP2CL_HEIGHT`/`CP2CL_FPS`**——`SharedScreen` 没有人写。§4.4 的「几何由 HU 的 `VIDEO_ENCODER_INIT`  
+靠 `CP2CL_WEB_WIDTH`/`CP2CL_WEB_HEIGHT`/`CP2CL_WEB_FPS`**——`SharedScreen` 没有人写。§4.4 的「几何由 HU 的 `VIDEO_ENCODER_INIT`  
 决定」因此是 Phase 3 要补的路，不是现在这条路。
 
 （那个 TCP 端口仍然在启动时就 bind——它是 `/info` 要告诉手机的端口，必须在车机出现之前就定下来；受闸门控制的是  
@@ -494,7 +494,7 @@ Mac 是 host、Duo2 是 device，拓扑与「车机 ↔ 我们的设备」完全
 - 鉴权**什么都不回**，程序里没有第二条路（§3.5）。
 
 **验收（无需车）**：Mac 上 `dist/carlife-link` + `dist/carlifed`，`CP2CL_SINK=cl` 加  
-`CP2CL_INPUT=file CP2CL_CARLIFE_FRAME=<单帧 annex-B>`，车机侧出画即通过。若要连手机一起验，  
+`CP2CL_INPUT=file CP2CL_INPUT_FILE=<单帧 annex-B>`，车机侧出画即通过。若要连手机一起验，  
 把 `CP2CL_INPUT` 留默认（`cp`）即可。单帧可用：
 
 ```sh

@@ -141,7 +141,7 @@ async fn main() -> Result<()> {
         // the environment alone.
         None => tracing::info!(
             "[cp2cl] no browser client; the streams go to the car, and the screen \
-             comes from CP2CL_WIDTH/HEIGHT/FPS"
+             comes from CP2CL_WEB_WIDTH/HEIGHT/FPS"
         ),
     }
 

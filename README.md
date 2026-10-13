@@ -226,7 +226,7 @@ controls. Touch is mapped through the canvas, not the panel size, for the same
 reason.
 
 The codec choice is real, and matters: it is what the browser has to be able to
-decode. `CP2CL_HEVC` sets the default, and the panel overrides it per session.
+decode. `CP2CL_WEB_HEVC` sets the default, and the panel overrides it per session.
 
 ## Environment
 
@@ -235,10 +235,10 @@ decode. `CP2CL_HEVC` sets the default, and the panel overrides it per session.
 | `CP2CL_AUTH_DIR` | `./authentication` | MFi credentials |
 | `CP2CL_WEB_ADDR` | `0.0.0.0:8080` | where the browser client is served. HTTPS is not part of it because there is no other option — WebCodecs needs a secure context — and `0.0.0.0` is every interface |
 | `CP2CL_WEB_TOKEN` | `0` | the token the page has to carry; fixed, so the URL is stable and short enough to type. Give it a real value before the port is reachable from anywhere but this LAN |
-| `CP2CL_WIDTH` / `CP2CL_HEIGHT` | `1280` / `720` | what the phone renders, until the display panel says otherwise |
-| `CP2CL_FPS` | `60` | max frame rate |
-| `CP2CL_HEVC` | on | ask for H.265. At the bitrate the phone sends it is visibly sharper than H.264; set `0` to fall back |
-| `CP2CL_WIDTH_MM` / `CP2CL_HEIGHT_MM` | derived | physical size; drives UI scale |
+| `CP2CL_WEB_WIDTH` / `CP2CL_WEB_HEIGHT` | `1280` / `720` | the web sink's screen: what the phone renders, until the display panel says otherwise. A CarLife head unit names its own width and height instead |
+| `CP2CL_WEB_FPS` | `60` | the web sink's max frame rate |
+| `CP2CL_WEB_HEVC` | on | ask for H.265. At the bitrate the phone sends it is visibly sharper than H.264; set `0` to fall back. The web sink's codec |
+| `CP2CL_WIDTH_MM` / `CP2CL_HEIGHT_MM` | derived | physical size; drives UI scale. No CarLife message carries a physical size, so this is the operator's either way |
 | `CP2CL_DEVICE_ID` / `CP2CL_BT_MAC` | `00:11:22:33:44:55` | identifiers in `/info` |
 | `CP2CL_LOG` | `info` | log level: `error`, `warn`, `info`, `debug`, `trace` |
 | `CP2CL_WIRELESS` | off | take CarPlay over Bluetooth and Wi-Fi instead of USB |
@@ -251,7 +251,7 @@ decode. `CP2CL_HEVC` sets the default, and the panel overrides it per session.
 | `CP2CL_BT_ADAPTER` | `hci0` | Linux: which Bluetooth adapter |
 | `CP2CL_SINK` | `web` | who reads the streams: `web` is the browser client, `cl` is a CarLife head unit over the micro-USB port, and there is no browser client in that mode. See [CarLife](#carlife) |
 | `CP2CL_INPUT` | `cp` | what the CarLife video channel sends: `cp` is the CarPlay session, `file` is the file below, sent over and over |
-| `CP2CL_CARLIFE_FRAME` | — | that file: an annex-B stream. A name that cannot be read falls back to heartbeats |
+| `CP2CL_INPUT_FILE` | — | that file: an annex-B stream. A name that cannot be read falls back to heartbeats |
 | `CP2CL_CARLIFE_VIDPID` | `18d1:2d00` | the identity the gadget is lent; `none` leaves the gadget's own alone |
 | `CP2CL_CARLIFE_GADGET` / `CP2CL_CARLIFE_UDC` | the only one there is | which gadget and which controller to use, when the board has more than one |
 | `CP2CL_CARLIFE_FFS` | `carlife` | the FunctionFS instance name, which is also where it is mounted under `/dev/usb-ffs` |
@@ -302,8 +302,9 @@ is up, and is torn down when the car's session ends. Being the reader is what
 turns the CarLife half on, so there is no second switch for it.
 
 There is no browser client in this mode, which means no page to open and no
-display panel: what the phone is asked to render comes from `CP2CL_WIDTH`,
-`CP2CL_HEIGHT` and `CP2CL_FPS`.
+display panel: what the phone is asked to render comes from `CP2CL_WEB_WIDTH`,
+`CP2CL_WEB_HEIGHT` and `CP2CL_WEB_FPS` — the web sink's screen, which is where
+those names come from. The head unit states its own geometry over the session.
 
 What is there: the USB interface the car enumerates, the AOA control requests,
 the session a head unit drives — the version handshake, device information,
@@ -331,7 +332,7 @@ car session. To drive the channel with no CarPlay in the picture at all, point i
 at a file instead:
 
 ```bash
-CP2CL_SINK=cl CP2CL_INPUT=file CP2CL_CARLIFE_FRAME=/root/idr.h264 ./target/release/cp2cl
+CP2CL_SINK=cl CP2CL_INPUT=file CP2CL_INPUT_FILE=/root/idr.h264 ./target/release/cp2cl
 ```
 
 Any annex-B stream will do:
