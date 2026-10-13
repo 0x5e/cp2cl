@@ -1,11 +1,16 @@
 //! Where the media goes once CarPlay has handed it over.
 //!
-//! One consumer takes the streams, the browser client. The events below carry
-//! the *description* of a stream as well as its bytes, which is what the ffplay
-//! sink this replaced never needed: ffplay was told what it was reading on its
-//! command line, while a browser decoding with WebCodecs has to be told out of
-//! band, because the description arrives on the stream itself after decoding has
-//! already started.
+//! One consumer takes the streams: the browser client, or the head unit on the
+//! other end of a CarLife session. The events below carry the *description* of a
+//! stream as well as its bytes, because a consumer that has to be told what it is
+//! reading needs both: the phone sends the codec's parameter sets after the
+//! consumer has already started, and a browser decoding with WebCodecs needs them
+//! out of band while anything reading an elementary stream needs them in it.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use tokio::sync::mpsc;
 
 /// Which family a video stream is in, which decides both how its parameter sets
 /// are read out of the config record and how the browser names the decoder.
@@ -101,11 +106,16 @@ impl AudioCodec {
 pub enum StreamEvent {
     /// A video stream's codec description, sent once before any frame.
     ///
-    /// `codec_data` is the raw avcC / hvcC record, which is what WebCodecs wants
-    /// as its decoder `description`. The browser is told out of band, so the
-    /// annex-B parameter sets a plain elementary stream would carry are of no
-    /// use to it.
-    VideoConfig { codec: VideoCodec, codec_data: Vec<u8> },
+    /// The same record in both shapes a consumer might want. `codec_data` is the
+    /// raw avcC / hvcC record, which is what WebCodecs wants as its decoder
+    /// `description` and is told to the browser out of band; `parameter_sets`
+    /// are the SPS/PPS the record holds, already converted to annex-B, which is
+    /// what a consumer reading an elementary stream has to put in it.
+    VideoConfig {
+        codec: VideoCodec,
+        codec_data: Vec<u8>,
+        parameter_sets: Vec<Vec<u8>>,
+    },
     /// One access unit as annex-B, and whether it is a keyframe.
     VideoFrame { keyframe: bool, data: Vec<u8> },
     /// The screen stream opened or closed. The browser uses it to tell whether a
@@ -136,4 +146,132 @@ pub enum StreamEvent {
 /// once instead of forever.
 pub trait MediaSink: Send + Sync {
     fn push(&self, event: StreamEvent);
+}
+
+/// How many access units may wait for the car. Bounded and dropped past, so a
+/// session that is behind glitches instead of accumulating latency.
+const CL_BACKLOG: usize = 8;
+
+/// The CarLife end of the bridge.
+///
+/// The car's session is what drains this, and it comes and goes with the car:
+/// the receiving half is handed out when a session starts and given back when it
+/// ends, so the next one gets it. Frames that arrive in between have nobody to go
+/// to and are dropped, which is what the sink says once rather than per frame.
+pub struct ClOutlet {
+    tx: mpsc::Sender<Vec<u8>>,
+    rx: Mutex<Option<mpsc::Receiver<Vec<u8>>>>,
+}
+
+impl ClOutlet {
+    pub fn new() -> Self {
+        let (tx, rx) = mpsc::channel(CL_BACKLOG);
+        Self {
+            tx,
+            rx: Mutex::new(Some(rx)),
+        }
+    }
+
+    /// The video half. There is one sink because there is one channel that
+    /// carries anything yet: audio lands on the same sink and is dropped there.
+    pub fn video(&self) -> Arc<ClSink> {
+        Arc::new(ClSink {
+            tx: self.tx.clone(),
+            pending: Mutex::new(Vec::new()),
+            no_reader: AtomicBool::new(false),
+            behind: AtomicBool::new(false),
+            no_audio: AtomicBool::new(false),
+        })
+    }
+
+    /// The receiving half, for the CarLife session. One car, one owner: a second
+    /// call gets nothing.
+    pub fn take_receiver(&self) -> Option<mpsc::Receiver<Vec<u8>>> {
+        self.rx.lock().ok()?.take()
+    }
+
+    /// Given back when a session ends so the next one can use it.
+    pub fn return_receiver(&self, rx: mpsc::Receiver<Vec<u8>>) {
+        if let Ok(mut guard) = self.rx.lock() {
+            *guard = Some(rx);
+        }
+    }
+}
+
+/// Where the CarPlay streams go when the car is the one reading them.
+pub struct ClSink {
+    tx: mpsc::Sender<Vec<u8>>,
+    /// Parameter sets from the newest codec description, put in front of the
+    /// next frame. Held outside the queue deliberately: the queue can be full,
+    /// and a dropped SPS/PPS costs everything that follows it.
+    pending: Mutex<Vec<u8>>,
+    /// Each of these is said once. A stream that keeps arriving in the wrong
+    /// state would otherwise print a line per frame.
+    no_reader: AtomicBool,
+    behind: AtomicBool,
+    no_audio: AtomicBool,
+}
+
+impl ClSink {
+    /// One access unit on its way to the video channel.
+    fn send(&self, access_unit: Vec<u8>) {
+        match self.tx.try_send(access_unit) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                if !self.no_reader.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(
+                        "[cl] no CarLife session is reading the video channel; dropping frames"
+                    );
+                }
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                if !self.behind.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(
+                        "[cl] the car is behind on video; dropping frames rather than \
+                         falling further behind"
+                    );
+                }
+            }
+        }
+    }
+}
+
+impl MediaSink for ClSink {
+    fn push(&self, event: StreamEvent) {
+        match event {
+            // The car reads an elementary stream, so the parameter sets have to
+            // be in it. The raw record is for decoders told out of band and is
+            // dropped here; `parameter_sets` is the same thing already
+            // converted.
+            StreamEvent::VideoConfig { parameter_sets, .. } => {
+                if let Ok(mut pending) = self.pending.lock() {
+                    pending.clear();
+                    for set in parameter_sets {
+                        pending.extend_from_slice(&set);
+                    }
+                }
+            }
+            StreamEvent::VideoFrame { data, .. } => {
+                let mut access_unit = self
+                    .pending
+                    .lock()
+                    .map(|mut pending| std::mem::take(&mut *pending))
+                    .unwrap_or_default();
+                access_unit.extend_from_slice(&data);
+                self.send(access_unit);
+            }
+            // The media channel wants PCM, and what a phone on wireless CarPlay
+            // sends is AAC-LC, so it has to be decoded before it can go there.
+            // Until it is, these are dropped.
+            StreamEvent::AudioConfig { .. } | StreamEvent::AudioPacket { .. } => {
+                if !self.no_audio.swap(true, Ordering::Relaxed) {
+                    tracing::warn!("[cl] the car's media channel is not fed yet; audio is dropped");
+                }
+            }
+            // Neither has a channel of its own: the car learns the audio format
+            // from its own negotiation, and a screen opening says nothing the
+            // video channel does not already say.
+            StreamEvent::ScreenActive(_) | StreamEvent::AudioStopped { .. } => {}
+        }
+    }
 }

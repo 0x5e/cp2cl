@@ -32,18 +32,20 @@ protocol it will render full screen.
 The CarPlay half and the browser client exist and work. The CarLife half — this
 device presenting itself to a head unit as a phone — is written as far as its
 protocol: the USB interface, the AOA control requests, and the session a head
-unit drives. What it does not do yet is carry CarPlay's streams into it, so the
-video channel repeats whatever a file holds and the audio channels stay empty.
+unit drives. Which of the two reads the streams is a choice, not both at once;
+with the car as the reader the video channel carries CarPlay's frames, and the
+audio channels stay empty because what the car takes and what the phone sends are
+different codecs.
 
 ## Features
 
 - Support both wired and wireless CarPlay.
 - Video is passed through untouched.
-- Media audio is decoded to PCM, not re-encoded: wireless CarPlay hands media
-  over as AAC-LC and CarLife wants PCM, so the two ends do not agree.
 - No hard-coded audio/video encoding formats — what the phone offers is
   negotiated with it directly, and the far end's request is answered with what
-  this device can actually do.
+  this device can actually do. Where the two ends do not agree, the audio is
+  decoded rather than re-encoded: wireless CarPlay hands media over as AAC-LC and
+  CarLife's media channel takes PCM. That decoder is not written.
 - Present the device to a CarLife head unit as a phone, so the car can be driven at all.
 
 ## Requirements
@@ -247,9 +249,9 @@ decode. `CP2CL_HEVC` sets the default, and the panel overrides it per session.
 | `CP2CL_AP_MAC` | this machine's Wi-Fi MAC | the router's BSSID, sent as the accessory identifier |
 | `CP2CL_TARGET_BT` | any | only accept this phone's Bluetooth address |
 | `CP2CL_BT_ADAPTER` | `hci0` | Linux: which Bluetooth adapter |
-| `CP2CL_CARLIFE` | off | also present this device to a head unit as a phone, and hold the CarPlay side shut until the car's session is up. See [CarLife](#carlife) |
-| `CP2CL_CARLIFE_FRAME` | — | an annex-B file the video channel repeats; without it that channel carries heartbeats only |
-| `CP2CL_CARLIFE_AUTH` | `ignore` | the car's authentication challenge: `ignore` says nothing, `empty` answers it as a device too old to be authenticated |
+| `CP2CL_SINK` | `web` | who reads the streams: `web` is the browser client, `cl` is a CarLife head unit over the micro-USB port, and there is no browser client in that mode. See [CarLife](#carlife) |
+| `CP2CL_INPUT` | `cp` | what the CarLife video channel sends: `cp` is the CarPlay session, `file` is the file below, sent over and over |
+| `CP2CL_CARLIFE_FRAME` | — | that file: an annex-B stream. A name that cannot be read falls back to heartbeats |
 | `CP2CL_CARLIFE_VIDPID` | `18d1:2d00` | the identity the gadget is lent; `none` leaves the gadget's own alone |
 | `CP2CL_CARLIFE_GADGET` / `CP2CL_CARLIFE_UDC` | the only one there is | which gadget and which controller to use, when the board has more than one |
 | `CP2CL_CARLIFE_FFS` | `carlife` | the FunctionFS instance name, which is also where it is mounted under `/dev/usb-ffs` |
@@ -293,17 +295,23 @@ stale, which the bridge recovers from by asking again.
 
 ## CarLife
 
-`CP2CL_CARLIFE=1` adds the other half. The device also presents itself to a head
-unit as a phone over the micro-USB port, and the two halves become one thing:
-the CarPlay side is held shut until the car's session is up, and is torn down
-when the car's session ends. Without the variable nothing about CarPlay changes.
+`CP2CL_SINK=cl` makes the head unit the reader instead of the browser client.
+The device presents itself to the car as a phone over the micro-USB port, and the
+two halves become one thing: the CarPlay side is held shut until the car's session
+is up, and is torn down when the car's session ends. Being the reader is what
+turns the CarLife half on, so there is no second switch for it.
+
+There is no browser client in this mode, which means no page to open and no
+display panel: what the phone is asked to render comes from `CP2CL_WIDTH`,
+`CP2CL_HEIGHT` and `CP2CL_FPS`.
 
 What is there: the USB interface the car enumerates, the AOA control requests,
-and the session a head unit drives — the version handshake, device information,
+the session a head unit drives — the version handshake, device information,
 feature configuration, the video encoder's negotiation, and the heartbeat that
-keeps the channel alive. What is not: the streams themselves. The video channel
-repeats one access unit read from a file, nothing is sent on the audio channels,
-and what the car sends back is reported and dropped.
+keeps the channel alive — and the video channel itself, carrying CarPlay's frames
+from the moment the car starts the encoder. What is not: the audio channels, which
+want PCM and are handed AAC-LC and are therefore dropped; and input, which the car
+sends and this program reports but does not act on.
 
 ### Trying it without a car
 
@@ -312,22 +320,31 @@ topology matches the real thing — the Mac is the host, the board is the device
 so everything up to the picture can be exercised without one:
 
 ```bash
-# On the board. Wireless CarPlay, because the micro-USB port is CarLife's.
-CP2CL_CARLIFE=1 CP2CL_WIRELESS=1 \
+# On the board. Wireless CarPlay, because the micro-USB port belongs to CarLife.
+CP2CL_SINK=cl CP2CL_WIRELESS=1 \
 CP2CL_WIFI_SSID=<the network> CP2CL_WIFI_PASS=<its passphrase> \
-CP2CL_CARLIFE_FRAME=/root/idr.h264 ./target/release/cp2cl
+./target/release/cp2cl
 ```
 
-`CP2CL_CARLIFE_FRAME` is what the video channel sends, over and over. Any
-annex-B stream will do:
+The video channel then carries the phone's frames, which needs both a phone and a
+car session. To drive the channel with no CarPlay in the picture at all, point it
+at a file instead:
+
+```bash
+CP2CL_SINK=cl CP2CL_INPUT=file CP2CL_CARLIFE_FRAME=/root/idr.h264 ./target/release/cp2cl
+```
+
+Any annex-B stream will do:
 
 ```bash
 ffmpeg -f lavfi -i testsrc=size=1280x720:rate=30 -frames:v 1 -c:v libx264 \
   -profile:v baseline -x264-params keyint=1 -f h264 idr.h264
 ```
 
-Without it the video channel carries heartbeats only, which is still enough to
-see the session come up and the encoder negotiation happen.
+That one access unit is then sent over and over, which is not a picture a person
+would watch but is enough to prove the channel and the car's decoder end to end.
+With no file to read, the video channel carries heartbeats only, which still shows
+the session coming up and the encoder negotiation happening.
 
 What to watch for, in the order it happens. The first line that does not appear
 is where it stopped:
@@ -376,16 +393,19 @@ worth knowing before the first run:
 ### Authentication
 
 The car may ask this device to prove it is a phone, by presenting a challenge
-that only an actual phone can encrypt. That key is not obtainable, so the default
-is to report the request and answer nothing — the first thing to try.
-`CP2CL_CARLIFE_AUTH=empty` instead answers the way the guide prescribes for a
-device too old to be authenticated. What the car makes of either is the car's
-decision, and finding out is what the hardware is for.
+that only an actual phone can encrypt. That key lives on the phone this device is
+pretending to be, so it is not obtainable, and the request is reported and left
+unanswered — there is nothing honest to reply with. An invented certificate or a
+guessed constant would be a lie the car might act on, which is worse than the car
+refusing us. What the car makes of the silence is the car's decision, and finding
+out is what the hardware is for.
 
 ## Input
 
 Input goes through the browser client, which is the control surface: the
-bindings below are the ones that count.
+bindings below are the ones that count. With `CP2CL_SINK=cl` there is no browser
+client, so there is no input panel at all — the car's own touch and panel keys
+arrive on the CarLife session and are reported rather than forwarded.
 
 | | In the browser |
 |---|---|
@@ -514,10 +534,9 @@ this a derivative work, so cp2cl inherits that.
 
 ## Known gaps
 
-* The CarLife half speaks the protocol and carries no streams yet: the video
-  channel repeats one access unit from a file, the audio channels stay empty, and
-  what the car sends back is logged and dropped. Until the bridge is written the
-  head unit sees a session come up and nothing on it.
+* The CarLife video channel carries the phone's frames, but the audio channels
+  stay empty, and what the car sends back is logged and dropped. So the head unit
+  gets a picture and no sound, and touches it in vain.
 * Whether a head unit accepts a device that is not a phone is not known — the
   authentication challenge cannot be answered, and no hardware has been tried on
   yet. See `PLAN-CL.md` §3.5.

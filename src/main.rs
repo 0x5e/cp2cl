@@ -7,8 +7,9 @@
 //!   `CP2CL_WIRELESS` is set — and starts CarPlay,
 //! * an airplay receiver that accepts the phone's return call and decrypts its
 //!   media,
-//! * the browser client's server, which fans those streams out over one
-//!   WebSocket and takes input back.
+//! * one consumer of those streams, which is either the browser client's server,
+//!   fanning them out over one WebSocket and taking input back, or the CarLife
+//!   session feeding a head unit — never both.
 
 mod airplay;
 // The protocol half of CarLife is plain code and its tests run anywhere, but
@@ -35,8 +36,11 @@ use tokio::sync::Mutex;
 use crate::airplay::clock::SyncedClock;
 use crate::airplay::pairing::Pairings;
 use crate::airplay::{AudioClock, EventSink, MicSink, SharedScreen};
-use crate::config::Config;
-use crate::sink::{AudioCodec, MediaSink};
+use crate::config::{Config, Sink};
+// Only the CarLife half reads this, and only Linux has one.
+#[cfg(target_os = "linux")]
+use crate::config::Input;
+use crate::sink::{AudioCodec, ClOutlet, MediaSink};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -93,27 +97,53 @@ async fn main() -> Result<()> {
     let (shutdown, _) = tokio::sync::broadcast::channel(1);
 
     let mic = MicSink::new();
-    let hub = web::Hub::new(
-        &cfg,
-        screen.clone(),
-        event_sink.clone(),
-        mic.clone(),
-        restart.clone(),
-    );
 
-    // One object, not two: a video event and an audio event differ only in what
-    // the hub converts them to.
-    let video_sink: Arc<dyn MediaSink> = hub.clone();
-    let audio_sink: Arc<dyn MediaSink> = hub.clone();
-
-    let serving = hub.clone();
-    let address = cfg.web_addr;
-    let token = cfg.web_token.clone();
-    tokio::spawn(async move {
-        if let Err(e) = web::serve(serving, address, token).await {
-            tracing::error!("[web] {e}");
-        }
+    // Who reads the streams. One or the other, never both: the media is the
+    // same either way and only the destination differs, so the browser client
+    // and the head unit are not built together.
+    let outlet: Option<Arc<ClOutlet>> = (cfg.sink == Sink::Cl).then(|| Arc::new(ClOutlet::new()));
+    let hub = (cfg.sink == Sink::Web).then(|| {
+        web::Hub::new(
+            &cfg,
+            screen.clone(),
+            event_sink.clone(),
+            mic.clone(),
+            restart.clone(),
+        )
     });
+
+    // One object per stream, not two: a video event and an audio event differ
+    // only in what the consumer converts them to. The CarLife sink is one object
+    // for the same reason — it takes both and has a channel for the first only.
+    let (video_sink, audio_sink): (Arc<dyn MediaSink>, Arc<dyn MediaSink>) =
+        match (&outlet, &hub) {
+            (Some(outlet), _) => {
+                let sink = outlet.video();
+                (sink.clone(), sink)
+            }
+            (None, Some(hub)) => (hub.clone(), hub.clone()),
+            (None, None) => unreachable!("the sink is one of the two"),
+        };
+
+    match &hub {
+        Some(hub) => {
+            let serving = hub.clone();
+            let address = cfg.web_addr;
+            let token = cfg.web_token.clone();
+            tokio::spawn(async move {
+                if let Err(e) = web::serve(serving, address, token).await {
+                    tracing::error!("[web] {e}");
+                }
+            });
+        }
+        // Worth saying out loud: with no browser client there is no page to open
+        // and no display panel, so what the phone is asked to render comes from
+        // the environment alone.
+        None => tracing::info!(
+            "[cp2cl] no browser client; the streams go to the car, and the screen \
+             comes from CP2CL_WIDTH/HEIGHT/FPS"
+        ),
+    }
 
     let pairings = Arc::new(Mutex::new(Pairings::load_or_create(None)?));
 
@@ -121,10 +151,11 @@ async fn main() -> Result<()> {
     // answer the phone's challenge, and airplay to answer /auth-setup.
     let auth = SharedCoprocessor::new(mfi_signer(&cfg)?);
 
-    // Whether the CarPlay half is open for the phone at all. With CarLife in the
-    // picture it starts shut, and the car's session is the only thing that opens
-    // it; on its own it starts open and nothing touches it again.
-    let (carplay, gate) = tokio::sync::watch::channel(!cfg.car_life);
+    // Whether the CarPlay half is open for the phone at all. With the head unit
+    // reading the streams it starts shut, and the car's session is the only thing
+    // that opens it; with the browser client there is nothing to wait for, so it
+    // starts open and nothing touches it again.
+    let (carplay, gate) = tokio::sync::watch::channel(cfg.sink == Sink::Web);
     tracing::debug!(
         "[cp2cl] the CarPlay side starts {}",
         if *carplay.borrow() { "open" } else { "shut" }
@@ -162,11 +193,13 @@ async fn main() -> Result<()> {
         gate.clone(),
     ));
 
-    // With CarLife on, the car comes first and CarPlay follows it: nothing is
-    // published and nothing is accepted until there is a head unit on the other
-    // end of the bridge, and both go away again when it does.
+    // With the car reading the streams it comes first and CarPlay follows it:
+    // nothing is published and nothing is accepted until there is a head unit on
+    // the other end of the bridge, and both go away again when it does. The
+    // outlet is what says the car is the reader, so it is also what says to start
+    // the CarLife half.
     #[cfg(target_os = "linux")]
-    if cfg.car_life {
+    if let Some(outlet) = outlet.clone() {
         let opening = carplay.clone();
         let nudge = restart.clone();
         let mut report = move |up: bool| {
@@ -177,9 +210,11 @@ async fn main() -> Result<()> {
                 let _ = nudge.send(());
             }
         };
+        let frames = match cfg.input {
+            Input::Cp => carlife::session::Frames::Live(outlet),
+            Input::File => carlife::session::Frames::from_file(),
+        };
         tracing::info!("[cp2cl] CarLife is on; the CarPlay side waits for the car");
-        let frames = carlife::session::Frames::from_env();
-        let auth_policy = carlife::session::AuthPolicy::from_env();
         // In the background, because the two sides are each other's condition:
         // this task is what opens the gate, and the watcher below is the only
         // thing that acts on it. Waiting for `serve` to return here would leave
@@ -187,19 +222,12 @@ async fn main() -> Result<()> {
         let carried = cfg.clone();
         let alone = carplay.clone();
         tokio::spawn(async move {
-            if let Err(e) = carlife::serve(carried, &frames, auth_policy, &mut report).await {
+            if let Err(e) = carlife::serve(carried, &frames, &mut report).await {
                 tracing::error!("[cp2cl] CarLife stopped: {e}");
                 tracing::warn!("[cp2cl] carrying on with the CarPlay side on its own");
                 let _ = alone.send(true);
             }
         });
-    }
-    #[cfg(not(target_os = "linux"))]
-    if cfg.car_life {
-        tracing::warn!(
-            "[cp2cl] CarLife needs a USB device and only Linux can present one; \
-             running the CarPlay side on its own"
-        );
     }
 
     if cfg.wireless {

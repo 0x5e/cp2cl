@@ -214,14 +214,6 @@ pub fn decode_video_encoder_info(body: &[u8]) -> VideoEncoderInfo {
     }
 }
 
-/// `MSG_CMD_MD_AUTHEN_RESPONSE` — the answer to the car's authentication
-/// challenge, which is a field we cannot fill in — see `session`'s note on it.
-pub fn authen_response(encrypt_value: &str) -> Vec<u8> {
-    let mut out = Vec::new();
-    put_str(&mut out, 1, encrypt_value);
-    out
-}
-
 /// `MSG_CMD_MD_AUTHEN_RESULT`.
 pub fn authen_result(authenticated: bool) -> Vec<u8> {
     let mut out = Vec::new();
@@ -400,12 +392,6 @@ mod tests {
     fn the_authentication_request_is_read_as_the_string_it_is() {
         let body = [0x0a, 0x03, b'A', b'_', b'B'];
         assert_eq!(decode_authen_request(&body), Some("A_B"));
-    }
-
-    #[test]
-    fn the_authentication_response_is_written_as_a_string() {
-        assert_eq!(authen_response(""), Vec::<u8>::new());
-        assert_eq!(authen_response("x"), vec![0x0a, 0x01, b'x']);
     }
 
     #[test]

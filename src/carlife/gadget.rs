@@ -37,7 +37,7 @@ use tokio::sync::mpsc;
 
 use crate::config::Config;
 
-use super::session::{self, AuthPolicy, Frames};
+use super::session::{self, Frames};
 
 /// Full speed gets 64 bytes per packet and high speed 512; the kernel picks the
 /// endpoint and rewrites the address, and the interface number too, so the
@@ -86,12 +86,7 @@ enum Event {
 /// Everything is set up before the first car arrives and taken down after the
 /// last, so the function survives the car coming and going without the gadget
 /// hopping about underneath it.
-pub async fn run<F>(
-    cfg: Arc<Config>,
-    frames: &Frames,
-    auth: AuthPolicy,
-    carplay: &mut F,
-) -> Result<()>
+pub async fn run<F>(cfg: Arc<Config>, frames: &Frames, carplay: &mut F) -> Result<()>
 where
     F: FnMut(bool),
 {
@@ -113,7 +108,7 @@ where
                 match rig.bulk() {
                     Ok(bulk) => {
                         tracing::info!("[cl-usb] the car has enumerated us; starting the session");
-                        if let Err(e) = session::run(bulk, frames, &cfg, auth, carplay).await {
+                        if let Err(e) = session::run(bulk, frames, &cfg, carplay).await {
                             tracing::warn!("[cl] the session ended badly: {e}");
                         }
                     }

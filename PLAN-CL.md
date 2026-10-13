@@ -53,7 +53,7 @@ iPhone ──无线 CarPlay(AirPlay)──► cp2cl ──USB(AOA)──► MBUX
 | 音频帧与格式                               | `src/sink.rs` `AudioCodec`（含 `Pcm{rate,channels}`）               | AAC-LC 需在本地解码后转成 PCM 再进通道（§4.2）               |
 | 输入上行（HID + 会话命令）                     | `src/airplay/event.rs`、`src/commands.rs`                         | CarLife 触摸/按键接到这套词汇上                         |
 | 麦克风上行                                | `src/airplay/mic.rs`                                             | CarLife VR 通道的 PCM 接过来                       |
-| 浏览器客户端                               | `src/web/`                                                       | 保留：既是本机调试窗口，也是唯一能独立验证 CarPlay 侧的手段           |
+| 浏览器客户端                               | `src/web/`                                                       | 与车机互斥，由 `CP2CL_SINK` 选（§4.5）：`web` 时保留，`cl` 时不建      |
 
 这次要写的东西，以及它们现在的落点：
 
@@ -62,7 +62,8 @@ iPhone ──无线 CarPlay(AirPlay)──► cp2cl ──USB(AOA)──► MBUX
 | USB gadget 管理     | `src/carlife/gadget.rs`         | 已实现：configfs 组装、ffs 描述符、51/52/53、退出清理 |
 | AOA MD 侧控制请求      | 同上                              | 已实现：51/52/53 全部应答              |
 | CarLife MD 协议栈    | `src/carlife/{frame,proto,session}.rs` | 已实现：帧编解码、protobuf、握手状态机、心跳      |
-| 桥接（第二个媒体消费者）      | 待定                              | 未实现：现在是「输出只有浏览器客户端一处」，`src/sink.rs` 的注释就写着这句 |
+| 桥接：视频             | `src/sink.rs` `ClOutlet`         | 已实现：`VideoFrame` 直通视频通道，参数集在下一帧前带出；`CP2CL_INPUT=file` 则改为重复一个文件 |
+| 桥接：音频             | 待定                              | 未实现：Media 通道要 PCM，拿到的却是 AAC-LC，落在 `ClSink` 里被丢弃（§4.2） |
 
 ---
 
@@ -237,8 +238,9 @@ MD 收到 `GO_TO_FOREGROUND` 后 5 秒没切前台要回 `0x0001004C`。**都是
 ⇒ 风险集中在 17.1。观察到的先例：CarLifePort 反向做 HU 时，真机弹出「未认证的车机端」但**音频照旧在推**  
 （`../CarLifePort/.workbuddy/memory/2026-10-12.md:381-385`），说明手机的处置是「提示」而非「立即断开」。我们的对策按代价从低到高：
 
-1. **先什么都不做**：不回 `0x00010049`，看 MBUX 是否继续（Phase 1 的观察项）。
-2. **回一个失败值**：按指南「版本低于 B 就把该字段全置 0」，看车机是断开还是只提示。
+1. **什么都不做**（程序现在的做法）：不回 `0x00010049`，看 MBUX 是否继续。
+2. **回一个失败值**：按指南「版本低于 B 就把该字段全置 0」，看车机是断开还是只提示。**代码里没有这条**——  
+   要试就得把它写回来，`proto` 侧原本有那个编码器，随鉴权开关一起删了。
 3. **逆向手机端 APK 取私钥**（`com.baidu.carlife`，用户手上有 Pixel 7a 与该 App）：私钥必须在端上才能签名，  
    所以它一定在包里。可行性未知，列入 Phase 4 前的可选项。
 4. 走百度官方立项拿证书——只有真的要做产品才值得。
@@ -357,13 +359,18 @@ CarLife `VOICE_MIC=0` 时麦克风在车机侧，HU 会把 16 kHz 单声道 PCM 
 
 ### 4.5 会话生命周期
 
-**车机是总开关。** CarLife 会话没起来时，CarPlay 侧不接受连接、不扫描也不认证手机、不发布 iAP 服务；车机断开时，  
-正在跑的 AirPlay 会话被主动拆掉。手机何时连、连不连都不影响这条规则。
+**消费者选谁，谁就是总开关。** `CP2CL_SINK=cl` 时车机是消费者，于是：CarLife 会话没起来时，CarPlay 侧不接受连接、  
+不扫描也不认证手机、不发布 iAP 服务；车机断开时，正在跑的 AirPlay 会话被主动拆掉。手机何时连、连不连都不影响  
+这条规则。`CP2CL_SINK=web`（默认）时消费者在本机上，没有可等的一方，闸门恒开。
+
+同一个开关也决定消费的是谁，所以两者互斥：`cl` 不建浏览器客户端，也就没有页面、没有显示面板。**代价是几何只能  
+靠 `CP2CL_WIDTH`/`CP2CL_HEIGHT`/`CP2CL_FPS`**——`SharedScreen` 没有人写。§4.4 的「几何由 HU 的 `VIDEO_ENCODER_INIT`  
+决定」因此是 Phase 3 要补的路，不是现在这条路。
 
 （那个 TCP 端口仍然在启动时就 bind——它是 `/info` 要告诉手机的端口，必须在车机出现之前就定下来；受闸门控制的是  
 **是否 accept**，所以闸门关着时没有 CarPlay 会话能建立起来。）
 
-机制是一个 `tokio::sync::watch::channel(!cfg.car_life)` 当闸门，加一个 `broadcast` 当断开信号（`src/main.rs`）：
+机制是一个 `tokio::sync::watch::channel(cfg.sink == Sink::Web)` 当闸门，加一个 `broadcast` 当断开信号（`src/main.rs`）：
 
 | 位置                       | 对闸门的处置                                                              |
 | ------------------------ | ------------------------------------------------------------------ |
@@ -383,7 +390,7 @@ CarLife `VOICE_MIC=0` 时麦克风在车机侧，HU 会把 16 kHz 单声道 PCM 
 - 车机在、iPhone 没来：CarLife 握手照走完，视频通道发 `VIDEO_HEARTBEAT` 保活（指南说 MD 切后台时就是这么做的），  
   AirPlay 侧只是没有人连进来。
 - 拔掉 iPhone：CarLife 会话不受影响，退回发心跳。
-- 非 CarLife 模式（`CP2CL_CARLIFE` 未设）：闸门恒开，`serve` 每次 `select!` 都走 accept 分支，行为与加闸门之前一致。
+- 消费者在本机（`CP2CL_SINK=web`，默认）：闸门恒开，`serve` 每次 `select!` 都走 accept 分支，行为与加闸门之前一致。
 
 ---
 
@@ -476,16 +483,19 @@ Mac 是 host、Duo2 是 device，拓扑与「车机 ↔ 我们的设备」完全
 
 - `frame.rs`：8 字节外头（`[u32 channelId][u32 totalLen]`，全大端，`totalLen` 不含外头）+ 消息头（cmd/touch 8 B、  
   其余 12 B）、方向位（含两个不按位走的例外）、逐通道体上限、`MAX_MESSAGE = 640 KiB`。头与体分两次 write。
-- `proto.rs`：手写 varint + 长度分隔字段的最小编解码，不做 codegen（D5）。**上行 6 个编码器**（版本匹配、  
-  `MD_INFO`、`INIT_DONE`、鉴权应答、鉴权结果、帧率应答）**+ 下行 9 个解码器**（版本、鉴权请求/结果、  
-  `STATISTIC_INFO`、编码器信息、帧率、触摸、硬按键、feature config 列表），空体消息在 `session` 里直接发。
+- `proto.rs`：手写 varint + 长度分隔字段的最小编解码，不做 codegen（D5）。**上行 5 个编码器**（版本匹配、  
+  `MD_INFO`、`INIT_DONE`、鉴权结果、帧率应答）**+ 下行 9 个解码器**（版本、鉴权请求/结果、  
+  `STATISTIC_INFO`、编码器信息、帧率、触摸、硬按键、feature config 列表），空体消息在 `session` 里直接发。  
+  鉴权应答的编码器随鉴权开关一起删掉了（§3.5）。
 - `session.rs`：握手状态机跑在 `AsyncRead + AsyncWrite` 上。**读线程独立 spawn**——600 KB 的帧不能在 `select!`  
-  里被心跳 tick 打断丢掉已读字节；`select!` 只等「收到一块」与「该发心跳了」两件事，且只有 tick 分支推进时钟，  
-  所以消息洪水不会饿死视频通道。视频源由 `Frames::from_env()` 决定（`CP2CL_CARLIFE_FRAME`），未 START 前一律静默。
-- 鉴权默认**什么都不回**（`AuthPolicy::Ignore`），`CP2CL_CARLIFE_AUTH=empty` 是第二种（§3.5）。
+  里被心跳 tick 打断丢掉已读字节；`select!` 等三件事：「收到一块」「CarPlay 侧交出一帧」「该发心跳了」，  
+  且只有 tick 分支推进时钟，所以消息洪水不会饿死视频通道。帧的来源是 `Frames`：`Live(ClOutlet)` 时逐帧直写，  
+  `Still(文件)` 时按协商帧率重复，两者都在未 START 前静默。
+- 鉴权**什么都不回**，程序里没有第二条路（§3.5）。
 
-**验收（无需车）**：Mac 上 `dist/carlife-link` + `dist/carlifed`，设 `CP2CL_CARLIFE_FRAME=<单帧 annex-B>`，  
-浏览器出画即通过。单帧可用：
+**验收（无需车）**：Mac 上 `dist/carlife-link` + `dist/carlifed`，`CP2CL_SINK=cl` 加  
+`CP2CL_INPUT=file CP2CL_CARLIFE_FRAME=<单帧 annex-B>`，车机侧出画即通过。若要连手机一起验，  
+把 `CP2CL_INPUT` 留默认（`cp`）即可。单帧可用：
 
 ```sh
 ffmpeg -f lavfi -i testsrc=size=1280x720:rate=30 -frames:v 1 -c:v libx264 \
@@ -534,11 +544,12 @@ ffmpeg -f lavfi -i testsrc=size=1280x720:rate=30 -frames:v 1 -c:v libx264 \
 | D6  | 视频**不重编码**，annex-B 直通                                                    | H3 没有重编码余量；两端都是 H.264 annex-B                         |
 | D7  | 音频**必须本地解 AAC-LC**，不指望 PCM                                         | 无线 CarPlay 实测只给 AAC-LC（§4.2）；`symphonia` 是唯一的实时解码点 |
 | D8  | 几何由 HU 的 `VIDEO_ENCODER_INIT` 决定，用 `SharedScreen` + `restart_session` 对齐 | 复用显示面板那条已验证的路                                         |
-| D9  | 浏览器客户端**保留**                                                             | 唯一能单独验证 CarPlay 侧的手段，且是 Phase 3 的对照窗口                 |
+| D9  | 浏览器客户端**保留**，但只在 `CP2CL_SINK=web` 时建                                     | 唯一能单独验证 CarPlay 侧的手段；`cl` 下没有页面可选                      |
 | D10 | 管理链路 ECM 与 CarLife 同 configuration                                       | 插车时也要能 SSH；风险 6 兜底                                    |
 | D11 | 不在协议栈里做「请求关键帧」                                                           | CarLife 没这条消息                                         |
-| D12 | **车机是总开关**：CarLife 会话起 → CarPlay 侧才开；断 → 主动拆                               | 手机不该在车机没来时在后台把 CarPlay 会话建起来（§4.5）                     |
+| D12 | **消费者是总开关**：`cl` 时 CarLife 会话起 → CarPlay 侧才开；断 → 主动拆                       | 手机不该在车机没来时在后台把 CarPlay 会话建起来（§4.5）                     |
 | D13 | 借板子上已有的 gadget 加一个 ffs 函数，不新建第二个 gadget                                  | configfs 不允许改已绑定的配置；代价是换绑期间管理链路断几秒（§2.5）              |
+| D14 | 消费者由 `CP2CL_SINK` 二选一（`web`/`cl`），**不同时在线**；视频通道来源由 `CP2CL_INPUT` 选（`cp`/`file`） | 两端是同一份媒体，只有去向不同；`file` 让通道与车机解码器能脱离手机单独验（§4.5）      |
 
 ---
 

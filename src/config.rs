@@ -30,6 +30,56 @@ fn env_num<T: std::str::FromStr>(key: &str, default: T) -> T {
     env(key).and_then(|s| s.parse().ok()).unwrap_or(default)
 }
 
+/// Who reads the streams CarPlay hands over.
+///
+/// Both ends are the same media, so the choice is only about the destination:
+/// the browser client on this machine, or a head unit that thinks we are a
+/// phone. One or the other, never both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sink {
+    /// Serve the browser client over HTTPS and push the streams to it. The
+    /// default.
+    Web,
+    /// Send to a CarLife head unit, over the USB device this program presents.
+    /// There is no browser client in this mode.
+    Cl,
+}
+
+impl Sink {
+    fn parse(text: &str) -> Option<Self> {
+        if text.eq_ignore_ascii_case("web") {
+            Some(Self::Web)
+        } else if text.eq_ignore_ascii_case("cl") {
+            Some(Self::Cl)
+        } else {
+            None
+        }
+    }
+}
+
+/// Where the CarLife video channel's pictures come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Input {
+    /// The CarPlay session. The default.
+    Cp,
+    /// One access unit, read from the file `CP2CL_CARLIFE_FRAME` names and sent
+    /// over and over. Nothing to do with a phone: it is how the channel and the
+    /// car's decoder are exercised without one.
+    File,
+}
+
+impl Input {
+    fn parse(text: &str) -> Option<Self> {
+        if text.eq_ignore_ascii_case("cp") {
+            Some(Self::Cp)
+        } else if text.eq_ignore_ascii_case("file") {
+            Some(Self::File)
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Directory holding identity.pk8 + certificate.p7b (the MFi credentials).
@@ -86,15 +136,10 @@ pub struct Config {
     /// it the phone falls back to this machine's Wi-Fi MAC, which on recent
     /// macOS SDKs comes back as a placeholder.
     pub ap_mac: Option<String>,
-    /// Serve CarLife to a head unit over the micro-USB port, and hold the
-    /// CarPlay side until it is there.
-    ///
-    /// Off by default, because with it on nothing about CarPlay changes except
-    /// *when* it starts: the phone is not accepted until the car's session is up
-    /// and is dropped when that session ends. On its own — which is the setting
-    /// the wireless CarPlay work is done with — the phone is free to connect at
-    /// any time.
-    pub car_life: bool,
+    /// Who reads the streams: the browser client, or a CarLife head unit.
+    pub sink: Sink,
+    /// What the CarLife video channel sends. Only meaningful with `Sink::Cl`.
+    pub input: Input,
     /// Only talk to this Bluetooth MAC. Several iPhones paired with the same
     /// machine otherwise race for the session.
     pub target_bt: Option<String>,
@@ -108,6 +153,34 @@ impl Config {
         let width = env_num("CP2CL_WIDTH", 1280);
         let height = env_num("CP2CL_HEIGHT", 720);
         let width_mm = env_num("CP2CL_WIDTH_MM", 0);
+        let sink = match env("CP2CL_SINK") {
+            Some(text) => Sink::parse(&text).unwrap_or_else(|| {
+                tracing::warn!("[cp2cl] CP2CL_SINK={text} is neither `web` nor `cl`; using web");
+                Sink::Web
+            }),
+            None => Sink::Web,
+        };
+        // Presenting a USB device is something only Linux does, so anywhere else
+        // `cl` would name a consumer that cannot exist — and with the browser
+        // client also out of the picture, the streams would have no reader at
+        // all. Fall back rather than run blind.
+        #[cfg(not(target_os = "linux"))]
+        let sink = if sink == Sink::Cl {
+            tracing::warn!(
+                "[cp2cl] CP2CL_SINK=cl needs a USB device and only Linux can present \
+                 one; using web"
+            );
+            Sink::Web
+        } else {
+            sink
+        };
+        let input = match env("CP2CL_INPUT") {
+            Some(text) => Input::parse(&text).unwrap_or_else(|| {
+                tracing::warn!("[cp2cl] CP2CL_INPUT={text} is neither `cp` nor `file`; using cp");
+                Input::Cp
+            }),
+            None => Input::Cp,
+        };
         Self {
             auth_dir: Self::resolve_auth_dir(),
             width,
@@ -137,9 +210,8 @@ impl Config {
             wifi_channel: env_num("CP2CL_WIFI_CHANNEL", 36),
             wifi_iface: env_or("CP2CL_WIFI_IFACE", default_wifi_iface()),
             ap_mac: env("CP2CL_AP_MAC"),
-            car_life: std::env::var("CP2CL_CARLIFE")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
+            sink,
+            input,
             target_bt: env("CP2CL_TARGET_BT"),
             bt_adapter: env_or("CP2CL_BT_ADAPTER", "hci0"),
         }
@@ -207,6 +279,17 @@ fn default_wifi_iface() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_consumer_and_the_input_source_are_named_as_the_two_that_exist() {
+        assert_eq!(Sink::parse("web"), Some(Sink::Web));
+        assert_eq!(Sink::parse("CL"), Some(Sink::Cl));
+        assert_eq!(Sink::parse("aa"), None);
+
+        assert_eq!(Input::parse("cp"), Some(Input::Cp));
+        assert_eq!(Input::parse("File"), Some(Input::File));
+        assert_eq!(Input::parse("still"), None);
+    }
 
     #[test]
     fn the_default_web_address_is_every_interface_on_8080() {

@@ -81,6 +81,7 @@ impl VideoReceiver {
                         self.sink.push(StreamEvent::VideoConfig {
                             codec: config.codec,
                             codec_data: config.codec_data,
+                            parameter_sets: config.parameter_sets,
                         });
                     }
                     None => {

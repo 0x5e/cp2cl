@@ -11,15 +11,14 @@
 //! car's own library and the official guide; see the plan for the table and the
 //! citations. Two things are deliberately incomplete:
 //!
-//! * **Authentication is not answered by default.** The car's challenge can only
-//!   be met with a private key that lives on the phone this device is pretending
-//!   to be, so there is nothing honest to reply with. What arrives is reported
-//!   and left alone, which is the first of the plan's fallbacks and the one that
-//!   has to be tried before anything else; `CP2CL_CARLIFE_AUTH=empty` is the
-//!   second.
+//! * **Authentication is not answered.** The car's challenge can only be met
+//!   with a private key that lives on the phone this device is pretending to be,
+//!   so there is nothing honest to reply with. What arrives is reported and left
+//!   alone. A car that insists is where this ends.
 //! * **Input is not acted on.** Touch and panel keys arrive on the sixth channel
 //!   and are reported, but there is no CarPlay side attached to send them to yet.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -29,6 +28,7 @@ use tokio::time::Instant;
 
 use super::{frame, proto};
 use crate::config::Config;
+use crate::sink::ClOutlet;
 
 // What the car sends, by name — the numbers are CarLifeVehicleLib's
 // `EPackageHeadType`.
@@ -51,7 +51,6 @@ const MATCH_STATUS: u32 = 0x0001_0002;
 const MD_INFO: u32 = 0x0001_0004;
 const VIDEO_ENCODER_INIT_DONE: u32 = 0x0001_0008;
 const VIDEO_ENCODER_FRAME_RATE_CHANGE_DONE: u32 = 0x0001_000D;
-const MD_AUTHEN_RESPONSE: u32 = 0x0001_0049;
 const MD_AUTHEN_RESULT: u32 = 0x0001_004B;
 const GO_TO_FOREGROUND_RESPONSE: u32 = 0x0001_004C;
 const FEATURE_CONFIG_REQUEST: u32 = 0x0001_0051;
@@ -65,30 +64,39 @@ const TOUCH_HARD_KEY: u32 = 0x0006_8008;
 /// reference does the same whenever its own interface is not in the foreground.
 const HEARTBEAT: Duration = Duration::from_secs(1);
 
-/// What is sent on the video channel before the CarPlay side is attached.
+/// Where the video channel's pictures come from. `CP2CL_INPUT` picks between the
+/// two that have a source; the third is what a caller with neither passes.
 pub enum Frames {
     /// Nothing but heartbeats: the session is up and the car is kept waiting.
     None,
-    /// One access unit, repeated forever.
+    /// One access unit, repeated at the agreed rate.
     ///
     /// Not a picture a person would watch — every frame is a keyframe and none
     /// of them change — but it is a real H.264 stream, so it is enough to prove
-    /// the channel and the car's decoder end to end with no encoder in the
-    /// program. `CP2CL_CARLIFE_FRAME` names the file it comes from.
+    /// the channel and the car's decoder end to end with no encoder and no phone
+    /// in the picture. `CP2CL_CARLIFE_FRAME` names the file it comes from.
     Still(Vec<u8>),
+    /// The CarPlay side, as it arrives. Frames are written to the car as they
+    /// come in rather than on the session's own clock: they are a coded stream,
+    /// and it is the phone's encoder that decides the rate.
+    Live(Arc<ClOutlet>),
 }
 
 impl Frames {
-    /// Reads `CP2CL_CARLIFE_FRAME` if it is set.
+    /// One access unit from the file `CP2CL_CARLIFE_FRAME` names.
     ///
     /// A file that cannot be read is worth a warning and not a failure: the
     /// session is still useful without it, and saying so beats refusing to start.
-    pub fn from_env() -> Self {
+    pub fn from_file() -> Self {
         let Some(path) = std::env::var("CP2CL_CARLIFE_FRAME")
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
         else {
+            tracing::warn!(
+                "[cl] CP2CL_INPUT=file, but CP2CL_CARLIFE_FRAME names no file; \
+                 sending heartbeats only"
+            );
             return Self::None;
         };
         match std::fs::read(&path) {
@@ -111,26 +119,6 @@ impl Frames {
     }
 }
 
-/// How the car's authentication challenge is handled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthPolicy {
-    /// Say nothing. The first fallback: it is the only one that costs nothing
-    /// and it is what the plan says to try before anything else.
-    Ignore,
-    /// Reply as though the challenge could not be met, which is what the guide
-    /// prescribes for a device whose version is too old for it.
-    Empty,
-}
-
-impl AuthPolicy {
-    pub fn from_env() -> Self {
-        match std::env::var("CP2CL_CARLIFE_AUTH").as_deref() {
-            Ok(value) if value.eq_ignore_ascii_case("empty") => Self::Empty,
-            _ => Self::Ignore,
-        }
-    }
-}
-
 /// Runs one session until the car goes away.
 ///
 /// `carplay` is told `true` the first time the car has been given our device
@@ -138,17 +126,29 @@ impl AuthPolicy {
 /// somewhere to hand its streams — and `false` once, when the session ends for
 /// any reason. On the board that switch is what starts and stops the whole
 /// CarPlay half; see `main`.
-pub async fn run<S, F>(
-    stream: S,
-    frames: &Frames,
-    cfg: &Config,
-    auth: AuthPolicy,
-    carplay: &mut F,
-) -> Result<()>
+pub async fn run<S, F>(stream: S, frames: &Frames, cfg: &Config, carplay: &mut F) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     F: FnMut(bool),
 {
+    // A session is what drains the bridge, so it takes the receiving half for as
+    // long as it runs. The car unplugged and plugged back in is a new session and
+    // a new call to this function, which is why the half is given back on the way
+    // out rather than dropped with everything else.
+    let (mut video, source) = match frames {
+        Frames::Live(outlet) => match outlet.take_receiver() {
+            Some(rx) => (Some(rx), Source::Live),
+            None => {
+                tracing::warn!(
+                    "[cl] the video channel is already being read; sending heartbeats only"
+                );
+                (None, Source::None)
+            }
+        },
+        Frames::Still(still) => (None, Source::Still(still.clone())),
+        Frames::None => (None, Source::None),
+    };
+
     // Reads are their own task. A frame can be six hundred kilobytes and the
     // video tick fires while one is arriving, so the read cannot live inside a
     // `select!` that would drop it half way and lose the bytes it had taken.
@@ -172,8 +172,8 @@ where
     let mut session = Session {
         writer,
         cfg,
-        frames,
-        auth,
+        source,
+        channel_touched: None,
         agreed: None,
         started_at: None,
         next_tick: Instant::now(),
@@ -195,6 +195,20 @@ where
                 // channel is closed, which only happens here.
                 None => break Ok(()),
             },
+            // A picture from the CarPlay side, written straight through. It is
+            // not put on the tick: the phone's encoder decides how often frames
+            // come, and holding them back to a schedule of our own would only
+            // add delay.
+            access_unit = recv_video(&mut video) => match access_unit {
+                Some(access_unit) => {
+                    if let Err(e) = session.send_video(access_unit).await {
+                        break Err(e);
+                    }
+                }
+                // The CarPlay side has gone, taking its frames with it. The
+                // heartbeats are what is left to keep the channel alive.
+                None => video = None,
+            },
             // Only a tick moves the schedule forward, so a busy stream of
             // messages cannot starve the video channel.
             _ = tokio::time::sleep_until(deadline) => {
@@ -207,6 +221,9 @@ where
     };
 
     reading.abort();
+    if let (Some(rx), Frames::Live(outlet)) = (video, frames) {
+        outlet.return_receiver(rx);
+    }
     if session.up {
         carplay(false);
         tracing::info!("[cl] the session is over; the CarPlay side goes with it");
@@ -221,11 +238,32 @@ enum ChunkOrEnd {
     Failed(std::io::Error),
 }
 
+/// Where the pictures come from, holding everything the session needs to know
+/// about it: the receiving half is not here, because it belongs to the `select!`.
+enum Source {
+    None,
+    Still(Vec<u8>),
+    Live,
+}
+
+/// The next access unit from the CarPlay side, or never if there is no CarPlay
+/// side. Waiting on a future that never resolves is what keeps the branch out of
+/// the way without a second code path in the loop.
+async fn recv_video(video: &mut Option<mpsc::Receiver<Vec<u8>>>) -> Option<Vec<u8>> {
+    match video {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 struct Session<'a, W> {
     writer: W,
     cfg: &'a Config,
-    frames: &'a Frames,
-    auth: AuthPolicy,
+    source: Source,
+    /// When the video channel last carried anything at all. With pictures
+    /// arriving on their own clock, this is what decides whether the heartbeat
+    /// still has a job to do.
+    channel_touched: Option<Instant>,
     /// What the car asked for and what we agreed to, once it has asked.
     agreed: Option<proto::VideoEncoderInfo>,
     /// When the encoder started, which is what the video channel's timestamps
@@ -303,23 +341,11 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             }
             HU_AUTHEN_REQUEST => {
                 let challenge = proto::decode_authen_request(&message.body).unwrap_or_default();
+                tracing::warn!("[cl] the car asked us to authenticate with {challenge:?}");
                 tracing::warn!(
-                    "[cl] the car asked us to authenticate with {challenge:?}"
+                    "[cl] it is not answered — the key that would answer it belongs to the \
+                     phone, not to us. If the car insists, this is where it disconnects"
                 );
-                match self.auth {
-                    AuthPolicy::Ignore => tracing::warn!(
-                        "[cl] it is not answered — the key that would answer it belongs to the \
-                         phone, not to us. If the car insists, this is where it disconnects"
-                    ),
-                    AuthPolicy::Empty => {
-                        let body = proto::authen_response("");
-                        self.send(MD_AUTHEN_RESPONSE, &body).await?;
-                        tracing::warn!(
-                            "[cl] it was answered with an empty value, which the guide gives as \
-                             the answer for a version too old to be authenticated"
-                        );
-                    }
-                }
             }
             HU_AUTHEN_RESULT => {
                 let passed = proto::decode_authen_result(&message.body).unwrap_or(false);
@@ -363,8 +389,12 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             }
             HU_VIDEO_ENCODER_START => {
                 tracing::info!("[cl] the car started the encoder; video begins");
-                self.started_at = Some(Instant::now());
-                self.next_tick = Instant::now();
+                let now = Instant::now();
+                self.started_at = Some(now);
+                // The start itself is what the car hears next, so the first
+                // heartbeat is only owed if no picture arrives within a period.
+                self.channel_touched = Some(now);
+                self.next_tick = now;
             }
             HU_VIDEO_ENCODER_PAUSE | HU_VIDEO_ENCODER_RESET => {
                 tracing::info!("[cl] the car stopped the encoder");
@@ -442,21 +472,51 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             // still alive, because it is what notices when that changes.
             return Ok(());
         };
-        match &self.frames {
-            Frames::Still(still) => {
+        match &self.source {
+            Source::Still(still) => {
                 let elapsed = started_at.elapsed().as_millis() as u32;
                 let still = still.clone();
                 self.send_frame(VIDEO_DATA, elapsed, &still).await
             }
-            Frames::None => self.send(VIDEO_HEARTBEAT, &[]).await,
+            // Pictures arrive on the phone's own clock, so there is nothing for
+            // the tick to send while they do. A heartbeat goes out once they
+            // stop, which is what tells the car the channel is still ours.
+            Source::Live => {
+                let idle = self
+                    .channel_touched
+                    .map_or(true, |touched| touched.elapsed() >= HEARTBEAT);
+                if idle {
+                    self.channel_touched = Some(Instant::now());
+                    self.send(VIDEO_HEARTBEAT, &[]).await
+                } else {
+                    Ok(())
+                }
+            }
+            Source::None => self.send(VIDEO_HEARTBEAT, &[]).await,
         }
     }
 
+    /// One access unit from the CarPlay side, on the video channel.
+    ///
+    /// A frame that arrives before the car has started the encoder, or while it
+    /// has it paused, is dropped rather than queued: the car is not expecting
+    /// pictures then, and one held back would arrive attached to a timestamp
+    /// measured from a start that has since been reset.
+    async fn send_video(&mut self, access_unit: Vec<u8>) -> Result<()> {
+        let Some(started_at) = self.started_at else {
+            return Ok(());
+        };
+        let timestamp_ms = started_at.elapsed().as_millis() as u32;
+        self.channel_touched = Some(Instant::now());
+        self.send_frame(VIDEO_DATA, timestamp_ms, &access_unit).await
+    }
+
     /// How long until the next tick: a frame's worth of time when there is a
-    /// picture to send and a period has been agreed, otherwise the heartbeat's.
+    /// picture to send on a schedule and one has been agreed, otherwise the
+    /// heartbeat's.
     fn period(&self) -> Duration {
-        match (&self.frames, self.started_at, self.agreed) {
-            (Frames::Still(_), Some(_), Some(agreed)) if agreed.frame_rate > 0 => {
+        match (&self.source, self.started_at, self.agreed) {
+            (Source::Still(_), Some(_), Some(agreed)) if agreed.frame_rate > 0 => {
                 Duration::from_millis(1000 / agreed.frame_rate as u64)
             }
             _ => HEARTBEAT,
@@ -484,6 +544,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sink::{MediaSink, StreamEvent};
     use std::sync::{Arc, Mutex};
     use tokio::io::DuplexStream;
 
@@ -576,7 +637,7 @@ mod tests {
             // Dropping the pipe is the car going away.
         });
 
-        run(device, &Frames::None, &cfg, AuthPolicy::Ignore, &mut carplay)
+        run(device, &Frames::None, &cfg, &mut carplay)
             .await
             .expect("the session ends cleanly");
         car.await.unwrap();
@@ -600,7 +661,7 @@ mod tests {
         });
 
         let still = Frames::Still(vec![0x00, 0x00, 0x00, 0x01, 0x65]);
-        run(device, &still, &cfg, AuthPolicy::Ignore, &mut carplay)
+        run(device, &still, &cfg, &mut carplay)
             .await
             .expect("the session ends cleanly");
         car.await.unwrap();
@@ -620,7 +681,7 @@ mod tests {
         });
 
         let still = Frames::Still(vec![0x00, 0x00, 0x00, 0x01, 0x65]);
-        run(device, &still, &cfg, AuthPolicy::Ignore, &mut carplay)
+        run(device, &still, &cfg, &mut carplay)
             .await
             .expect("the session ends cleanly");
         car.await.unwrap();
@@ -640,31 +701,75 @@ mod tests {
             car.expect_silence(Duration::from_millis(500)).await;
         });
 
-        run(device, &Frames::None, &cfg, AuthPolicy::Ignore, &mut carplay)
+        run(device, &Frames::None, &cfg, &mut carplay)
             .await
             .expect("the session ends cleanly");
         car.await.unwrap();
     }
 
     #[tokio::test]
-    async fn the_second_fallback_answers_the_challenge_with_an_empty_value() {
+    async fn a_frame_from_the_carplay_side_goes_out_as_it_arrives() {
         let cfg = Config::from_env();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
 
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
-            let mut challenge = Vec::new();
-            proto::put_str(&mut challenge, 1, "A_B");
-            car.send(HU_AUTHEN_REQUEST, &challenge).await;
-            let answer = car.expect(MD_AUTHEN_RESPONSE).await;
-            assert!(answer.body.is_empty(), "an empty value is no bytes at all");
+            car.handshake(asked()).await;
+            car.start_the_encoder().await;
+            let _ = started_tx.send(());
+            let first = car.expect(VIDEO_DATA).await;
+            assert_eq!(first.body, vec![0x00, 0x00, 0x00, 0x01, 0x41]);
+            assert!(first.timestamp_ms.is_some());
         });
 
-        run(device, &Frames::None, &cfg, AuthPolicy::Empty, &mut carplay)
+        // What the CarPlay side would push, once the car is ready for it. The
+        // pause is not slack: the session has to have read START and marked the
+        // encoder running, or the frame is dropped on arrival, the same way it
+        // would be from a phone that sent one too early.
+        let pushing = tokio::spawn(async move {
+            let _ = started_rx.await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            outlet.video().push(StreamEvent::VideoFrame {
+                keyframe: false,
+                data: vec![0x00, 0x00, 0x00, 0x01, 0x41],
+            });
+        });
+
+        run(device, &frames, &cfg, &mut carplay)
             .await
             .expect("the session ends cleanly");
         car.await.unwrap();
+        pushing.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_video_channel_is_given_back_when_the_session_ends() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.handshake(asked()).await;
+            // Dropping the pipe is the car going away.
+        });
+
+        run(device, &frames, &cfg, &mut carplay)
+            .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+
+        // The next session after the car is plugged back in gets a receiver that
+        // still works, which means the first one was handed back rather than
+        // dropped with the session.
+        let rx = outlet.take_receiver().expect("it was handed back");
+        outlet.return_receiver(rx);
     }
 
     #[tokio::test]
@@ -682,7 +787,7 @@ mod tests {
             car.expect_silence(Duration::from_millis(300)).await;
         });
 
-        run(device, &Frames::None, &cfg, AuthPolicy::Ignore, &mut carplay)
+        run(device, &Frames::None, &cfg, &mut carplay)
             .await
             .expect("the session ends cleanly");
         car.await.unwrap();
