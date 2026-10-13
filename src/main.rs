@@ -215,6 +215,15 @@ async fn main() -> Result<()> {
             Input::File => carlife::session::Frames::from_file(),
         };
         tracing::info!("[cp2cl] CarLife is on; the CarPlay side waits for the car");
+        // Lending the gadget means taking down the link this program is usually
+        // driven over, and the shell it was started from goes down with it. The
+        // hangup has to be held off before the gadget is touched: delivered
+        // between the unbind and the bind, it would end the process with the
+        // gadget left off the controller, and the board would have to be
+        // replugged to be reached again.
+        if let Err(e) = hold_hangups_off() {
+            tracing::warn!("[cp2cl] a hangup will not be held off: {e}");
+        }
         // In the background, because the two sides are each other's condition:
         // this task is what opens the gate, and the watcher below is the only
         // thing that acts on it. Waiting for `serve` to return here would leave
@@ -223,7 +232,10 @@ async fn main() -> Result<()> {
         let alone = carplay.clone();
         tokio::spawn(async move {
             if let Err(e) = carlife::serve(carried, &frames, &mut report).await {
-                tracing::error!("[cp2cl] CarLife stopped: {e}");
+                // `{e:#}` and not `{e}`: the outer message says what we were
+                // doing and the causes under it hold the errno, which is the
+                // part that says why.
+                tracing::error!("[cp2cl] CarLife stopped: {e:#}");
                 tracing::warn!("[cp2cl] carrying on with the CarPlay side on its own");
                 let _ = alone.send(true);
             }
@@ -272,4 +284,21 @@ fn mfi_signer(cfg: &Config) -> Result<Box<dyn AuthCoprocessor + Send>> {
             Ok(Box::new(NoCoprocessor))
         }
     }
+}
+
+/// Keeps the program alive when the link it is driven over goes down with the
+/// gadget it lends.
+///
+/// Nothing is done with the signal — the point is that its default action, which
+/// is to end the process, does not happen. The handler is installed here rather
+/// than in a spawned task so that it is in place before the gadget is touched.
+#[cfg(target_os = "linux")]
+fn hold_hangups_off() -> std::io::Result<()> {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut hangup = signal(SignalKind::hangup())?;
+    tokio::spawn(async move {
+        while hangup.recv().await.is_some() {}
+    });
+    Ok(())
 }
