@@ -1,0 +1,6 @@
+# The board's binary is static on purpose: it carries its own C library, so the
+# system it lands on can be glibc or musl without our caring. See README,
+# "Cross-compiling for the board". Stated rather than left to the target's
+# default, because this is the property the package depends on.
+[target.armv7-unknown-linux-musleabihf]
+rustflags = ["-C", "target-feature=+crt-static"]
