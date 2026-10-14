@@ -128,7 +128,7 @@ v4.14 **没有** `FUNCTIONFS_CONFIG0_SETUP` / configfs 的 `control_config`（�
 - 描述符由用户态在 ffs 的 ep0 上写（`usb_functionfs_descs_head_v2`，magic=3，flags 里带 `ALL_CTRL_RECIP`）。  
   在 `FUNCTIONFS_DISABLE` 之后可以重写，所以「先手机形态、后 accessory 形态」不需要两套 ffs 实例。
 - `idVendor` / `idProduct` / `bcdDevice` / 字符串是 **configfs 属性**（`/sys/kernel/config/usb_gadget/<g>/…`），  
-  不归 ffs 管；改完靠 `echo "" > UDC; echo musb-hdrc.4.auto > UDC` 触发真正的重新枚举。
+  不归 ffs 管；它们在开机脚本里定死为 accessory 身份 `18d1:2d00`，一次枚举成型（§2.5）。
 - accessory 形态的接口取值：CarLifePort 的主机侧**只认 `class 0xff && subclass 0xff`**（`link/aoa.c:496-502`，  
   并注释说明 adb 是 subclass `0x42`）。我们不知道 MBUX 要哪一组，三个候选按顺序试：  
   `0xff/0xff/0x00`、`0xff/0x00/0x00`、`0xff/0x42/0x01`。端点地址也按 CarLifePort 实测的  
@@ -141,10 +141,11 @@ v4.14 **没有** `FUNCTIONFS_CONFIG0_SETUP` / configfs 的 `control_config`（�
 代价是描述符里多一个接口，需要实测车机是否介意（列入 §8 风险 6）。备选是给 ECM 单独一个 configuration，但那要求  
 车机自己选配置，不可控。
 
-**加函数的那一刻链路会断。** configfs 不允许改一个已经绑定到 UDC 的 gadget，所以 `gadget.rs` 的做法是  
-「解绑 UDC → 加 ffs 函数与链接 → 挂 functionfs → 绑回 UDC」，中间有几秒枚举空窗。start 时断一次、`Drop`  
-时再断一次（换绑原 UDC 并还原 VID/PID）。⇒ **在板子上靠 SSH 调试时，启动 cp2cl 的那条会话会掉**，要连回来。  
-`CP2CL_CARLIFE_VIDPID=none` 只是不改 VID/PID，换绑本身省不掉。
+**gadget 由开机脚本组成一次，运行期没有改动它的步骤。** configfs 不允许改一个已绑定到 UDC 的 gadget，  
+所以「加 ffs 函数与配置链接 → 挂 functionfs → 绑 UDC」整串都发生在开机：`usb-gadget.sh` 组 gadget，  
+`dev-usb-ffs-carlife.mount` 挂实例，`carlife.socket` 用 `ListenUSBFunction=` 打开 ep0 并由 systemd 在服务  
+启动前写入描述符，`usb-bind.sh` 绑 UDC。程序只拿到 ep0/ep1/ep2 三个 fd，不碰 configfs、不经手 VID/PID ⇒  
+**重启 `cp2cl.service` 不影响接口，管理链路不会掉**。完整步骤见 `README.md`「Setting the board up」。
 
 ### 2.6 USB 帧格式
 
@@ -451,9 +452,9 @@ Mac 是 host、Duo2 是 device，拓扑与「车机 ↔ 我们的设备」完全
 
 ### Phase 0 — 事实与设施（只读 + 搭台子）
 
-- `0.1` 板子侧把 §2.2 之外的三件事验掉：**ffs 是否接受 `ALL_CTRL_RECIP` flag**（写描述符头看是否 `EINVAL`）、  
-  **UDC 解绑/绑定能否稳定重枚举**、**ECM 与 ffs 同 config 是否都正常**。〔**未做**——代码已按「接受」写，这三条  
-  第一次上板就是它们的验收，见 §5.1〕
+- `0.1` 板子侧把 §2.2 之外的三件事验掉：**ffs 是否接受 `ALL_CTRL_RECIP` flag**〔**已验**：66 B 的 v2 头被接受〕、  
+  **ECM 与 ffs 同 config 是否都正常**〔**未做**——同 config 由开机脚本组成，验收要真车〕、  
+  **UDC 解绑/绑定能否稳定重枚举**〔**不需要**：接口在开机时组成一次，运行期没有解绑步骤，见 §2.5〕
 - `0.2` Mac 侧把假车机跑起来，确认它能挑到 Duo2 的 gadget（先用一个最简单的 ffs gadget 当靶子）。〔**未做**〕
 - `0.3` 用 Pixel 7a 录一份 MD 侧参考报文（§5.2），归纳出「必须发的消息」清单与字段取值。〔**未做**——Phase 2 是  
   按指南 + `CarLifeVehicleLib` 的常量写的，不依赖录音；但录音对 Phase 3/4 逐字段对账仍是最快的路〕
@@ -465,15 +466,17 @@ Mac 是 host、Duo2 是 device，拓扑与「车机 ↔ 我们的设备」完全
 
 `src/carlife/gadget.rs`（整模块 `#[cfg(target_os = "linux")]`）：
 
-- **借 gadget 而非自建**：板子上已有提供 ECM 管理链路的 gadget，configfs 不允许改已绑定的配置 ⇒  
-  `Rig::prepare()` 先解绑 UDC，加 `functions/ffs.<instance>` 与配置链接，`mount -t functionfs`；  
-  `Rig::bind()` 在有描述符之后再绑回去。`Drop` 里解绑 → 删链接/目录 → 还原 `idVendor`/`idProduct` →  
-  `umount` → 重绑原 UDC，把管理链路还回来。
-- **写描述符必须在绑 UDC 之前**（`functionfs_bind` 要求 `FFS_ACTIVE`）：v2 头 `magic/length/flags/fs_count/hs_count`，  
-  flags 含 `FUNCTIONFS_ALL_CTRL_RECIP`（64），FS 与 HS 各三个描述符。端点文件按描述符顺序命名，  
-  `ep1` = 车机→我们、`ep2` = 我们→车机；两个文件都按读写打开，方向由哪一侧的调用成功决定。
+- **接口由板子提供，程序只用**：gadget（ECM + ffs）在开机脚本里组成，`carlife.socket` 用  
+  `ListenUSBFunction=` 打开 ep0 并由 systemd 在服务启动前写入描述符，`usb-bind.sh` 绑 UDC ⇒  
+  `gadget.rs` 里没有 configfs、没有 mount、没有 bind，只有三个继承来的 fd（`LISTEN_FDS` +  
+  `readlink /proc/self/fd/N` 认名字，所以到达顺序不相干）。
+- **注册与绑定是两步**（`functionfs_bind` 要求 `FFS_ACTIVE`）：描述符 blob 与 strings blob 都写进 ep0  
+  之后实例才 ACTIVE，绑 UDC 才能成功。v2 头 `magic/length/flags/fs_count/hs_count`，flags 含  
+  `FUNCTIONFS_ALL_CTRL_RECIP`（64），FS 与 HS 各三个描述符；**两个 blob 的字节在 `README.md` 里给出**。  
+  端点文件按描述符地址命名，`ep1` = 车机→我们、`ep2` = 我们→车机；两个文件都按读写打开，方向由  
+  哪一侧的调用成功决定。
 - **51/52/53 全部应答**（路径 A 用不到也照答），每个控制请求先打一行 info，字符串内容一并打印。
-- 身份换成 `18d1:2d00`；`CP2CL_CARLIFE_VIDPID=none` 可跳过换 ID（macOS 侧 `en15` 的静态配置就不会丢）。
+- 身份（`18d1:2d00`）在开机脚本里定死，运行期没有改它的步骤。
 
 **验收**：`dist/aoa-probe --send-proto-version` 能收到我们的回包；`dist/carlife-link --list` 能看到设备。
 
@@ -598,10 +601,8 @@ ffmpeg -f lavfi -i testsrc=size=1280x720:rate=30 -frames:v 1 -c:v libx264 \
 **板子上（Phase 0）**
 
 ```sh
-# ffs 是否接受 ALL_CTRL_RECIP（flags=64）：写描述符头，看是否 EINVAL
-# UDC 解绑/绑定是否稳定重枚举
-echo "" > /sys/kernel/config/usb_gadget/<g>/UDC && echo musb-hdrc.4.auto > /sys/kernel/config/usb_gadget/<g>/UDC
-# ECM 与 ffs 同 config：Mac 侧 ifconfig 看 en15 是否照旧拿到 172.16.0.2
+# ffs 是否接受 ALL_CTRL_RECIP（flags=64）：写描述符头，看是否 EINVAL    〔已验：66 B 的 v2 头被接受〕
+# ECM 与 ffs 同 config：Mac 侧 ifconfig 看 en15 是否照旧拿到 172.16.0.2  〔未做：现在是开机脚本组成同 config〕
 ```
 
 **假车机上（Phase 1–3）**
