@@ -250,8 +250,17 @@ impl Usb {
         // being used, and so the tree below can be removed at all.
         let _ = fs::write(root.join("UDC"), b"\n");
         unmount_functionfs();
-        remove_tree(&root)?;
-        fs::remove_dir(&root).with_context(|| format!("removing {}", root.display()))?;
+        empty(&root)?;
+        // What has to work: a gadget takes the groups configfs made for it with
+        // it, so this is the one removal whose failure means something is still
+        // in the way, and the one that has to be reported where it happens.
+        fs::remove_dir(&root).with_context(|| {
+            format!(
+                "removing {}: a gadget goes only once everything in it is gone, and \
+                 something this program left behind is not",
+                root.display()
+            )
+        })?;
         tracing::debug!("[cl-usb] took down the gadget an earlier run left");
         Ok(())
     }
@@ -358,12 +367,20 @@ fn unmount_functionfs() {
     }
 }
 
-/// Empties a configfs directory, so that the directory itself can be removed.
+/// Empties a configfs directory of everything that can be taken out of it.
 ///
-/// Only directories and links can be removed; the attributes beside them — and
+/// Only links and directories can be removed; the attributes beside them — and
 /// configfs is mostly attributes — go with the directory that holds them, and an
 /// unlink of one is refused.
-fn remove_tree(path: &Path) -> Result<()> {
+///
+/// Not every directory can be removed either. A gadget has four configfs made
+/// for it — `functions`, `configs`, `strings`, `os_desc` — and every config has
+/// a `strings` of its own; `configfs_rmdir` answers `EPERM` for anything it made
+/// itself, and a function may have an `os_desc` of the same kind. So a refused
+/// rmdir is not reported: those are not being left behind, they go when the
+/// directory holding them does. A refusal that does matter leaves a directory in
+/// the way of the rmdir `clear` ends with, and that one says so.
+fn empty(path: &Path) -> Result<()> {
     for entry in fs::read_dir(path).with_context(|| format!("reading {}", path.display()))? {
         let entry = entry.with_context(|| format!("reading {}", path.display()))?;
         let child = entry.path();
@@ -371,8 +388,10 @@ fn remove_tree(path: &Path) -> Result<()> {
             .file_type()
             .with_context(|| format!("reading the type of {}", child.display()))?;
         if kind.is_dir() {
-            remove_tree(&child)?;
-            fs::remove_dir(&child).with_context(|| format!("removing {}", child.display()))?;
+            empty(&child)?;
+            if let Err(e) = fs::remove_dir(&child) {
+                tracing::debug!("[cl-usb] {} stays for now: {e}", child.display());
+            }
         } else if kind.is_symlink() {
             fs::remove_file(&child).with_context(|| format!("removing {}", child.display()))?;
         }
