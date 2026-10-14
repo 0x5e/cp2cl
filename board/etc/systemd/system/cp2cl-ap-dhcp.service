@@ -1,0 +1,20 @@
+[Unit]
+Description=cp2cl DHCP server for the Wi-Fi AP (wlan0)
+Requires=cp2cl-ap.service
+After=cp2cl-ap.service
+
+[Service]
+Type=simple
+# The AP is an isolated subnet with no upstream: advertise the board as the
+# router but suppress the DNS option (nothing serves DNS here).
+ExecStart=/usr/sbin/dnsmasq --keep-in-foreground \
+--interface=wlan0 --bind-interfaces \
+--dhcp-range=192.168.4.10,192.168.4.100,255.255.255.0,12h \
+--dhcp-option=3,192.168.4.1 \
+--dhcp-option=6 \
+--port=0
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+[Unit]
+Description=cp2cl Wi-Fi AP on wlan0 (hostapd)
+Documentation=man:hostapd(8)
+After=sysinit.target
+Before=cp2cl-ap-dhcp.service
+
+[Service]
+Type=forking
+PIDFile=/run/hostapd-cp2cl.pid
+ExecStartPre=/sbin/iw dev wlan0 set power_save off
+ExecStartPre=/sbin/ip addr replace 192.168.4.1/24 dev wlan0
+ExecStart=/usr/sbin/hostapd -B -P /run/hostapd-cp2cl.pid /etc/hostapd/hostapd.conf
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
