@@ -3,20 +3,25 @@
 //!
 //! The phone is not simulated, only its place on the wire is. A car asks the
 //! device for a CarLife session and never the other way round, so everything
-//! here reacts: `gadget` answers the control requests the car sends over the
-//! interface it is handed, `session` walks the conversation that follows, `frame`
-//! and `proto` are the two layers the messages are carried in.
+//! here reacts: `usb` composes the device this program presents and `gadget`
+//! answers what then arrives on it, `session` walks the conversation that
+//! follows, `frame` and `proto` are the two layers the messages are carried in,
+//! and `desc` is the shape of the device as a host reads it.
 //!
-//! `frame`, `proto` and `session` are plain code with no USB in them, which is
-//! what lets them be tested against an in-memory pipe. `gadget` is the only part
-//! that needs the board, and the only part that is Linux-only.
+//! `desc`, `frame`, `proto` and `session` are plain code with no USB in them,
+//! which is what lets them be tested against an in-memory pipe. `usb` and
+//! `gadget` are the two that need the board, and the only two that are
+//! Linux-only.
 
+pub mod desc;
 pub mod frame;
 pub mod proto;
 pub mod session;
 
 #[cfg(target_os = "linux")]
 pub mod gadget;
+#[cfg(target_os = "linux")]
+pub mod usb;
 
 #[cfg(target_os = "linux")]
 pub use gadget::run as serve;

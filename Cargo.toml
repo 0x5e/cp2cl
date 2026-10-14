@@ -54,6 +54,10 @@ hex = "0.4"
 
 thiserror = "1"
 anyhow = "1"
+# Mounting and unmounting the FunctionFS instance the CarLife interface runs on.
+# Both are one syscall each, and the program has to do them itself: the instance
+# is composed, and taken down, by this process. See src/carlife/usb.rs.
+libc = "0.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }

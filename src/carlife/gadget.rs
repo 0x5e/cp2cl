@@ -1,108 +1,119 @@
-//! The car's half of the wire: the AOA requests that arrive on the accessory
-//! interface, and the two bulk endpoints the CarLife session runs over.
+//! The car's half of the wire: the USB device this program presents, the AOA
+//! requests that arrive on it, and the two bulk endpoints the CarLife session
+//! runs over.
 //!
-//! Nothing here builds that interface. A systemd socket unit with
-//! `ListenUSBFunction=` opens the FunctionFS control endpoint, systemd writes the
-//! descriptors into it, and the endpoint files are handed to this process as file
-//! descriptors when it starts. README, "The accessory interface", has the board
-//! side of it.
+//! The device is this program's, start to finish. `usb` composes it and puts it
+//! on the controller; everything here reacts to what then arrives on it — which
+//! is what a head unit expects, since a car asks a device for a CarLife session
+//! and never the other way round.
 //!
-//! Three arrive, under the names FunctionFS gives them: `ep0`, the control
-//! endpoint, then the bulk pair. The descriptors ask for every control recipient
-//! (`FUNCTIONFS_ALL_CTRL_RECIP`), which is what makes the kernel hand a request
-//! addressed to the device to this program rather than turning it away — that is
-//! a property of the blob the board writes, and `PLAN-CL.md` records the source
-//! lines for it.
-//!
-//! The interface is up before this program is and stays up after it, which is the
-//! point of the arrangement: the link the board is usually reached over belongs to
-//! the same gadget, so anything that assembled the interface here would take that
-//! link down with it on every start.
-//!
-//! Only the accessory form is built. The car's guide describes a second route —
-//! enumerate as a phone, be asked to switch, and re-enumerate — but the car's own
-//! reference implementation on a real head unit skips straight past it, so a
-//! device that is already an accessory is the case to get working first.
+//! Two of the three requests a head unit sends are answered on the spot. The
+//! third asks the device to come back as an *accessory* rather than as the phone
+//! it found, and that is done by taking it off the bus and putting it back with
+//! the numbers and strings a switched phone carries: `usb::Usb::reidentify`. The
+//! interface itself does not change — a head unit takes the accessory's endpoints
+//! by position, and both forms have the same two.
 
 use std::fs;
 use std::io;
-use std::os::unix::io::{FromRawFd, RawFd};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::{Context as TaskContext, Poll};
+use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::mpsc;
 
 use crate::config::Config;
 
+use super::desc;
 use super::session::{self, Frames};
+use super::usb::{Endpoints, Usb};
 
-const ACCESSORY_GET_PROTOCOL: u8 = 51;
-const ACCESSORY_SEND_STRING: u8 = 52;
-const ACCESSORY_START: u8 = 53;
+/// How long to let the answer to `start accessory` finish leaving before the
+/// device is taken away. A control transfer with no data stage is completed by
+/// the controller, and disappearing in the same breath as the request arrives is
+/// a race the host can lose.
+const SETTLE: Duration = Duration::from_millis(100);
 
-/// The car's reference implementation accepts either, and version 2 is what a
-/// head unit of this age will have been written against.
-const ACCESSORY_VERSION: u16 = 2;
-
+/// What FunctionFS numbers its events. `uapi/linux/usb/functionfs.h`.
 const EVENT_ENABLE: u8 = 2;
 const EVENT_DISABLE: u8 = 3;
 const EVENT_SETUP: u8 = 4;
 
-const USB_DIR_IN: u8 = 0x80;
-
-/// What FunctionFS calls the endpoint files. For the addresses the board's blob
-/// declares these are `ep1` and `ep2`, and the names are what the inherited
-/// descriptors are identified by.
-const CONTROL: &str = "ep0";
-const FROM_CAR: &str = "ep1";
-const TO_CAR: &str = "ep2";
-
-/// The first descriptor systemd passes to a socket-activated service.
-const FIRST_LISTEN_FD: RawFd = 3;
-
 /// What the control endpoint tells the session loop.
 enum Event {
-    /// The car has enumerated us and the endpoints are usable.
+    /// The host has configured the device; the endpoints are usable.
     Enabled,
     /// It has gone.
     Disabled,
+    /// The device has been switched to the accessory form and is on its way back
+    /// to the host. What the host enumerates next is the same device under new
+    /// numbers.
+    Accessory,
 }
 
-/// Runs one CarLife session after another over the endpoints it was handed.
+/// What answering one request did.
+enum Answered {
+    Nothing,
+    Switched,
+}
+
+/// Runs one CarLife session after another over the device this program composed.
 ///
-/// Nothing is set up and nothing is taken down: the interface outlives this
-/// program in both directions, so a session that ends leaves it ready for the
-/// next car rather than needing to be rebuilt.
+/// The session outlives the form the device is in — the device stays up, and only
+/// what it calls itself changes — so a session that ends leaves it ready for the
+/// next head unit rather than needing to be rebuilt.
 pub async fn run<F>(cfg: Arc<Config>, frames: &Frames, carplay: &mut F) -> Result<()>
 where
     F: FnMut(bool),
 {
-    let endpoints = Endpoints::inherited()?;
-    let ep0 = tokio::fs::File::from_std(endpoints.control);
-    tracing::info!("[cl-usb] the accessory interface is up; waiting for the car to enumerate us");
+    let identity = desc::Identity::phone();
+    let (usb, endpoints) = Usb::open(&identity)?;
+    let Endpoints {
+        control,
+        from_car,
+        to_car,
+    } = endpoints;
+
+    tracing::info!("[cl-usb] waiting for a head unit to enumerate the device");
 
     let (events_tx, mut events_rx) = mpsc::channel(4);
-    let control = tokio::spawn(control_loop(ep0, events_tx));
+    // The endpoint files come out of `usb` as they came from the kernel, and are
+    // wrapped here: a read on one of them waits for the host, which is what
+    // tokio's blocking pool is for.
+    let controlling = tokio::spawn(control_loop(
+        usb,
+        identity,
+        tokio::fs::File::from_std(control),
+        events_tx,
+    ));
 
     while let Some(event) = events_rx.recv().await {
         match event {
-            Event::Enabled => match bulk(&endpoints.from_car, &endpoints.to_car) {
+            // A session runs in either form. A head unit that does the handshake
+            // gets one once it has enumerated the accessory; one that talks
+            // CarLife straight away gets one here. Until the car says the first
+            // thing on the channel, a session is silent, so the one that turns out
+            // not to be needed costs nothing.
+            Event::Enabled => match bulk(&from_car, &to_car) {
                 Ok(pair) => {
-                    tracing::info!("[cl-usb] the car has enumerated us; starting the session");
+                    tracing::info!("[cl-usb] the host has enumerated us; starting the session");
                     if let Err(e) = session::run(pair, frames, &cfg, carplay).await {
-                        tracing::warn!("[cl] the session ended badly: {e}");
+                        tracing::warn!("[cl] the session ended badly: {e:#}");
                     }
                 }
-                Err(e) => tracing::error!("[cl-usb] the endpoints are not usable: {e}"),
+                Err(e) => tracing::error!("[cl-usb] the endpoints are not usable: {e:#}"),
             },
-            Event::Disabled => tracing::info!("[cl-usb] the car has gone"),
+            Event::Disabled => tracing::info!("[cl-usb] the host has gone"),
+            Event::Accessory => {
+                tracing::info!("[cl-usb] the device is an accessory from here on")
+            }
         }
     }
 
-    control.abort();
+    controlling.abort();
     tracing::info!("[cl-usb] the control endpoint is gone");
     Ok(())
 }
@@ -112,7 +123,14 @@ where
 /// It owns the endpoint because it is also what answers on it: a setup event and
 /// the reply to it are two halves of the same exchange, and nothing else may
 /// interleave with them.
-async fn control_loop(mut ep0: tokio::fs::File, events: mpsc::Sender<Event>) -> io::Result<()> {
+async fn control_loop(
+    usb: Usb,
+    mut identity: desc::Identity,
+    mut ep0: tokio::fs::File,
+    events: mpsc::Sender<Event>,
+) {
+    let mut asked = desc::Asked::default();
+
     loop {
         // The whole event is twelve bytes: the eight of a `usb_ctrlrequest`, the
         // type, and three of padding. Read as bytes and unpacked by hand, so
@@ -120,7 +138,7 @@ async fn control_loop(mut ep0: tokio::fs::File, events: mpsc::Sender<Event>) -> 
         let mut raw = [0u8; 12];
         if let Err(e) = ep0.read_exact(&mut raw).await {
             tracing::debug!("[cl-usb] the control endpoint stopped reading: {e}");
-            return Ok(());
+            return;
         }
         match raw[8] {
             EVENT_ENABLE => {
@@ -130,8 +148,14 @@ async fn control_loop(mut ep0: tokio::fs::File, events: mpsc::Sender<Event>) -> 
                 let _ = events.send(Event::Disabled).await;
             }
             EVENT_SETUP => {
-                if let Err(e) = answer(&mut ep0, &raw).await {
-                    tracing::warn!("[cl-usb] a control request could not be answered: {e}");
+                match answer(&usb, &mut identity, &mut ep0, &mut asked, &raw).await {
+                    Ok(Answered::Switched) => {
+                        if events.send(Event::Accessory).await.is_err() {
+                            return;
+                        }
+                    }
+                    Ok(Answered::Nothing) => {}
+                    Err(e) => tracing::warn!("[cl-usb] a control request could not be answered: {e:#}"),
                 }
             }
             other => tracing::debug!("[cl-usb] control event {other}"),
@@ -139,127 +163,105 @@ async fn control_loop(mut ep0: tokio::fs::File, events: mpsc::Sender<Event>) -> 
     }
 }
 
-/// Answers one setup event, when there is an answer to give.
+/// Answers one setup event.
 ///
-/// Every request is reported whether or not it is understood: which ones a given
-/// head unit sends is not known yet, and a line per request is the cheapest way
-/// to find out. The ones that are understood are the three that ask a device to
-/// become an accessory.
-async fn answer(ep0: &mut tokio::fs::File, raw: &[u8; 12]) -> io::Result<()> {
-    let request_type = raw[0];
-    let request = raw[1];
-    let value = u16::from_le_bytes([raw[2], raw[3]]);
-    let index = u16::from_le_bytes([raw[4], raw[5]]);
-    let length = u16::from_le_bytes([raw[6], raw[7]]);
-    let direction = if request_type & USB_DIR_IN != 0 {
-        "in"
-    } else {
-        "out"
-    };
+/// Every request is reported, understood or not: which ones a given head unit
+/// sends is not settled, and a line per request is the cheapest way to find out.
+/// The data stage of a request that has one is always read, whatever the request
+/// is, because a device that ignores it leaves the host waiting.
+async fn answer(
+    usb: &Usb,
+    identity: &mut desc::Identity,
+    ep0: &mut tokio::fs::File,
+    asked: &mut desc::Asked,
+    raw: &[u8; 12],
+) -> Result<Answered> {
+    let setup = desc::Setup::decode(raw).ok_or_else(|| anyhow!("a setup event with no setup packet"))?;
     tracing::info!(
-        "[cl-usb] control request {request} {direction}, type {request_type:#04x}, value {value}, \
-         index {index}, length {length}"
+        "[cl-usb] control request {} {}, type {:#04x}, value {}, index {}, length {}",
+        setup.request,
+        setup.direction(),
+        setup.request_type,
+        setup.value,
+        setup.index,
+        setup.length
     );
 
-    match (request_type, request) {
-        // "What Android Open Accessory version do you speak?"
-        (0xc0, ACCESSORY_GET_PROTOCOL) => {
-            let reply = ACCESSORY_VERSION.to_le_bytes();
+    match setup.accessory() {
+        // "What version of the accessory protocol do you speak?"
+        Some(desc::Accessory::GetProtocol) => {
+            let reply = desc::version_reply();
             ep0.write_all(&reply).await?;
-            tracing::info!("[cl-usb] answered with AOA {ACCESSORY_VERSION}");
+            // Nothing may be left buffered: the host is sitting on a control
+            // transfer that this is the answer to.
+            ep0.flush().await?;
+            tracing::info!("[cl-usb] answered with AOA {}", desc::AOA_VERSION);
+            Ok(Answered::Nothing)
         }
-        // One of the six strings the host wants the device to report.
-        (0x40, ACCESSORY_SEND_STRING) => {
-            let mut text = vec![0u8; length as usize];
+        // One of the six strings the host wants the device to call itself.
+        Some(desc::Accessory::Identify { index }) => {
+            let mut text = vec![0u8; setup.length as usize];
             ep0.read_exact(&mut text).await?;
             tracing::info!(
                 "[cl-usb] identifier {index}: {:?}",
                 String::from_utf8_lossy(&text)
             );
+            asked.set(index, String::from_utf8_lossy(&text).into_owned());
+            Ok(Answered::Nothing)
         }
-        // "Switch to accessory mode and re-enumerate." There is nothing to do:
-        // this device only ever enumerates in that form, which is why the car's
-        // host side is expected to skip the whole handshake.
-        (0x40, ACCESSORY_START) => tracing::info!(
-            "[cl-usb] the host asked us to switch to accessory mode; we are already enumerated \
-             as one, so there is nothing to re-enumerate"
-        ),
-        _ => tracing::info!("[cl-usb] that one is not acted on"),
-    }
-    Ok(())
-}
-
-/// The three endpoints the socket unit opened, as they were handed over.
-struct Endpoints {
-    control: fs::File,
-    from_car: fs::File,
-    to_car: fs::File,
-}
-
-impl Endpoints {
-    /// Takes the descriptors systemd passed to this process.
-    ///
-    /// Which descriptor is which is asked of `/proc/self/fd` rather than taken
-    /// from the order they arrive in: the names FunctionFS gave the files are the
-    /// part that is ours to rely on.
-    fn inherited() -> Result<Self> {
-        let (mut control, mut from_car, mut to_car) = (None, None, None);
-
-        for fd in listen_fds()? {
-            // Safe: these are this process's own descriptors, passed by systemd
-            // and owned by nothing else. Anything unrecognised closes when its
-            // `File` goes out of scope at the end of this iteration.
-            let file = unsafe { fs::File::from_raw_fd(fd) };
-            match name_of(fd).as_deref() {
-                Some(CONTROL) => control = Some(file),
-                Some(FROM_CAR) => from_car = Some(file),
-                Some(TO_CAR) => to_car = Some(file),
-                _ => {}
+        // "Switch to accessory mode and re-enumerate."
+        Some(desc::Accessory::Start) => {
+            if identity.is_accessory() {
+                tracing::info!(
+                    "[cl-usb] the host asked us to switch to accessory mode; we are already one, \
+                     so there is nothing to re-enumerate"
+                );
+                return Ok(Answered::Nothing);
             }
+            switch(usb, identity, asked).await?;
+            Ok(Answered::Switched)
         }
-
-        let (Some(control), Some(from_car), Some(to_car)) = (control, from_car, to_car) else {
-            return Err(anyhow!(
-                "the interface handed over is not {CONTROL}, {FROM_CAR} and {TO_CAR}"
-            ));
-        };
-        Ok(Self {
-            control,
-            from_car,
-            to_car,
-        })
+        // Not one of the three. Where it carries data, the data is still read.
+        None => {
+            if setup.direction() == "out" && setup.length > 0 {
+                let mut dropped = vec![0u8; setup.length as usize];
+                ep0.read_exact(&mut dropped).await?;
+                tracing::info!(
+                    "[cl-usb] that one is not acted on; its {} bytes are dropped",
+                    setup.length
+                );
+            } else if setup.direction() == "in" {
+                // Nothing to send, and an unanswered request leaves the host
+                // waiting for it. A read while an incoming request is pending is
+                // how FunctionFS is told to refuse it, which is a stall — the
+                // answer USB has for a request a device does not implement.
+                let mut refused = [0u8; 1];
+                let _ = ep0.read(&mut refused).await;
+                tracing::info!("[cl-usb] that one is not acted on, and is refused");
+            } else {
+                tracing::info!("[cl-usb] that one is not acted on");
+            }
+            Ok(Answered::Nothing)
+        }
     }
 }
 
-/// The descriptors systemd passes to a socket-activated service.
+/// Switches the device to the accessory form.
 ///
-/// `$LISTEN_PID` has to name this process: the variables outlive the service and
-/// are inherited by whatever it goes on to start, so a program that inherited
-/// them rather than being handed them would find only its parent's. `$LISTEN_FDS`
-/// counts them, and they start at 3.
-fn listen_fds() -> Result<Vec<RawFd>> {
-    let pid = std::env::var("LISTEN_PID")
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok());
-    let count = std::env::var("LISTEN_FDS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0);
+/// What the host asked for is not a new device but the same one coming back as
+/// an accessory, which is the only way it can see a device it did not enumerate:
+/// off the bus, new numbers and the strings it just named, back on.
+async fn switch(usb: &Usb, identity: &mut desc::Identity, asked: &desc::Asked) -> Result<()> {
+    tokio::time::sleep(SETTLE).await;
 
-    if pid != Some(std::process::id()) || count == 0 {
-        return Err(anyhow!(
-            "nothing was handed over: this program is meant to be started by the socket unit \
-             that opens the endpoints, not by hand. See README, \"The accessory interface\""
-        ));
-    }
-    Ok((0..count as RawFd).map(|n| FIRST_LISTEN_FD + n).collect())
-}
-
-/// What an inherited descriptor points at, by the name FunctionFS gave the file.
-fn name_of(fd: RawFd) -> Option<String> {
-    let path = fs::read_link(format!("/proc/self/fd/{fd}")).ok()?;
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
+    let accessory = identity.accessory(asked);
+    usb.reidentify(&accessory).context("switching the device to its accessory form")?;
+    tracing::info!(
+        "[cl-usb] switched to an accessory ({}); the host will enumerate us again",
+        accessory.describe()
+    );
+    *identity = accessory;
+    Ok(())
 }
 
 /// A byte pipe over the two bulk endpoints, the shape `session` wants.
@@ -284,7 +286,7 @@ struct Bulk {
 impl AsyncRead for Bulk {
     fn poll_read(
         self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
+        cx: &mut TaskContext<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().from_car).poll_read(cx, buf)
@@ -294,40 +296,17 @@ impl AsyncRead for Bulk {
 impl AsyncWrite for Bulk {
     fn poll_write(
         self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
+        cx: &mut TaskContext<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.get_mut().to_car).poll_write(cx, buf)
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().to_car).poll_flush(cx)
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().to_car).poll_shutdown(cx)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::os::unix::io::AsRawFd;
-
-    #[test]
-    fn an_inherited_descriptor_is_named_by_the_file_it_points_at() {
-        // This is what makes the order the descriptors arrive in irrelevant.
-        let dir = std::env::temp_dir().join("cp2cl-name-of");
-        fs::create_dir_all(&dir).expect("a temporary directory can be made");
-        let path = dir.join(FROM_CAR);
-        fs::write(&path, b"").expect("a named file can be written");
-
-        let file = fs::File::open(&path).expect("a named file can be opened");
-        let named = name_of(file.as_raw_fd());
-        assert_eq!(named.as_deref(), Some(FROM_CAR));
-        drop(file);
-
-        let _ = fs::remove_file(&path);
-        let _ = fs::remove_dir(&dir);
     }
 }
