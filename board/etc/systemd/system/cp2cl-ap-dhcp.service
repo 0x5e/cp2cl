@@ -5,12 +5,18 @@ After=cp2cl-ap.service
 
 [Service]
 Type=simple
-# The AP is an isolated subnet with no upstream: advertise the board as the
-# router but suppress the DNS option (nothing serves DNS here).
+# The AP is an isolated subnet with no upstream: a client that joins it keeps the
+# default route it already had, and the board does not put itself in front of its
+# traffic. 192.168.4.1 is reached all the same — the leased address and netmask
+# give the client a route to this subnet, and a router is only the last resort.
+#
+# Both options are written with no value on purpose: that is what suppresses them.
+# Removing the line instead would restore dnsmasq's default, which is to advertise
+# itself — as the router, and as the DNS server that --port=0 means it is not.
 ExecStart=/usr/sbin/dnsmasq --keep-in-foreground \
 --interface=wlan0 --bind-interfaces \
 --dhcp-range=192.168.4.10,192.168.4.100,255.255.255.0,12h \
---dhcp-option=3,192.168.4.1 \
+--dhcp-option=3 \
 --dhcp-option=6 \
 --port=0
 Restart=on-failure
