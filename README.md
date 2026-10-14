@@ -487,7 +487,7 @@ board/install.sh
 | Unit | What it is |
 |---|---|
 | `cp2cl-ap.service` | hostapd on `wlan0`, and the address that interface carries: `192.168.4.1/24` |
-| `cp2cl-ap-dhcp.service` | dnsmasq for the access point: leases in `192.168.4.10`–`100`, and no router or DNS server advertised |
+| `cp2cl-ap-dhcp.service` | dnsmasq for the access point: leases in `192.168.4.2`–`100`, the lowest free address first, and no router or DNS server advertised |
 
 `hostapd.conf` is the one file the operator tunes — the SSID and passphrase are
 this board's — and `install.sh` writes it only when it is not there yet, so a
@@ -544,7 +544,7 @@ removing the line would restore dnsmasq's default of advertising itself. The DNS
 option is suppressed for a second reason: `--port=0` means nothing answers DNS here.
 
 **A DHCP range on the wrong subnet is silent.** `cp2cl-ap-dhcp.service` serves
-`192.168.4.10`–`100`; the address on the interface comes from the `ExecStartPre` of
+`192.168.4.2`–`100`; the address on the interface comes from the `ExecStartPre` of
 `cp2cl-ap.service`. dnsmasq accepts a range that does not sit on that interface's
 subnet and then serves nothing, saying so only in the journal. The two are one line
 apart in different files, so change them together.

@@ -10,12 +10,22 @@ Type=simple
 # traffic. 192.168.4.1 is reached all the same — the leased address and netmask
 # give the client a route to this subnet, and a router is only the last resort.
 #
+# The pool starts just above the board and is handed out upward: .1 is the board
+# itself and is not in the pool, so .2 is the first address a client can be given
+# and each client after it takes the next one. dnsmasq otherwise picks an address
+# by hashing the client's MAC address, which spreads clients across the range
+# rather than filling it from the bottom; the sequential option is what makes the
+# lowest free address the one that goes out. What that costs — a client can move
+# when its lease expires, instead of holding one address for good — does not
+# matter on a pool this small.
+#
 # Both options are written with no value on purpose: that is what suppresses them.
 # Removing the line instead would restore dnsmasq's default, which is to advertise
 # itself — as the router, and as the DNS server that --port=0 means it is not.
 ExecStart=/usr/sbin/dnsmasq --keep-in-foreground \
 --interface=wlan0 --bind-interfaces \
---dhcp-range=192.168.4.10,192.168.4.100,255.255.255.0,12h \
+--dhcp-range=192.168.4.2,192.168.4.100,255.255.255.0,12h \
+--dhcp-sequential-ip \
 --dhcp-option=3 \
 --dhcp-option=6 \
 --port=0
