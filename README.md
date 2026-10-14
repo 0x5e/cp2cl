@@ -50,14 +50,17 @@ different codecs.
 
 ## Requirements
 
-Bridge device:
+### Hardware requirements
 
 - Running Linux. The board this is developed against is a **NanoPi Duo2**,
   armv7 hard-float.
-- 1 USB OTG for the CarLife head unit, which is the host on that side. With
-  CarPlay taken wirelessly this is the only USB port the device needs.
-- 1 USB host for wired CarPlay, on a board that has a second controller.
+- 1 USB OTG for the CarLife head unit, which is the host on that side.
+- 1 USB host for wired CarPlay (optional).
 - WiFi + BLE for wireless CarPlay (optional).
+
+### System requirements
+
+<!-- TODO -->
 
 ## Build and run
 
@@ -80,7 +83,6 @@ other side of depends on where you are. All of them carry the same token:
 [cp2cl] airplay receiver listening on 52843
 [web] browser client: https://127.0.0.1:8080/?token=0
 [web] browser client on wlan0: https://192.168.4.1:8080/?token=0
-[web] browser client on usb0: https://172.16.0.1:8080/?token=0
 [web] accept the certificate warning once; WebCodecs needs HTTPS
 ```
 
@@ -118,7 +120,7 @@ Then, from the repository root:
 ```bash
 docker run --rm --platform linux/arm64 -u "$(id -u):$(id -g)" \
   -v "$PWD":/work -v cp2cl-cargo:/cargo \
-  cp2cl-armv7-builder cargo build --release --target armv7-unknown-linux-gnueabihf
+  cp2cl-armv7-builder cargo build --release --target armv7-unknown-linux-musleabihf
 ```
 
 `cp2cl-cargo` is a named volume holding the cargo cache, so only the first build
@@ -126,9 +128,22 @@ downloads anything. `-u` keeps the build products owned by you rather than by
 root. Use `cargo check` in place of `cargo build --release` to type-check the
 Linux-only `#[cfg]` branches — the only way to reach them from macOS.
 
-The result is `target/armv7-unknown-linux-gnueabihf/release/cp2cl`. It is not
-self-contained: `vendor/playport/web/dist` and `authentication/` are read
-relative to the working directory, so copy the tree, not just the file.
+**The binary is statically linked, and that is the point.** The target is musl
+rather than the board's glibc, and `.cargo/config.toml` asks for `+crt-static` on
+it, so the C library is part of the file: it runs on any armv7 Linux, whichever C
+library that system uses, without a `libc6` of its own. What a binary cannot carry
+is the architecture, named under [Hardware requirements](#hardware-requirements),
+and the kernel's USB gadget support — configfs, FunctionFS and a device controller
+— named under [The accessory interface](#the-accessory-interface). The one visible
+cost is name resolution — musl reads
+`/etc/resolv.conf` and `/etc/hosts` and knows nothing of `/etc/nsswitch.conf`, so
+nothing resolved through NSS or mDNS resolves here. Neither the CarPlay nor the
+CarLife path resolves a name.
+
+The result is `target/armv7-unknown-linux-musleabihf/release/cp2cl`. Copy it to
+the board and run it there; it reads `vendor/playport/web/dist` and
+`authentication/` relative to the working directory, and everything else comes
+from the environment — see [Running it on the board](#running-it-on-the-board).
 
 ### Why HTTPS, and what to do about the certificate
 
@@ -233,6 +248,7 @@ decode. `CP2CL_WEB_HEVC` sets the default, and the panel overrides it per sessio
 | Variable | Default | Meaning |
 |---|---|---|
 | `CP2CL_AUTH_DIR` | `./authentication` | MFi credentials |
+| `CP2CL_WEB_ROOT` | `./vendor/playport/web/dist` | the built browser client |
 | `CP2CL_WEB_ADDR` | `0.0.0.0:8080` | where the browser client is served. HTTPS is not part of it because there is no other option — WebCodecs needs a secure context — and `0.0.0.0` is every interface |
 | `CP2CL_WEB_TOKEN` | `0` | the token the page has to carry; fixed, so the URL is stable and short enough to type. Give it a real value before the port is reachable from anywhere but this LAN |
 | `CP2CL_WEB_WIDTH` / `CP2CL_WEB_HEIGHT` | `1280` / `720` | the web sink's screen: what the phone renders, until the display panel says otherwise. A CarLife head unit names its own width and height instead |
@@ -253,8 +269,12 @@ decode. `CP2CL_WEB_HEVC` sets the default, and the panel overrides it per sessio
 | `CP2CL_INPUT` | `cp` | what the CarLife video channel sends: `cp` is the CarPlay session, `file` is the file below, sent over and over |
 | `CP2CL_INPUT_FILE` | — | that file: an annex-B stream. A name that cannot be read falls back to heartbeats |
 
-On the board these live in `/etc/cp2cl.env`, which `cp2cl.service` reads, so
-applying a change is `systemctl restart cp2cl.service`.
+On the board every one of these is an environment variable of the process, because
+there is nothing else to read them from: the program has no configuration file, and
+is started by hand — see [Running it on the board](#running-it-on-the-board). The
+USB device is not a setting either: it is composed by the program, and what it is
+made of is in `src/carlife/desc.rs` — see [The accessory
+interface](#the-accessory-interface).
 
 ## Wireless CarPlay
 
@@ -321,14 +341,11 @@ topology matches the real thing — the Mac is the host, the board is the device
 so everything up to the picture can be exercised without one:
 
 ```bash
-# On the board. The settings live in a file, so applying them is a restart.
-cat >/etc/cp2cl.env <<'EOF'
-CP2CL_SINK=cl
-CP2CL_WIRELESS=1
-CP2CL_WIFI_SSID=<the network>
-CP2CL_WIFI_PASS=<its passphrase>
-EOF
-systemctl restart cp2cl.service && journalctl -u cp2cl -f
+# On the board, in the foreground. Ctrl-C ends the run and takes the device off
+# the bus with it.
+CP2CL_SINK=cl \
+CP2CL_WIRELESS=1 CP2CL_WIFI_SSID=<the network> CP2CL_WIFI_PASS=<its passphrase> \
+  ./cp2cl
 ```
 
 The video channel then carries the phone's frames, which needs both a phone and a
@@ -336,12 +353,7 @@ car session. To drive the channel with no CarPlay in the picture at all, point i
 at a file instead:
 
 ```bash
-cat >/etc/cp2cl.env <<'EOF'
-CP2CL_SINK=cl
-CP2CL_INPUT=file
-CP2CL_INPUT_FILE=/root/idr.h264
-EOF
-systemctl restart cp2cl.service && journalctl -u cp2cl -f
+CP2CL_SINK=cl CP2CL_INPUT=file CP2CL_INPUT_FILE=/root/idr.h264 ./cp2cl
 ```
 
 Any annex-B stream will do:
@@ -360,10 +372,14 @@ What to watch for, in the order it happens. The first line that does not appear
 is where it stopped:
 
 ```bash
-[cl-usb] the accessory interface is up; waiting for the car to enumerate us
+[cl-usb] waiting for a head unit to enumerate the device
 [cl-usb] control request 51 in, type 0xc0, value 0, index 0, length 2
 [cl-usb] answered with AOA 2
-[cl-usb] the car has enumerated us; starting the session
+[cl-usb] control request 52 out, type 0x40, value 0, index 0, length 5
+[cl-usb] identifier 0: "Baidu"                                 # and five more like it
+[cl-usb] control request 53 out, type 0x40, value 0, index 0, length 0
+[cl-usb] switched to an accessory (18d1:2d00 as Baidu / CarLife); the host will enumerate us again
+[cl-usb] the host has enumerated us; starting the session
 [cl] the car speaks CarLife 1.0
 [cl] the car has our device information; the session is up   # the gate opens here
 [cl] the car set VOICE_MIC = 0                               # whatever it asks for
@@ -371,7 +387,10 @@ is where it stopped:
 [cl] the car started the encoder; video begins
 ```
 
-`[cl]` is the session, `[cl-usb]` is the USB side under it. The other half of the
+`[cl]` is the session, `[cl-usb]` is the USB side under it. A head unit that
+skips the handshake — which is what the reference implementation does, and what a
+car does when it has already switched this device once — goes straight from
+`waiting for a head unit` to `the host has enumerated us`. The other half of the
 bridge says so too, and its two lines bracket the one above:
 
 ```bash
@@ -385,41 +404,47 @@ section's subject.
 
 ### The accessory interface
 
-The interface the car enumerates belongs to the gadget the board composes at
-boot — the same gadget that carries the ECM link the board is otherwise reached
-over — and it is handed to this program as open file descriptors when the program
-starts. That direction is the point of the arrangement. Composing the interface
-from inside the program would mean unbinding the gadget in order to change it, and
-the management link would go down with it on every start.
+The device a head unit enumerates is composed by this program when it starts and
+goes away with it. Nothing on the board is involved: the port is idle until `cp2cl`
+is running, and the shape a car finds on it is the program's. `src/carlife/desc.rs`
+holds the descriptors and the three requests, `src/carlife/usb.rs` composes the
+gadget in configfs, mounts the FunctionFS instance on `/dev/usb-ffs/carlife`,
+writes the descriptors into `ep0` and binds the gadget to the controller, and
+`src/carlife/gadget.rs` answers what then arrives on `ep0`.
 
-Three descriptors arrive, under the names FunctionFS gives the files: `ep0`, the
-control endpoint the car's AOA requests arrive on, then the two bulk endpoints the
-session runs over. Which descriptor is which is read from `/proc/self/fd` rather
-than assumed from the order they arrive in. The opening, the mounting and the
-binding belong to the units that start the program, which is also where the
-gadget, the controller and the instance are named.
+Three files are what the interface is, under the names FunctionFS gives them:
+`ep0`, the control endpoint the car's AOA requests arrive on, then the two bulk
+endpoints the session runs over. `ep1` is the one the host reads — this program
+writes there — and `ep2` the other way round. The order is not a matter of taste:
+a head unit takes the interface's endpoints by position, and reads the first one.
 
-A systemd socket unit with `ListenUSBFunction=` is what opens those files, and it
-holds them for as long as it is active, independently of the service. Starting or
-stopping `cp2cl.service` therefore leaves the interface, and the link, untouched.
+What a car finds first is a phone and not an accessory: `18d1:4ee1`, the pair an
+Android phone presents in file-transfer mode, with `Google` and `Android` as its
+strings. Nothing here transfers files — the pair is there so that a host which
+decides what it has found by number, or by manufacturer string, finds a phone,
+which is what a head unit looks for before it does any of this.
 
-### Setting the board up
+**The switch is not a flag, it is a new device.** `start accessory` cannot be
+answered by changing something in place: a host does not see a device it did not
+enumerate, so the gadget is unbound, its numbers and strings are rewritten —
+`18d1:2d00`, under the strings the car itself sent — and it is bound again. The
+endpoint files stay open across that, because FunctionFS holds them and the
+descriptors do not change, which is what lets the session carry on with nothing
+reopened. The one thing the program does not do is race the host: it waits 100 ms
+for the answer to leave the controller before the device goes.
 
-Everything here is done once. `configfs` lives in memory, so the gadget is
-composed again from these files at every boot and nothing survives a reboot by
-itself.
+**Two things are asked of the kernel, and neither is in a stock image by
+accident**: `CONFIG_USB_CONFIGFS` with `CONFIG_USB_CONFIGFS_F_FS` — FunctionFS —
+and a device controller, which is read from `/sys/class/udc` rather than named.
+The `FUNCTIONFS_ALL_CTRL_RECIP` flag in the descriptor header is what makes the
+three requests reach the program at all: without it the kernel answers
+device-addressed control requests itself and the program never sees one. That flag
+is also why no AOA gadget support is needed — nothing here is `g_android` or
+`USB_F_ACC`, and the three requests are answered in user space.
 
-**1. The two blobs systemd writes into `ep0`.** The descriptor blob is 66 bytes
-and the strings blob 16.
-
-```bash
-printf '\x03\x00\x00\x00\x42\x00\x00\x00\x43\x00\x00\x00\x03\x00\x00\x00\x03\x00\x00\x00\x09\x04\x00\x00\x02\xff\xff\x00\x00\x07\x05\x01\x02\x40\x00\x00\x07\x05\x82\x02\x40\x00\x00\x09\x04\x00\x00\x02\xff\xff\x00\x00\x07\x05\x01\x02\x00\x02\x00\x07\x05\x82\x02\x00\x02\x00' > /root/cp2cl/carlife.descriptors
-printf '\x02\x00\x00\x00\x10\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' > /root/cp2cl/carlife.strings
-```
-
-The descriptors are a `usb_functionfs_descs_head_v2` header followed by two
-copies of the same three descriptors, the first for full speed and the second for
-high speed:
+**The descriptors, since they are binary.** `desc::descriptors()` builds a
+`usb_functionfs_descs_head_v2` header followed by two copies of the same three
+descriptors, the first for full speed and the second for high speed:
 
 | Offset | Bytes | Meaning |
 |---|---|---|
@@ -429,245 +454,147 @@ high speed:
 | 12 | `03 00 00 00` | three descriptors follow for full speed |
 | 16 | `03 00 00 00` | three for high speed |
 | 20 | 9 | interface, class `ff`/`ff`/`00` — the class the car looks for |
-| 29 | 7 | bulk OUT on `0x01`, 64-byte packets |
-| 36 | 7 | bulk IN on `0x82`, 64-byte packets |
+| 29 | 7 | bulk IN on `0x81`, 64-byte packets |
+| 36 | 7 | bulk OUT on `0x02`, 64-byte packets |
 | 43 | 23 | the same three for high speed, 512-byte packets |
 
-The `FUNCTIONFS_ALL_CTRL_RECIP` flag is why the AOA requests reach the program at
-all: it asks the kernel to pass control requests addressed to the device to the
-function instead of handling them itself. The two endpoint addresses in the blob
-are the ones FunctionFS turns into `ep1` and `ep2`, and those names are what the
-program identifies the endpoints by.
+A `usb_functionfs_strings_head` with no strings in it goes in beside them, and it
+is not optional: the instance stays unregistered until both writes have landed, and
+the controller refuses to bind a gadget whose function is unregistered. The name a
+head unit reads arrives over the accessory requests, not over USB string
+descriptors.
 
-The strings blob is a `usb_functionfs_strings_head` with no strings in it; the
-name a head unit reads is delivered over the accessory requests, not over USB
-string descriptors. It is not optional — the instance stays unregistered until
-both blobs have been written, and a gadget holding an unregistered function cannot
-be bound.
+**A CDC-ECM link used to be on this port, and is not any more.** The board was
+reached at `172.16.0.1` over that same cable; a device that presents itself as a
+phone and then as an accessory has no network in it, and the board's own half is
+its access point alone. See [Setting the board up](#setting-the-board-up).
 
-**2. The gadget.** `/root/cp2cl/usb-gadget.sh` replaces `usb-ecm.sh`. It composes
-the gadget and stops there: the bind is a step of its own, because a gadget whose
-FunctionFS function has no descriptors yet cannot be bound at all.
+### Setting the board up
 
-```bash
-#!/bin/bash
-# Compose the USB gadget on the Duo2 OTG port: the CDC-ECM link the board is
-# reached over, and the FunctionFS function the CarLife accessory runs on.
-#
-# Idempotent, and driven by cp2cl-usb-gadget.service.
-set -eu
-
-G=/sys/kernel/config/usb_gadget/g1
-ECM=ecm.usb0
-FFS=carlife
-
-# The vendor image auto-loaded g_mass_storage on this port (an empty LUN on the
-# boot partition). Its modules-load.d entry is disabled; this is only a safety net
-# for the case where something else pulled the module in.
-if grep -q '^g_mass_storage ' /proc/modules; then
-    modprobe -r g_mass_storage || true
-fi
-
-if [ ! -e "$G/configs/c.1/$ECM" ] || [ ! -e "$G/configs/c.1/ffs.$FFS" ]; then
-    mkdir -p "$G"
-    cd "$G"
-    # The identity the car's guide expects an accessory to present.
-    echo 0x18d1 > idVendor
-    echo 0x2d00 > idProduct
-    echo 0x0200 > bcdUSB
-    mkdir -p strings/0x409
-    echo cp2clduo2      > strings/0x409/serialnumber
-    echo cp2cl          > strings/0x409/manufacturer
-    echo "Duo2 USB net" > strings/0x409/product
-    mkdir -p configs/c.1/strings/0x409
-    echo CDC-ECM > configs/c.1/strings/0x409/configuration
-    echo 250     > configs/c.1/MaxPower
-    mkdir -p "functions/$ECM"
-    echo 02:00:00:00:00:02 > "functions/$ECM/dev_addr"
-    echo 02:00:00:00:00:01 > "functions/$ECM/host_addr"
-    ln -sf "functions/$ECM" configs/c.1/
-    mkdir -p "functions/ffs.$FFS"
-    ln -sf "functions/ffs.$FFS" configs/c.1/
-fi
-```
-
-**3. The bind.** `/root/cp2cl/usb-bind.sh` holds what `usb-ecm.sh` used to do at
-the end, plus a retry: the bind succeeds only once systemd has written the
-descriptors, which the socket unit does rather than this script.
+`board/` is the firmware half, and the only thing in it is the access point: the
+board's radio, up at boot, which is what there is to log into. What is here is laid
+out as the filesystem it lands on — `board/etc/hostapd/hostapd.conf` is
+`/etc/hostapd/hostapd.conf`, and `board/etc/systemd/system/cp2cl-ap.service` is
+`/etc/systemd/system/cp2cl-ap.service`. Installing it is one command, run on the
+board as root, from the checkout:
 
 ```bash
-#!/bin/bash
-# Bind the gadget to the controller, then give usb0 its address. The bind is what
-# makes the car see the device, and it is also what brings usb0 into existence.
-#
-# Driven by cp2cl-usb-bind.service.
-set -eu
-
-G=/sys/kernel/config/usb_gadget/g1
-UDC=musb-hdrc.4.auto
-FFS=carlife
-IFACE=usb0
-ADDR=172.16.0.1/24
-
-bound=no
-for _ in $(seq 1 40); do
-    if [ "$(cat "$G/UDC" 2>/dev/null)" = "$UDC" ] || echo "$UDC" > "$G/UDC" 2>/dev/null; then
-        bound=yes
-        break
-    fi
-    sleep 0.25
-done
-
-if [ "$bound" != yes ]; then
-    # ffs.$FFS never registered, and while it is linked the whole gadget refuses to
-    # bind. This board is reached over the link that gadget provides, so give up the
-    # accessory function and bind what is left: the board stays reachable and the
-    # reason can be read from the journal.
-    echo "cp2cl: ffs.$FFS did not register; binding the ECM link alone" >&2
-    rm -f "$G/configs/c.1/ffs.$FFS"
-    echo "$UDC" > "$G/UDC"
-fi
-
-for _ in $(seq 1 50); do
-    [ -e "/sys/class/net/$IFACE" ] && break
-    sleep 0.1
-done
-ip addr replace "$ADDR" dev "$IFACE"
-ip link set "$IFACE" up
+board/install.sh
 ```
 
-**4. The units.** Five files under `/etc/systemd/system/`. `cp2cl-usb-gadget.service`
-replaces `cp2cl-usb-ecm.service`.
+**The units.**
 
-```ini
-# /etc/systemd/system/cp2cl-usb-gadget.service
-[Unit]
-Description=cp2cl: compose the USB gadget (CDC-ECM link + CarLife accessory)
-After=sysinit.target systemd-modules-load.service sys-kernel-config.mount
-Wants=systemd-modules-load.service
+| Unit | What it is |
+|---|---|
+| `cp2cl-ap.service` | hostapd on `wlan0`, and the address that interface carries: `192.168.4.1/24` |
+| `cp2cl-ap-dhcp.service` | dnsmasq for the access point: leases in `192.168.4.10`–`100`, and no router or DNS server advertised |
 
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/root/cp2cl/usb-gadget.sh
+`hostapd.conf` is the one file the operator tunes — the SSID and passphrase are
+this board's — and `install.sh` writes it only when it is not there yet, so a
+second run does not undo an edit. Everything else in `board/` is ours and is
+replaced on every run. There are no unit files for the program here: it is started
+by hand, and its settings are the environment it is started with — see [Running it
+on the board](#running-it-on-the-board).
 
-[Install]
-WantedBy=multi-user.target
-```
+**The board is reached on its access point.** `192.168.4.1`, with the browser
+client on 8080 once the program is running. Nothing about the board needs the USB
+port: the program composes the device, so a board with nothing running on the port
+at all still boots, brings up its access point, and can be logged into.
 
-```ini
-# /etc/systemd/system/dev-usb-ffs-carlife.mount
-[Unit]
-Description=cp2cl: FunctionFS instance for the CarLife accessory
-Requires=cp2cl-usb-gadget.service
-After=cp2cl-usb-gadget.service
+**What is not here.** The gadget, the FunctionFS mount, the bind, the DHCP server
+for the link that gadget carried and the socket that opened its control endpoint
+were all here at one point; none of them are now, because the program does all of
+it. This script installs what is in this tree and takes nothing down, so a board
+that still has a unit from that arrangement enabled is the operator's to clear.
 
-[Mount]
-What=carlife
-Where=/dev/usb-ffs/carlife
-Type=functionfs
-TimeoutSec=5
+**A reboot is what puts the board into the new arrangement**, and the controller is
+why. A controller takes one gadget; a gadget from the old arrangement is still bound
+to it until the board restarts; and the program cannot put its own on until then. It
+says so if it is started anyway — `musb-hdrc.4.auto is already held by g1: a gadget
+from an earlier arrangement is the usual reason, and a reboot clears it`.
 
-[Install]
-WantedBy=multi-user.target
-```
+**Upgrading a board that is already running** is `board/install.sh` and a reboot;
+the script's last lines say the same. One thing changes for whoever is logged in:
+where they are logged in from. The old arrangement put the board at `172.16.0.1` on
+the cable, and that interface is what goes away, so the access point — or a serial
+console — is the way back onto it.
 
-```ini
-# /etc/systemd/system/carlife.socket
-[Unit]
-Description=cp2cl: the CarLife accessory interface
-Requires=dev-usb-ffs-carlife.mount
-After=dev-usb-ffs-carlife.mount
-
-[Socket]
-ListenUSBFunction=/dev/usb-ffs/carlife
-Service=cp2cl.service
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```ini
-# /etc/systemd/system/cp2cl.service
-[Unit]
-Description=cp2cl: the CarPlay receiver and the CarLife session over it
-Wants=carlife.socket
-After=carlife.socket
-EnvironmentFile=-/etc/cp2cl.env
-
-[Service]
-Type=simple
-# Not optional: the credentials and the browser client are looked up relative to
-# the working directory.
-WorkingDirectory=/root/cp2cl
-ExecStart=/root/cp2cl/cp2cl
-# What systemd writes into ep0 before the service starts. The accessory interface
-# is not registered until both have been written.
-USBFunctionDescriptors=/root/cp2cl/carlife.descriptors
-USBFunctionStrings=/root/cp2cl/carlife.strings
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```ini
-# /etc/systemd/system/cp2cl-usb-bind.service
-[Unit]
-Description=cp2cl: bind the USB gadget and bring usb0 up
-Requires=cp2cl-usb-gadget.service carlife.socket
-After=cp2cl-usb-gadget.service carlife.socket
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/root/cp2cl/usb-bind.sh
-
-[Install]
-WantedBy=multi-user.target
-```
-
-`cp2cl-usb-dhcp.service` needs two lines changed, because `usb0` does not exist
-until the bind has landed — and because the unit it used to be ordered against
-is the one that goes away:
-
-```ini
-[Unit]
-Description=DHCP server for the cp2cl USB CDC-ECM link (usb0)
-Requires=cp2cl-usb-bind.service
-After=cp2cl-usb-bind.service
-```
-
-**5. Turning it on.** The board is running a gadget that is already bound and
-cannot be changed in place, and `configfs` is memory, so the transition is a
-reboot:
+After the reboot, the board's own half is two units and one address:
 
 ```bash
-systemctl disable --now cp2cl-usb-ecm.service
-systemctl daemon-reload
-systemctl enable cp2cl-usb-gadget.service dev-usb-ffs-carlife.mount \
-    carlife.socket cp2cl-usb-bind.service cp2cl.service
-reboot
+systemctl status cp2cl-ap.service cp2cl-ap-dhcp.service
+ip -brief addr show wlan0               # 192.168.4.1/24
 ```
 
-After it comes back, in this order:
+The program is not one of them: it is started by hand, on the port, and it is the
+one that puts something on the USB port — see [Running it on the
+board](#running-it-on-the-board).
+
+**If the port stays empty, the reason is on the program's own output.** It says
+what it could not do: no configfs, a controller already held, a mount that did not
+happen, an endpoint that would not open. A device that enumerates and then goes
+quiet is a head unit waiting for an answer, which `CP2CL_LOG=debug` prints request
+by request.
+
+**The access point advertises no gateway.** Joining it does not take a machine's
+default route away from wherever it was: the client keeps that route, and still
+reaches this board on the route to `192.168.4.0/24` that its own address and netmask
+give it. Both options are written with no value, which is what suppresses them —
+removing the line would restore dnsmasq's default of advertising itself. The DNS
+option is suppressed for a second reason: `--port=0` means nothing answers DNS here.
+
+**A DHCP range on the wrong subnet is silent.** `cp2cl-ap-dhcp.service` serves
+`192.168.4.10`–`100`; the address on the interface comes from the `ExecStartPre` of
+`cp2cl-ap.service`. dnsmasq accepts a range that does not sit on that interface's
+subnet and then serves nothing, saying so only in the journal. The two are one line
+apart in different files, so change them together.
+
+**On a board that is not the Duo2.** `hostapd.conf` names this board's SSID and
+passphrase; nothing else here is board-specific. The controller is the first one
+under `/sys/class/udc`, so `musb-hdrc.4.auto` is not assumed, and neither is `usb0`
+or any other interface name. What is assumed is the kernel, named under [The
+accessory interface](#the-accessory-interface), and hostapd and dnsmasq for the
+access point. The one step that belongs to the vendor image rather than to us —
+unloading the `g_mass_storage` that image loads onto this port, which would hold
+the controller — is done by the program, and is a no-op where it is not loaded.
+
+### Running it on the board
+
+There is no package and no unit: the binary is copied over and run in the
+foreground. Everything it reads from its working directory — the built browser
+client and the MFi credentials — is copied over beside it:
 
 ```bash
-systemctl status cp2cl-usb-gadget.service dev-usb-ffs-carlife.mount \
-    carlife.socket cp2cl-usb-bind.service cp2cl.service
-ls /dev/usb-ffs/carlife                 # ep0 ep1 ep2
-ls -l /proc/1/fd | grep ep0             # systemd holds it, not the program
-systemctl restart cp2cl.service         # the link stays up across this
+# From the checkout, after the cross-build above.
+ssh root@192.168.4.1 'mkdir -p /root/cp2cl/web /root/cp2cl/authentication'
+scp target/armv7-unknown-linux-musleabihf/release/cp2cl root@192.168.4.1:/root/cp2cl/
+scp -r vendor/playport/web/dist/. root@192.168.4.1:/root/cp2cl/web/
+scp authentication/* root@192.168.4.1:/root/cp2cl/authentication/
 ```
 
-**If the link does not come back**, the board booted without a reachable `usb0`.
-`usb-bind.sh` binds the ECM link alone in that case, so this should not happen;
-if it does, the board has to be reached some other way and the reason is in
-`journalctl -b -u cp2cl-usb-bind.service -u carlife.socket`. The three things
-worth checking first are that `usb-gadget.sh` created `functions/ffs.carlife`,
-that the FunctionFS mount landed on `/dev/usb-ffs/carlife`, and that both blob
-files exist and are 66 and 16 bytes.
+Then, on the board:
+
+```bash
+(cd cp2cl/; ./cp2cl)
+```
+
+Running it here rather than as a service is deliberate: the program owns the USB
+device, so its lifetime is the device's. Ctrl-C takes the gadget off the
+controller with it, which is what lets a build be swapped in and started again
+without a reboot. It refuses to start while another gadget holds the controller,
+and says which one by name.
+
+**Nothing else may hold the controller.** The program composes its gadget at
+startup and binds it, and a controller takes one gadget, so anything already
+bound there has to go first — the vendor image's `g_mass_storage` is unloaded by
+the program itself, but a gadget left by an earlier arrangement is not, and a unit
+holding one is not something to stop over the link it carries. That is what
+[the reboot after installing](#setting-the-board-up) is for.
+
+**Output is `tracing`, to the terminal.** `CP2CL_LOG` is the one control over it
+and there is no journal to read: the log is the answer to whether the board came
+up, whether the device was composed, and what a head unit asked. See
+[Environment](#environment) for the rest.
 
 ### Authentication
 
@@ -768,7 +695,9 @@ this a derivative work, so cp2cl inherits that.
 | `src/wireless/macos.rs` | the unix socket the IOBluetooth helper relays into |
 | `native/cp2cl-bluetooth/main.m` | macOS: SDP records, device class, RFCOMM → unix socket |
 | `src/carlife/mod.rs` | the CarLife half: this device standing in for a phone |
-| `src/carlife/gadget.rs` | Linux only — the inherited accessory endpoints and the control requests on them |
+| `src/carlife/desc.rs` | the accessory interface as bytes, and the three AOA requests |
+| `src/carlife/usb.rs` | Linux only — the gadget, the FunctionFS instance, and the two forms the device takes |
+| `src/carlife/gadget.rs` | Linux only — `ep0`: the requests arriving on it, and the answers |
 | `src/carlife/session.rs` | the session a head unit drives: handshake, heartbeats, touch |
 | `src/carlife/frame.rs` | the USB framing — the outer chunk header and the per-channel message head |
 | `src/carlife/proto.rs` | as much protobuf as these messages need, written by hand |
@@ -783,6 +712,7 @@ this a derivative work, so cp2cl inherits that.
 | `src/commands.rs` | the vocabulary of input the browser client produces |
 | `src/web/mod.rs` | the browser client's server: the wire framing, the API, the WebSocket, TLS |
 | `docker/` | the image that cross-compiles for the board, and the CMake toolchain it needs |
+| `board/` | the firmware half: the access point and its unit, laid out as the filesystem they land on |
 
 ## Expected behaviour, not bugs
 
@@ -819,6 +749,11 @@ this a derivative work, so cp2cl inherits that.
 * Whether a head unit accepts a device that is not a phone is not known — the
   authentication challenge cannot be answered, and no hardware has been tried on
   yet. See `PLAN-CL.md` §3.5.
+* None of the USB side here has run on a board: the gadget the program composes,
+  the switch to the accessory form, and what a head unit makes of it are written
+  from the protocol and the reference implementations, and are unverified against
+  hardware. The parts that could be checked without one are checked — see the
+  tests in `src/carlife/desc.rs`.
 * The CarLife audio cannot be passed through: a phone on wireless CarPlay hands
   media over as AAC-LC, which the CarLife media channel does not take, so it has
   to be decoded on the way across. That decoder is not written, and whether the

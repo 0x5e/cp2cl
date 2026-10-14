@@ -59,8 +59,9 @@ iPhone ──无线 CarPlay(AirPlay)──► cp2cl ──USB(AOA)──► MBUX
 
 | 待补能力              | 落点                              | 状态                              |
 | ----------------- | ------------------------------- | ------------------------------- |
-| USB gadget 管理     | `src/carlife/gadget.rs`         | 已实现：configfs 组装、ffs 描述符、51/52/53、退出清理 |
-| AOA MD 侧控制请求      | 同上                              | 已实现：51/52/53 全部应答              |
+| USB 设备（gadget / ffs / 重枚举） | `src/carlife/usb.rs`            | 已实现：configfs 组装、挂 ffs、写描述符、绑 UDC、换身份重枚举（只在 Linux 编） |
+| 设备形态与 AOA 请求字节      | `src/carlife/desc.rs`           | 已实现：描述符与 strings blob、51/52/53 的识别、身份字符串；9 条单测，纯字节、跨平台 |
+| AOA 控制请求的应答          | `src/carlife/gadget.rs`         | 已实现：ep0 事件循环、51/52/53 应答、触发重枚举、把两个 bulk 端点交给会话（只在 Linux 编） |
 | CarLife MD 协议栈    | `src/carlife/{frame,proto,session}.rs` | 已实现：帧编解码、protobuf、握手状态机、心跳      |
 | 桥接：视频             | `src/sink.rs` `ClOutlet`         | 已实现：`VideoFrame` 直通视频通道，参数集在下一帧前带出；`CP2CL_INPUT=file` 则改为重复一个文件 |
 | 桥接：音频             | 待定                              | 未实现：Media 通道要 PCM，拿到的却是 AAC-LC，落在 `ClSink` 里被丢弃（§4.2） |
@@ -116,7 +117,7 @@ CONFIG_USB_F_FS=y    CONFIG_USB_CONFIGFS_F_FS=y
   `FUNCTIONFS_SETUP` 事件交给用户态（`f_fs.c:3281`、`ffs_func_setup()` 的 `default:` 分支 `:3247-3252`）。
 - composite 层在把非标准请求交给函数前，先逐个问 `f->req_match`（`composite.c:1917-1923`，  
   `try_fun_setup` 在 `:1948`）。⇒ **设置该 flag 的 ffs 实例能收到 device 收件人的 vendor 控制请求**，  
-  也就是 51/52/53，且**在同 config 里还有别的函数时也成立**（ECM 可以同 config 共存，§2.5）。
+  也就是 51/52/53，且**在同 config 里还有别的函数时也成立**（`req_match` 是逐函数问的）。
 
 应答方式就是 ffs 的标准 ep0 协议：读 `/dev/ffs-*/ep0` 拿到 `usb_functionfs_event`，IN 请求往 ep0 写数据，  
 OUT 请求从 ep0 读数据。这正是 Android 17 里 `aoad` 走的路（把 AOA 从内核 `f_accessory` 迁到用户态）。
@@ -128,24 +129,31 @@ v4.14 **没有** `FUNCTIONFS_CONFIG0_SETUP` / configfs 的 `control_config`（�
 - 描述符由用户态在 ffs 的 ep0 上写（`usb_functionfs_descs_head_v2`，magic=3，flags 里带 `ALL_CTRL_RECIP`）。  
   在 `FUNCTIONFS_DISABLE` 之后可以重写，所以「先手机形态、后 accessory 形态」不需要两套 ffs 实例。
 - `idVendor` / `idProduct` / `bcdDevice` / 字符串是 **configfs 属性**（`/sys/kernel/config/usb_gadget/<g>/…`），  
-  不归 ffs 管；它们在开机脚本里定死为 accessory 身份 `18d1:2d00`，一次枚举成型（§2.5）。
+  不归 ffs 管，**由程序在运行期写**：出厂形态是 `18d1:4ee1` + `Google`/`Android`（Android 手机在 MTP 模式下的号码，  
+  按号码或按厂商串判断的主机会认成手机），收到 53 之后改成 `18d1:2d00` + 车机发来的三条字符串。改属性前必须先解绑  
+  UDC，所以「换身份」就是「解绑 → 写属性 → 重新绑」，端点 fd 跨这三步保持有效（§2.5）。
 - accessory 形态的接口取值：CarLifePort 的主机侧**只认 `class 0xff && subclass 0xff`**（`link/aoa.c:496-502`，  
-  并注释说明 adb 是 subclass `0x42`）。我们不知道 MBUX 要哪一组，三个候选按顺序试：  
-  `0xff/0xff/0x00`、`0xff/0x00/0x00`、`0xff/0x42/0x01`。端点地址也按 CarLifePort 实测的  
-  IN `0x81` / OUT `0x01`（与 adb 共存时是 `0x02`）。
+  并注释说明 adb 是 subclass `0x42`）。我们取 `0xff/0xff/0x00`。CarLife 的 HU 侧实现（`AOAHostSetup.java`）是  
+  **按位置取端点**（`getEndpoint(0)` = IN 读、`getEndpoint(1)` = OUT 写），所以描述符里 **IN `0x81` 必须排在  
+  OUT `0x02` 前面** —— 两个地址本身只是占位，FunctionFS 会通过 `usb_ep_autoconfig` 重写，方向与顺序才有意义。  
+  `desc.rs` 的单测锁住了这个顺序。
 
-### 2.5 与 ECM 管理链路共存
+### 2.5 UDC 只有一个，设备整个由程序组
 
-板子只有一个 OTG 口。目前它跑 ECM（`usb0 = 172.16.0.1/24`，Mac 侧 `en15 = 172.16.0.2`），是我们的唯一管理链路  
-（`BUILD.md`）。**ECM 与 ffs 放进同一个 configuration**：车机/主机只认那个 vendor 接口，多出来的 CDC-ECM 不理它。  
-代价是描述符里多一个接口，需要实测车机是否介意（列入 §8 风险 6）。备选是给 ECM 单独一个 configuration，但那要求  
-车机自己选配置，不可控。
+板子只有一个 OTG 口。管理链路走 **AP**（`192.168.4.1`），USB 口整个交给 CarLife —— 设备以手机形态出现、  
+被切成 accessory，中间还要重枚举，里面没有网络可放。**gadget、FunctionFS 实例、描述符、绑定全在程序里**  
+（`src/carlife/usb.rs`），开机脚本不再碰 USB（`board/` 只剩 AP，见 `README.md`「Setting the board up」）。
 
-**gadget 由开机脚本组成一次，运行期没有改动它的步骤。** configfs 不允许改一个已绑定到 UDC 的 gadget，  
-所以「加 ffs 函数与配置链接 → 挂 functionfs → 绑 UDC」整串都发生在开机：`usb-gadget.sh` 组 gadget，  
-`dev-usb-ffs-carlife.mount` 挂实例，`carlife.socket` 用 `ListenUSBFunction=` 打开 ep0 并由 systemd 在服务  
-启动前写入描述符，`usb-bind.sh` 绑 UDC。程序只拿到 ep0/ep1/ep2 三个 fd，不碰 configfs、不经手 VID/PID ⇒  
-**重启 `cp2cl.service` 不影响接口，管理链路不会掉**。完整步骤见 `README.md`「Setting the board up」。
+- `Usb::open()`：清掉上次残留（解绑 + 卸载 ffs + 删 configfs 树）→ 驱逐厂商镜像预置的 `g_mass_storage`（它占着  
+  UDC）→ 建 `cp2cl` gadget、写身份、建 `configs/c.1`、**链接 `functions/ffs.carlife`** →  
+  `mount("carlife", "/dev/usb-ffs/carlife", "functionfs")` → 写描述符 blob、**再写 strings blob**（两次写都落地  
+  实例才 ACTIVE）→ 开 ep0/ep1/ep2 → 绑 UDC。
+- `Usb::reidentify()`：**解绑 → 改 `idVendor`/`idProduct`/strings → 重新绑**。configfs 不允许改一个已绑定到 UDC  
+  的 gadget，所以换身份只能是这三步；端点 fd 跨它保持有效，描述符也不用重写。
+- 解绑写 `"\n"` 而不是零长度写：长度为 0 的 `write` 到不了内核（syscall 直接返回）。本来没绑定时返回 `ENODEV`，忽略。
+- 绑定遇到 `EBUSY` 时读 `holder()` 指出是谁占着 UDC —— 通常是上一套安排留下的 gadget —— 并提示重启。
+
+⇒ **程序的存活期就是设备的存活期**：起进程 = 设备上总线，Ctrl-C = 设备下总线、主机重新枚举。管理链路不受影响（走 AP）。
 
 ### 2.6 USB 帧格式
 
@@ -386,8 +394,8 @@ CarLife `VOICE_MIC=0` 时麦克风在车机侧，HU 会把 16 kHz 单声道 PCM 
 
 其余时序：
 
-- 车机重插：USB 读失败 ⇒ 重启 gadget 与协议栈（进程内重建，不重启进程）；CarLifePort 的教训是**会话必须在  
-  新的 accessory 附着上重建**，不能原地重连（`README.md:233-242`）。
+- 车机重插：USB 读失败 ⇒ 重新组一次设备（**解绑 → 重新绑 UDC**，§2.5）并重建协议栈；CarLifePort 的教训是  
+  **会话必须在新的 accessory 附着上重建**，不能原地重连（`README.md:233-242`）。
 - 车机在、iPhone 没来：CarLife 握手照走完，视频通道发 `VIDEO_HEARTBEAT` 保活（指南说 MD 切后台时就是这么做的），  
   AirPlay 侧只是没有人连进来。
 - 拔掉 iPhone：CarLife 会话不受影响，退回发心跳。
@@ -410,8 +418,8 @@ Mac 是 host、Duo2 是 device，拓扑与「车机 ↔ 我们的设备」完全
 - `dist/carlife-link --list` 枚举；`--vid/--pid` 强制指定目标；`aoa-probe --handshake-only / --force-handshake / --send-proto-version` 单独验控制阶段。
 - `carlifed` 带浏览器前端：CarLife 会话一旦建立，**Mac 上就能看到我们推过去的画面**，这是端到端的第一道验收。
 - 日志级别 `CL_LOG_LEVEL=debug` 能看到逐通道转发统计与手机侧播放进度。
-- 我们的 ECM 管理链路可以留在同一个 config 里，但**启动 cp2cl 的那一刻会断**（换绑 UDC，§2.5）——调试时以  
-  串口或重连为准，不要指望 SSH 不断。
+- 板子的管理链路走 AP，**插车时也不掉**：USB 口上跑的是 CarLife，与登录用的链路无关（§2.5）。板子上要看日志  
+  就是 `journalctl -u cp2cl`，站在 AP 那一侧。
 
 一台机器就能把 Phase 1–3 全部验完，**不需要车**。
 
@@ -433,8 +441,10 @@ Mac 是 host、Duo2 是 device，拓扑与「车机 ↔ 我们的设备」完全
   未设字段不写 0、负 int32 十字节符号扩展、截断体之前仍可读。
 - **状态机**（`session.rs`，6 条）：自带一个 `tokio::io::duplex` 假车机，喂完整握手序列并断言发出的消息与顺序；  
   另含两条**否定式**断言——未 `START` 前视频通道静默、默认策略下鉴权请求不回。
-- **描述符**（`gadget.rs`，2 条，只在 Linux 编）：把 blob 当字节读，核对 magic/flags/两个 count、接口的  
-  class/subclass/protocol、HS 那份的 `wMaxPacketSize`。
+- **描述符**（`desc.rs`，9 条，跨平台）：把 blob 当字节读，核对 magic/flags/两个 count、接口的  
+  class/subclass/protocol、**IN 在 OUT 之前**、两段的 `wMaxPacketSize`（FS 64 / HS 512）、strings blob 的  
+  magic/length；51/52/53 被识别而别的请求不被识别、逐字段解包、短读返回 `None`、六条身份落位与越界索引被丢弃、  
+  版本答复 `[2,0]`、accessory 形态的号码与字符串。
 
 仍缺的：用 §5.2 的录音当输入做表驱动对账（字段取值对不对，只能靠真手机的行为判）。
 
@@ -452,31 +462,32 @@ Mac 是 host、Duo2 是 device，拓扑与「车机 ↔ 我们的设备」完全
 
 ### Phase 0 — 事实与设施（只读 + 搭台子）
 
-- `0.1` 板子侧把 §2.2 之外的三件事验掉：**ffs 是否接受 `ALL_CTRL_RECIP` flag**〔**已验**：66 B 的 v2 头被接受〕、  
-  **ECM 与 ffs 同 config 是否都正常**〔**未做**——同 config 由开机脚本组成，验收要真车〕、  
-  **UDC 解绑/绑定能否稳定重枚举**〔**不需要**：接口在开机时组成一次，运行期没有解绑步骤，见 §2.5〕
+- `0.1` 板子侧把 §2.2 之外的两件事验掉：**ffs 是否接受 `ALL_CTRL_RECIP` flag**〔**已验**：66 B 的 v2 头被接受〕、  
+  **UDC 解绑/绑定能否稳定重枚举**〔**未做**：现在由程序自己做（§2.5），验收要真机〕
 - `0.2` Mac 侧把假车机跑起来，确认它能挑到 Duo2 的 gadget（先用一个最简单的 ffs gadget 当靶子）。〔**未做**〕
 - `0.3` 用 Pixel 7a 录一份 MD 侧参考报文（§5.2），归纳出「必须发的消息」清单与字段取值。〔**未做**——Phase 2 是  
   按指南 + `CarLifeVehicleLib` 的常量写的，不依赖录音；但录音对 Phase 3/4 逐字段对账仍是最快的路〕
 
-验收：板子上的三条命令有明确结论；Mac 能对 Duo2 完整做一次 51/52/53 并读到重枚举后的设备；  
+验收：板子上的两条命令有明确结论；Mac 能对 Duo2 完整做一次 51/52/53 并读到重枚举后的设备；  
 参考录音里能看到 `0x00010002` / `0x00010004` / `0x00010008` / `0x00010051` 这几条。
 
-### Phase 1 — USB gadget 与 AOA MD 侧 ✅
+### Phase 1 — USB 设备与 AOA MD 侧 ✅
 
-`src/carlife/gadget.rs`（整模块 `#[cfg(target_os = "linux")]`）：
+`src/carlife/usb.rs` 与 `src/carlife/gadget.rs`（两个模块整块 `#[cfg(target_os = "linux")]`），设备形态的字节  
+在 `src/carlife/desc.rs`（跨平台）：
 
-- **接口由板子提供，程序只用**：gadget（ECM + ffs）在开机脚本里组成，`carlife.socket` 用  
-  `ListenUSBFunction=` 打开 ep0 并由 systemd 在服务启动前写入描述符，`usb-bind.sh` 绑 UDC ⇒  
-  `gadget.rs` 里没有 configfs、没有 mount、没有 bind，只有三个继承来的 fd（`LISTEN_FDS` +  
-  `readlink /proc/self/fd/N` 认名字，所以到达顺序不相干）。
-- **注册与绑定是两步**（`functionfs_bind` 要求 `FFS_ACTIVE`）：描述符 blob 与 strings blob 都写进 ep0  
-  之后实例才 ACTIVE，绑 UDC 才能成功。v2 头 `magic/length/flags/fs_count/hs_count`，flags 含  
-  `FUNCTIONFS_ALL_CTRL_RECIP`（64），FS 与 HS 各三个描述符；**两个 blob 的字节在 `README.md` 里给出**。  
-  端点文件按描述符地址命名，`ep1` = 车机→我们、`ep2` = 我们→车机；两个文件都按读写打开，方向由  
-  哪一侧的调用成功决定。
-- **51/52/53 全部应答**（路径 A 用不到也照答），每个控制请求先打一行 info，字符串内容一并打印。
-- 身份（`18d1:2d00`）在开机脚本里定死，运行期没有改它的步骤。
+- **设备是程序的**：`usb.rs` 在 configfs 里组 gadget、挂 FunctionFS、写描述符、绑 UDC（§2.5）；`gadget.rs` 只有  
+  ep0 上发生的事 —— 一次读 12 字节的 `usb_functionfs_event`，按 type 分派 ENABLE / DISABLE / SETUP。没有  
+  `LISTEN_FDS`，也没有 `readlink /proc/self/fd/N`：三个 fd 都是自己开的。
+- **注册与绑定是两步**（`functionfs_bind` 要求 `FFS_ACTIVE`）：描述符 blob 与 strings blob 都写进 ep0 之后  
+  实例才 ACTIVE，绑 UDC 才能成功。v2 头 `magic/length/flags/fs_count/hs_count`，flags 含  
+  `FUNCTIONFS_ALL_CTRL_RECIP`（64），FS 与 HS 各三个描述符；字节在 `README.md`「The accessory interface」里  
+  逐偏移给出。端点文件按描述符顺序命名：`ep1` = 我们→车机（描述符里第一个，主机按位置读的那个）、  
+  `ep2` = 车机→我们。
+- **51/52/53 全部应答**（路径 A 用不到也照答），每个控制请求先打一行 info，字符串内容一并打印。**别的请求也  
+  应答**：带数据的 OUT 请求把数据读光丢掉，IN 请求对 ep0 做一次 read 触发 stall —— 不回话会让主机一直等。
+- **53 触发重枚举**：等 100 ms 让应答的控制传输走完，再 `reidentify()` 换身份（§2.5）。
+- 会话在两种形态下都能起来：ENABLE 事件即开一次 `session::run`，车机没 START 之前会话是静默的，多开一次不花代价。
 
 **验收**：`dist/aoa-probe --send-proto-version` 能收到我们的回包；`dist/carlife-link --list` 能看到设备。
 
@@ -527,11 +538,11 @@ ffmpeg -f lavfi -i testsrc=size=1280x720:rate=30 -frames:v 1 -c:v libx264 \
 | 3  | CarPlay 侧 H.264 不是 baseline（可能带 B 帧） | 车机解码失败           | 先直通；不行再用 H3 的 VPU 重编码（BSP 是否可用待确认）       |
 | 4  | 单帧 > 600 KB                          | 车机侧解析失败或丢帧       | 分辨率控制在 720p，IDR 体积实测；必要时限制码率             |
 | 5  | ffs + musb 在 4.14 上的吞吐与稳定性           | 花屏/断流            | Phase 1 就先压测：600 KB/帧 × 30 fps ≈ 18 MB/s |
-| 6  | ECM 与 ffs 同 config，车机是否介意多一个接口       | 车机不认             | 备选：给 ECM 单独 configuration，或插车时放弃管理链路     |
+| 6  | **程序自组设备**：`reidentify()` 假设 4.14 的 ffs + configfs 在解绑/重绑之间端点 fd 仍然有效       | 换身份后会话断，要重插      | 已对着 `gadget_dev_desc_UDC_store` 与 `ffs_ep0_read` 的实现核对（§2.5）；验收就是「Mac 侧完整做一次 51/52/53，然后操作重枚举后的设备」 |
 | 7  | **已确认**：无线 CarPlay 不给媒体 LPCM，只给 AAC-LC | 音频必须本地解码        | `symphonia`（§4.2）；**真正的风险转移到 CPU**：H3 实时解 AAC-LC 的余量在 Phase 3 量 |
 | 8  | CarLife 会话建立前后，CarPlay 侧是否在监听                 | 手机连上一个没人应答的会话          | 已解：闸门式（§4.5），车机没到时 CarPlay 侧什么都不开                    |
 | 9  | 车机 USB 口供电不足                         | 掉电重启             | 已知取舍：车机供电，不足时扩展板独立供电                     |
-| 10 | 单 USB 口的角色冲突（管理链路 vs 车机）             | 场景互斥             | 同 config 共存（§2.5）；实测确认                   |
+| 10 | 单 USB 口的角色冲突（管理链路 vs 车机）             | 场景互斥             | **已解**：USB 口整个交给 CarLife，管理链路走 AP（§2.5）                   |
 
 ---
 
@@ -548,10 +559,10 @@ ffmpeg -f lavfi -i testsrc=size=1280x720:rate=30 -frames:v 1 -c:v libx264 \
 | D7  | 音频**必须本地解 AAC-LC**，不指望 PCM                                         | 无线 CarPlay 实测只给 AAC-LC（§4.2）；`symphonia` 是唯一的实时解码点 |
 | D8  | 几何由 HU 的 `VIDEO_ENCODER_INIT` 决定，用 `SharedScreen` + `restart_session` 对齐 | 复用显示面板那条已验证的路                                         |
 | D9  | 浏览器客户端**保留**，但只在 `CP2CL_SINK=web` 时建                                     | 唯一能单独验证 CarPlay 侧的手段；`cl` 下没有页面可选                      |
-| D10 | 管理链路 ECM 与 CarLife 同 configuration                                       | 插车时也要能 SSH；风险 6 兜底                                    |
+| D10 | USB 口整个交给 CarLife，管理链路改走 AP                                          | 设备要模拟手机、还要在会话中间换身份，接口里放不下网络；AP 与 USB 互不相干             |
 | D11 | 不在协议栈里做「请求关键帧」                                                           | CarLife 没这条消息                                         |
 | D12 | **消费者是总开关**：`cl` 时 CarLife 会话起 → CarPlay 侧才开；断 → 主动拆                       | 手机不该在车机没来时在后台把 CarPlay 会话建起来（§4.5）                     |
-| D13 | 借板子上已有的 gadget 加一个 ffs 函数，不新建第二个 gadget                                  | configfs 不允许改已绑定的配置；代价是换绑期间管理链路断几秒（§2.5）              |
+| D13 | 设备由**程序自组**（configfs 组装、ffs 挂载、描述符、绑 UDC 全在进程内）                             | 换身份必须解绑/重绑 UDC，只有拥有设备的一方做得到（§2.5）；代价是重启服务会把设备摘下来再放回去      |
 | D14 | 消费者由 `CP2CL_SINK` 二选一（`web`/`cl`），**不同时在线**；视频通道来源由 `CP2CL_INPUT` 选（`cp`/`file`） | 两端是同一份媒体，只有去向不同；`file` 让通道与车机解码器能脱离手机单独验（§4.5）      |
 
 ---
@@ -602,7 +613,7 @@ ffmpeg -f lavfi -i testsrc=size=1280x720:rate=30 -frames:v 1 -c:v libx264 \
 
 ```sh
 # ffs 是否接受 ALL_CTRL_RECIP（flags=64）：写描述符头，看是否 EINVAL    〔已验：66 B 的 v2 头被接受〕
-# ECM 与 ffs 同 config：Mac 侧 ifconfig 看 en15 是否照旧拿到 172.16.0.2  〔未做：现在是开机脚本组成同 config〕
+# 解绑/重绑 UDC 能否把设备稳定地换个身份重新枚举（§2.5）                  〔未做：要真机，程序已经这么做了〕
 ```
 
 **假车机上（Phase 1–3）**
