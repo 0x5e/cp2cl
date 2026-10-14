@@ -910,9 +910,14 @@ fn content_type(path: &Path) -> &'static str {
 
 // --- serving ---------------------------------------------------------------
 
-/// Where the browser client lives inside the playport submodule.
+/// Where the browser client is. `CP2CL_WEB_ROOT` names it outright, which is how
+/// an installed program finds it somewhere other than where the source tree
+/// builds it; a checkout falls back to the submodule's build output.
 pub fn web_root() -> PathBuf {
-    PathBuf::from("vendor/playport/web/dist")
+    match std::env::var_os("CP2CL_WEB_ROOT") {
+        Some(dir) => PathBuf::from(dir),
+        None => PathBuf::from("vendor/playport/web/dist"),
+    }
 }
 
 /// Serves the browser client over TLS for the life of the process.
