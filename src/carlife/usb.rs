@@ -16,6 +16,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 
@@ -37,6 +38,15 @@ const SQUATTER: &str = "g_mass_storage";
 /// Where the controller is named. Every board that can present a USB device has
 /// one; a board with two would present two.
 const CONTROLLER_DIR: &str = "/sys/class/udc";
+/// How long the device stays off the bus between its two forms.
+///
+/// The pull-up is dropped and raised from a work queue, and the host has seen
+/// nothing until it has actually gone down. Coming back inside that window is a
+/// device the host never saw leave: it stops enumerating anything, and the
+/// device that came back sits there unconfigured. So this gap is not a pause —
+/// it is the disconnect the host is waiting for. The host's own side of an AOA
+/// switch allows for seconds.
+const REATTACH: Duration = Duration::from_millis(500);
 
 /// The gadget this program composed, by path and by controller. Cheap to copy:
 /// it holds a path and a name.
@@ -146,9 +156,12 @@ impl Usb {
     /// Calling it on a device that is already bound is why the unbind comes
     /// first: a bound gadget cannot be bound again, and its numbers cannot be
     /// rewritten while it is.
-    pub fn reidentify(&self, identity: &Identity) -> Result<()> {
+    pub async fn reidentify(&self, identity: &Identity) -> Result<()> {
         self.unbind()?;
         self.write_identity(identity)?;
+        // See REATTACH: the device has to be gone for long enough that the host
+        // notices, and this is the only moment it is.
+        tokio::time::sleep(REATTACH).await;
         self.bind()
     }
 

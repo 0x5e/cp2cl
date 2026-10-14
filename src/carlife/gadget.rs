@@ -31,10 +31,10 @@ use super::desc;
 use super::session::{self, Frames};
 use super::usb::{Endpoints, Usb};
 
-/// How long to let the answer to `start accessory` finish leaving before the
-/// device is taken away. A control transfer with no data stage is completed by
-/// the controller, and disappearing in the same breath as the request arrives is
-/// a race the host can lose.
+/// How long to let the answer to `start accessory` leave before the device is
+/// taken away. The transfer is closed by `complete`, and the host takes its
+/// result a moment later; the device going away in the same breath is a race the
+/// host can lose even so.
 const SETTLE: Duration = Duration::from_millis(100);
 
 /// What FunctionFS numbers its events. `uapi/linux/usb/functionfs.h`.
@@ -137,7 +137,9 @@ async fn control_loop(
         // there is no packed struct to get wrong.
         let mut raw = [0u8; 12];
         if let Err(e) = ep0.read_exact(&mut raw).await {
-            tracing::debug!("[cl-usb] the control endpoint stopped reading: {e}");
+            // Not a quiet ending: this endpoint is the only way a head unit
+            // reaches us, so its loss is the loss of the CarLife half.
+            tracing::warn!("[cl-usb] the control endpoint stopped reading: {e:#}");
             return;
         }
         match raw[8] {
@@ -211,6 +213,10 @@ async fn answer(
         }
         // "Switch to accessory mode and re-enumerate."
         Some(desc::Accessory::Start) => {
+            // The request has to be ended before the device is taken away: the
+            // host is sitting in this transfer, and it is the device that closes
+            // it. See `complete`.
+            complete(ep0).await?;
             if identity.is_accessory() {
                 tracing::info!(
                     "[cl-usb] the host asked us to switch to accessory mode; we are already one, \
@@ -239,6 +245,7 @@ async fn answer(
                 let _ = ep0.read(&mut refused).await;
                 tracing::info!("[cl-usb] that one is not acted on, and is refused");
             } else {
+                complete(ep0).await?;
                 tracing::info!("[cl-usb] that one is not acted on");
             }
             Ok(Answered::Nothing)
@@ -246,16 +253,37 @@ async fn answer(
     }
 }
 
+/// Ends a control request that carries no data.
+///
+/// A transfer is not over when the request arrives; it ends with a status stage,
+/// and for a request with nothing to carry the device is the one that sends it.
+/// FunctionFS sends it when the queue it is handed comes back empty, so a read
+/// that has nothing to read is what finishes the transfer — the read returns no
+/// bytes, and that is the answer rather than an end of file.
+///
+/// Leaving it out is not a quiet mistake: the host stays in the transfer, and a
+/// device that goes on to take itself off the bus fails a transfer the host was
+/// still waiting in.
+async fn complete(ep0: &mut tokio::fs::File) -> Result<()> {
+    let mut nothing = [0u8; 1];
+    ep0.read(&mut nothing).await?;
+    Ok(())
+}
+
 /// Switches the device to the accessory form.
 ///
 /// What the host asked for is not a new device but the same one coming back as
 /// an accessory, which is the only way it can see a device it did not enumerate:
-/// off the bus, new numbers and the strings it just named, back on.
+/// off the bus, new numbers and the strings it just named, back on. The request
+/// itself is ended before any of that, and `usb` holds the device off the bus
+/// long enough for the host to see it go.
 async fn switch(usb: &Usb, identity: &mut desc::Identity, asked: &desc::Asked) -> Result<()> {
     tokio::time::sleep(SETTLE).await;
 
     let accessory = identity.accessory(asked);
-    usb.reidentify(&accessory).context("switching the device to its accessory form")?;
+    usb.reidentify(&accessory)
+        .await
+        .context("switching the device to its accessory form")?;
     tracing::info!(
         "[cl-usb] switched to an accessory ({}); the host will enumerate us again",
         accessory.describe()
