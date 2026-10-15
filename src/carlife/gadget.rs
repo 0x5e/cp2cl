@@ -25,6 +25,7 @@ use anyhow::{anyhow, Context, Result};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::mpsc;
 
+use crate::airplay::EventSink;
 use crate::config::Config;
 
 use super::desc;
@@ -69,6 +70,7 @@ pub async fn run<F>(
     cfg: Arc<Config>,
     frames: &Frames,
     screen: session::ScreenReport<'_>,
+    events: Arc<EventSink>,
     carplay: &mut F,
 ) -> Result<()>
 where
@@ -105,7 +107,9 @@ where
             Event::Enabled => match bulk(&from_car, &to_car) {
                 Ok(pair) => {
                     tracing::info!("[cl-usb] the host has enumerated us; starting the session");
-                    if let Err(e) = session::run(pair, frames, &cfg, &mut *screen, carplay).await {
+                    if let Err(e) =
+                        session::run(pair, frames, &cfg, &mut *screen, events.clone(), carplay).await
+                    {
                         tracing::warn!("[cl] the session ended badly: {e:#}");
                     }
                 }

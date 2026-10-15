@@ -1,11 +1,12 @@
 //! The vocabulary of input.
 //!
 //! Nothing here parses anything: whoever has an input event — the CarLife
-//! session, once it carries touch and keys back up — turns it into one of these.
-//! `event.rs` is the only place that knows how each one reaches the phone.
+//! session, which is where touch and panel keys come from — turns it into one of
+//! these. `event.rs` is the only place that knows how each one reaches the phone.
 //!
-//! Nothing produces one yet, which is what the allow below is about: the CarLife
-//! side is the caller this is kept for. See `PLAN-CL.md` §4.3.
+//! The CarLife protocol has no control that means `Wheel`, `KeyFrame` or `Night`
+//! — a head unit sends panel keys and touch, and those three are the Android Auto
+//! bridge's and the operator's — which is what the allow below is for.
 #![allow(dead_code)]
 
 /// One finger in a touch report, in the display's own pixel space.
@@ -68,3 +69,10 @@ pub const MEDIA_PAUSE: u8 = 2;
 pub const MEDIA_PLAY_PAUSE: u8 = 3;
 pub const MEDIA_NEXT: u8 = 4;
 pub const MEDIA_PREV: u8 = 5;
+
+/// Telephony key indices in the report the `/info` descriptor declares, mirroring
+/// LIVI's `TelephonyButton`. The report is a numbered list of call buttons, so a
+/// head unit's call button is an index rather than a named key.
+pub const PHONE_HOOK_SWITCH: u8 = 1;
+pub const PHONE_DROP: u8 = 3;
+pub const PHONE_MUTE: u8 = 4;

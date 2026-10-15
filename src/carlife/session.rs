@@ -15,8 +15,9 @@
 //!   with a private key that lives on the phone this device is pretending to be,
 //!   so there is nothing honest to reply with. What arrives is reported and left
 //!   alone. A car that insists is where this ends.
-//! * **Input is not acted on.** Touch and panel keys arrive on the sixth channel
-//!   and are reported, but there is no CarPlay side attached to send them to yet.
+//! * **Touch and panel keys go one way.** They arrive on the sixth channel and
+//!   are turned into the commands the CarPlay side already knows how to send;
+//!   nothing comes back the other way.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -28,7 +29,8 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use super::{frame, proto};
-use crate::airplay::ScreenParams;
+use crate::airplay::{EventSink, ScreenParams};
+use crate::commands::{Command, TouchContact, PHONE_DROP, PHONE_HOOK_SWITCH, PHONE_MUTE};
 use crate::config::Config;
 use crate::sink::ClOutlet;
 
@@ -61,6 +63,33 @@ const VIDEO_HEARTBEAT: u32 = 0x0002_0002;
 
 const TOUCH_ACTION: u32 = 0x0006_8001;
 const TOUCH_HARD_KEY: u32 = 0x0006_8008;
+
+/// What a touch action means: the values of Android's `MotionEvent`, which is
+/// what the car speaks. Only the release is told apart from the rest — a press
+/// and a drag are the same thing to the phone.
+const TOUCH_UP: i32 = 1;
+
+/// The car's panel keys, `KEYCODE_*` in CarLifeVehicleLib. The last three are not
+/// in that list: they are the reference head unit's own, for the three controls
+/// the protocol has no key of its own for.
+const KEY_HOME: i32 = 0x0000_0001;
+const KEY_PHONE_CALL: i32 = 0x0000_0002;
+const KEY_PHONE_END: i32 = 0x0000_0003;
+const KEY_SELECTOR_NEXT: i32 = 0x0000_0006;
+const KEY_SELECTOR_PREVIOUS: i32 = 0x0000_0007;
+const KEY_BACK: i32 = 0x0000_000E;
+const KEY_SEEK_SUB: i32 = 0x0000_000F;
+const KEY_SEEK_ADD: i32 = 0x0000_0010;
+const KEY_MUTE: i32 = 0x0000_0013;
+const KEY_OK: i32 = 0x0000_0014;
+const KEY_MOVE_LEFT: i32 = 0x0000_0015;
+const KEY_MOVE_RIGHT: i32 = 0x0000_0016;
+const KEY_MOVE_UP: i32 = 0x0000_0017;
+const KEY_MOVE_DOWN: i32 = 0x0000_0018;
+const KEY_MAIN: i32 = 0x0000_001E;
+const KEY_MEDIA_START: i32 = 0x0000_001F;
+const KEY_MEDIA_STOP: i32 = 0x0000_0020;
+const KEY_VR_START: i32 = 0x0000_0021;
 
 /// How often the video channel is touched when there is no picture to send. The
 /// reference does the same whenever its own interface is not in the foreground.
@@ -219,11 +248,16 @@ pub type ScreenReport<'a> = &'a mut (dyn FnMut(u32, u32, u32) + Send);
 /// and frame rate. The car is the one that knows its own screen, so this is where
 /// what the phone is asked to render comes from; `main` is what does something
 /// with it.
+///
+/// `events` is where the car's touch and panel keys go. It is the CarPlay side's
+/// own sink, so a key pressed on the car arrives at the phone by exactly the road
+/// a key from anywhere else would; the phone cannot tell them apart.
 pub async fn run<S, F>(
     stream: S,
     frames: &Frames,
     cfg: &Config,
     screen: ScreenReport<'_>,
+    events: Arc<EventSink>,
     carplay: &mut F,
 ) -> Result<()>
 where
@@ -278,12 +312,14 @@ where
         writer,
         cfg,
         screen,
+        events,
         source,
         channel_touched: None,
         agreed: None,
         started_at: None,
         next_tick: Instant::now(),
         up: false,
+        last_touch: None,
     };
 
     let outcome = loop {
@@ -353,6 +389,36 @@ enum Source {
     Live,
 }
 
+/// A panel key as one of the commands the CarPlay side sends, or nothing when the
+/// key is the car's own business.
+///
+/// A head unit is full of keys a phone has no use for — its radio, its
+/// navigation, its own volume — and those are not mistakes to report: they are the
+/// car's, and they stop here. The two families of direction keys both land on the
+/// four directions a phone has: `move` names the direction to go in, and
+/// `selector` is what a knob does when it moves its focus, which is the same
+/// thing to a phone.
+fn command_for(key: i32) -> Option<Command> {
+    Some(match key {
+        KEY_HOME | KEY_MAIN => Command::Home,
+        KEY_BACK => Command::Back,
+        KEY_OK => Command::Select,
+        KEY_MOVE_LEFT => Command::Left,
+        KEY_MOVE_RIGHT => Command::Right,
+        KEY_MOVE_UP | KEY_SELECTOR_PREVIOUS => Command::Up,
+        KEY_MOVE_DOWN | KEY_SELECTOR_NEXT => Command::Down,
+        KEY_SEEK_SUB => Command::Prev,
+        KEY_SEEK_ADD => Command::Next,
+        KEY_MEDIA_START => Command::Play,
+        KEY_MEDIA_STOP => Command::Pause,
+        KEY_VR_START => Command::Siri,
+        KEY_PHONE_CALL => Command::Telephony(PHONE_HOOK_SWITCH),
+        KEY_PHONE_END => Command::Telephony(PHONE_DROP),
+        KEY_MUTE => Command::Telephony(PHONE_MUTE),
+        _ => return None,
+    })
+}
+
 /// The next access unit from the CarPlay side, or never if there is no CarPlay
 /// side. Waiting on a future that never resolves is what keeps the branch out of
 /// the way without a second code path in the loop.
@@ -368,6 +434,8 @@ struct Session<'a, W> {
     cfg: &'a Config,
     /// Told the size the car asked to be rendered at, whenever it changes.
     screen: ScreenReport<'a>,
+    /// Where the car's touch and panel keys go.
+    events: Arc<EventSink>,
     source: Source,
     /// When the video channel last carried anything at all. With pictures
     /// arriving on their own clock, this is what decides whether the heartbeat
@@ -380,13 +448,16 @@ struct Session<'a, W> {
     started_at: Option<Instant>,
     next_tick: Instant,
     up: bool,
+    /// Where the finger was the last time the car said. A release has to name it
+    /// — see `touch`.
+    last_touch: Option<(u16, u16)>,
 }
 
 impl<W: AsyncWrite + Unpin> Session<'_, W> {
     /// One message from the car.
     async fn handle<F: FnMut(bool)>(&mut self, chunk: frame::Chunk, carplay: &mut F) -> Result<()> {
         if chunk.channel != frame::CMD {
-            self.other_channel(chunk);
+            self.other_channel(chunk).await;
             return Ok(());
         }
         let Some(message) = frame::decode(frame::CMD, &chunk.body) else {
@@ -554,11 +625,12 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
 
     /// A chunk on any channel but the command channel.
     ///
-    /// Only the sixth channel is decoded, and only to be reported: it is where
-    /// the car's touch and panel keys arrive, and whether it sends any at all —
-    /// and with what — is one of the things the bench exists to find out. There
-    /// is nothing to forward them to until the CarPlay side is attached.
-    fn other_channel(&self, chunk: frame::Chunk) {
+    /// The sixth channel is the car's input, and it is the only one of the other
+    /// five that carries anything: the four after it are the media and voice
+    /// channels, which are the car's own. What arrives here is turned into the
+    /// commands the CarPlay side sends, and a key or a touch the CarLife protocol
+    /// has no meaning for is dropped with a line rather than guessed at.
+    async fn other_channel(&mut self, chunk: frame::Chunk) {
         if chunk.channel != frame::TOUCH {
             tracing::debug!("[cl] channel {} sent {} bytes", chunk.channel, chunk.body.len());
             return;
@@ -567,22 +639,79 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             tracing::warn!("[cl] a touch chunk that does not decode was dropped");
             return;
         };
-        match message.service_type {
+        let command = match message.service_type {
             TOUCH_ACTION => match proto::decode_touch_action(&message.body) {
-                Some(touch) => tracing::debug!(
-                    "[cl] touch action {} at {}, {}",
-                    touch.action,
-                    touch.x,
-                    touch.y
-                ),
-                None => tracing::warn!("[cl] a touch action with fields missing was dropped"),
+                Some(touch) => Some(self.touch(touch)),
+                None => {
+                    tracing::warn!("[cl] a touch action with fields missing was dropped");
+                    None
+                }
             },
             TOUCH_HARD_KEY => match proto::decode_hard_key(&message.body) {
-                Some(key) => tracing::debug!("[cl] panel key {key:#04x}"),
-                None => tracing::warn!("[cl] a panel key with its field missing was dropped"),
+                Some(key) => {
+                    let command = command_for(key);
+                    if command.is_none() {
+                        tracing::debug!("[cl] panel key {key:#04x} means nothing to a phone");
+                    }
+                    command
+                }
+                None => {
+                    tracing::warn!("[cl] a panel key with its field missing was dropped");
+                    None
+                }
             },
-            other => tracing::debug!("[cl] {other:#010x} arrived on the touch channel"),
+            other => {
+                tracing::debug!("[cl] {other:#010x} arrived on the touch channel");
+                None
+            }
+        };
+        let Some(command) = command else {
+            return;
+        };
+        // Failures are the phone's to have: a press that arrives before the event
+        // channel is up is dropped by the sink with a line of its own.
+        if let Err(e) = self.events.dispatch(command).await {
+            tracing::warn!("[cl] the phone did not take an input event: {e}");
         }
+    }
+
+    /// One touch action, as the report the phone wants: one six-byte slot per
+    /// finger the descriptor declares, and the car sends one finger, so the
+    /// second slot is always empty.
+    ///
+    /// The release names where the finger was. The car repeats the last position
+    /// for it, and that is what the phone needs: it completes a tap only when the
+    /// finger lifts inside the control it went down on, so a release at the
+    /// origin reads as the finger jumping to the top left corner and the tap is
+    /// cancelled instead — a button that animates and does nothing.
+    fn touch(&mut self, touch: proto::TouchAction) -> Command {
+        if touch.action == TOUCH_UP {
+            let (x, y) = self.last_touch.unwrap_or((0, 0));
+            return Command::Touch([
+                TouchContact { down: false, x, y },
+                TouchContact::default(),
+            ]);
+        }
+        let (x, y) = self.on_canvas(touch.x, touch.y);
+        self.last_touch = Some((x, y));
+        Command::Touch([
+            TouchContact { down: true, x, y },
+            TouchContact::default(),
+        ])
+    }
+
+    /// The car's own pixels as the phone's. They are the same numbers: the canvas
+    /// the car asked to be rendered at is what the phone was asked for, so a
+    /// touch is only clamped, because a point outside the picture is not on it.
+    fn on_canvas(&self, x: i32, y: i32) -> (u16, u16) {
+        let (width, height) = match self.agreed {
+            Some(agreed) => (agreed.width, agreed.height),
+            None => (i32::from(u16::MAX), i32::from(u16::MAX)),
+        };
+        (
+            x.clamp(0, width.max(1) - 1) as u16,
+            y.clamp(0, height.max(1) - 1) as u16,
+        )
     }
 
     /// Sends whatever the video channel owes right now.
@@ -772,7 +901,7 @@ mod tests {
             // Dropping the pipe is the car going away.
         });
 
-        run(device, &Frames::None, &cfg, &mut |_, _, _| {}, &mut carplay)
+        run(device, &Frames::None, &cfg, &mut |_, _, _| {}, EventSink::new(), &mut carplay)
             .await
             .expect("the session ends cleanly");
         car.await.unwrap();
@@ -805,7 +934,7 @@ mod tests {
         let mut screen = move |width: u32, height: u32, fps: u32| {
             seen.lock().unwrap().push((width, height, fps));
         };
-        run(device, &Frames::None, &cfg, &mut screen, &mut carplay)
+        run(device, &Frames::None, &cfg, &mut screen, EventSink::new(), &mut carplay)
             .await
             .expect("the session ends cleanly");
         car.await.unwrap();
@@ -834,7 +963,7 @@ mod tests {
             .await;
         });
 
-        run(device, &Frames::None, &cfg, &mut screen, &mut carplay)
+        run(device, &Frames::None, &cfg, &mut screen, EventSink::new(), &mut carplay)
             .await
             .expect("the session ends cleanly");
         car.await.unwrap();
@@ -866,7 +995,7 @@ mod tests {
             vec![0x00, 0x00, 0x00, 0x01, 0x65],
             vec![0x00, 0x00, 0x00, 0x01, 0x41],
         ]);
-        run(device, &frames, &cfg, &mut |_, _, _| {}, &mut carplay)
+        run(device, &frames, &cfg, &mut |_, _, _| {}, EventSink::new(), &mut carplay)
             .await
             .expect("the session ends cleanly");
         car.await.unwrap();
@@ -921,7 +1050,7 @@ mod tests {
         });
 
         let frames = Frames::Cycle(vec![vec![0x00, 0x00, 0x00, 0x01, 0x65]]);
-        run(device, &frames, &cfg, &mut |_, _, _| {}, &mut carplay)
+        run(device, &frames, &cfg, &mut |_, _, _| {}, EventSink::new(), &mut carplay)
             .await
             .expect("the session ends cleanly");
         car.await.unwrap();
@@ -941,7 +1070,7 @@ mod tests {
             car.expect_silence(Duration::from_millis(500)).await;
         });
 
-        run(device, &Frames::None, &cfg, &mut |_, _, _| {}, &mut carplay)
+        run(device, &Frames::None, &cfg, &mut |_, _, _| {}, EventSink::new(), &mut carplay)
             .await
             .expect("the session ends cleanly");
         car.await.unwrap();
@@ -979,7 +1108,7 @@ mod tests {
             });
         });
 
-        run(device, &frames, &cfg, &mut |_, _, _| {}, &mut carplay)
+        run(device, &frames, &cfg, &mut |_, _, _| {}, EventSink::new(), &mut carplay)
             .await
             .expect("the session ends cleanly");
         car.await.unwrap();
@@ -1000,7 +1129,7 @@ mod tests {
             // Dropping the pipe is the car going away.
         });
 
-        run(device, &frames, &cfg, &mut |_, _, _| {}, &mut carplay)
+        run(device, &frames, &cfg, &mut |_, _, _| {}, EventSink::new(), &mut carplay)
             .await
             .expect("the session ends cleanly");
         car.await.unwrap();
@@ -1027,9 +1156,46 @@ mod tests {
             car.expect_silence(Duration::from_millis(300)).await;
         });
 
-        run(device, &Frames::None, &cfg, &mut |_, _, _| {}, &mut carplay)
+        run(device, &Frames::None, &cfg, &mut |_, _, _| {}, EventSink::new(), &mut carplay)
             .await
             .expect("the session ends cleanly");
         car.await.unwrap();
+    }
+
+    /// Which of the car's keys a phone has a use for, and what each one means to
+    /// it. Both families of direction key land on the same four directions.
+    #[test]
+    fn the_panel_keys_a_phone_has_a_use_for_are_the_ones_that_reach_it() {
+        assert_eq!(command_for(KEY_MAIN), Some(Command::Home));
+        assert_eq!(command_for(KEY_HOME), Some(Command::Home));
+        assert_eq!(command_for(KEY_BACK), Some(Command::Back));
+        assert_eq!(command_for(KEY_OK), Some(Command::Select));
+        assert_eq!(command_for(KEY_MOVE_LEFT), Some(Command::Left));
+        assert_eq!(command_for(KEY_MOVE_RIGHT), Some(Command::Right));
+        assert_eq!(command_for(KEY_MOVE_UP), Some(Command::Up));
+        assert_eq!(command_for(KEY_MOVE_DOWN), Some(Command::Down));
+        assert_eq!(command_for(KEY_SELECTOR_NEXT), Some(Command::Down));
+        assert_eq!(command_for(KEY_SELECTOR_PREVIOUS), Some(Command::Up));
+        assert_eq!(command_for(KEY_SEEK_SUB), Some(Command::Prev));
+        assert_eq!(command_for(KEY_SEEK_ADD), Some(Command::Next));
+        assert_eq!(command_for(KEY_MEDIA_START), Some(Command::Play));
+        assert_eq!(command_for(KEY_MEDIA_STOP), Some(Command::Pause));
+        assert_eq!(command_for(KEY_VR_START), Some(Command::Siri));
+
+        assert_eq!(
+            command_for(KEY_PHONE_CALL),
+            Some(Command::Telephony(PHONE_HOOK_SWITCH))
+        );
+        assert_eq!(command_for(KEY_PHONE_END), Some(Command::Telephony(PHONE_DROP)));
+        assert_eq!(command_for(KEY_MUTE), Some(Command::Telephony(PHONE_MUTE)));
+    }
+
+    /// The rest of the car's keys: its radio, its navigation, its own volume and
+    /// settings. They are the head unit's business, and a phone gets nothing.
+    #[test]
+    fn the_keys_that_are_the_cars_own_go_no_further() {
+        for key in [0x04, 0x05, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x11, 0x12, 0x1D] {
+            assert_eq!(command_for(key), None, "key {key:#04x}");
+        }
     }
 }

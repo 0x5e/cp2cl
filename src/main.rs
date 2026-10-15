@@ -144,7 +144,7 @@ async fn main() -> Result<()> {
             screen: screen.clone(),
             restart: restart.clone(),
             shutdown,
-            event_sink,
+            event_sink: event_sink.clone(),
             mic,
             mfi: auth.clone(),
             audio_clock: Arc::new(Mutex::new(AudioClock::default())),
@@ -211,8 +211,11 @@ async fn main() -> Result<()> {
     // answer the gate it opens.
     let carried = cfg.clone();
     let alone = carplay.clone();
+    // The car's own input goes the way everything else does, so the session gets
+    // the same sink the CarPlay side fills in.
+    let input = event_sink;
     tokio::spawn(async move {
-        if let Err(e) = carlife::serve(carried, &frames, &mut named, &mut report).await {
+        if let Err(e) = carlife::serve(carried, &frames, &mut named, input, &mut report).await {
             // `{e:#}` and not `{e}`: the outer message says what we were doing
             // and the causes under it hold the errno, which is the part that
             // says why.
