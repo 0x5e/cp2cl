@@ -52,6 +52,13 @@ impl AudioCodec {
     /// Reads the single `audioFormat` bitfield the phone echoes back in the
     /// stream SETUP. Bits are LIVI's `kAirPlayAudioFormat_*` constants: OPUS and
     /// AAC-LC sit high up, the LPCM rates are one bit each below.
+    ///
+    /// Both AAC-LC bits mean 48 kHz, whatever the table calls them. The phone
+    /// sets the lower one whatever it was offered and then sends frames 1024
+    /// samples apart 46.9 times a second — 48 kHz on the wire, measured. Reading
+    /// that as 44.1 kHz is what made the pacer run 8.8% slower than the sound it
+    /// was pacing, and so what made the queue in front of it grow for as long as
+    /// the music played.
     pub fn from_format(fmt: i64) -> Self {
         let bits = fmt as u64;
         const OPUS: u64 = 0x7000_0000;
@@ -65,12 +72,10 @@ impl AudioCodec {
             };
         }
         if bits & (AAC_LC_44K | AAC_LC_48K) != 0 {
-            let rate = if bits & AAC_LC_48K != 0 {
-                48_000
-            } else {
-                44_100
+            return Self::AacLc {
+                rate: 48_000,
+                channels: 2,
             };
-            return Self::AacLc { rate, channels: 2 };
         }
         let (rate, channels) = match bits {
             0x4 => (8_000, 1),
@@ -445,6 +450,23 @@ mod tests {
                 assert_eq!(data, vec![0x11, 0x22]);
             }
             other => panic!("expected sound on the media channel, got {other:?}"),
+        }
+    }
+
+    /// Whichever of the two AAC-LC bits the phone sets, the stream is the 48 kHz
+    /// one it then sends — and the rate has to be right here, because it is what
+    /// the pacer, the decoder and the car are all told.
+    #[test]
+    fn an_aac_stream_is_48k_whichever_bit_the_phone_names_it_with() {
+        for bits in [0x40_0000, 0x80_0000, 0xc0_0000] {
+            assert_eq!(
+                AudioCodec::from_format(bits),
+                AudioCodec::AacLc {
+                    rate: 48_000,
+                    channels: 2
+                },
+                "0x{bits:x}"
+            );
         }
     }
 }

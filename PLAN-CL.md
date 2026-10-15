@@ -270,7 +270,7 @@ MD 收到 `GO_TO_FOREGROUND` 后 5 秒没切前台要回 `0x0001004C`。**都是
 
 | 流        | 通道 | 格式                                    | 方向    |
 | -------- | -- | ------------------------------------- | ----- |
-| Media    | 3  | PCM 44.1 kHz / 双声道 / 16 bit 小端        | MD→HU |
+| Media    | 3  | PCM 48 kHz / 双声道 / 16 bit 小端          | MD→HU |
 | Navi TTS | 4  | PCM 16 kHz / 单声道 / 16 bit 小端          | MD→HU |
 | VR TTS   | 5  | PCM 16 kHz / 单声道 / 16 bit             | MD→HU |
 | VR MIC   | 5  | PCM 16 kHz / 单声道 / 16 bit，**每包 1 KB** | HU→MD |
@@ -278,9 +278,9 @@ MD 收到 `GO_TO_FOREGROUND` 后 5 秒没切前台要回 `0x0001004C`。**都是
 `AUDIO_TRANSMISSION_MODE`（feature config 下发，默认 `0` = 专用音频通道，`1` = 走蓝牙）决定 HU 是听通道还是  
 听蓝牙；我们要的是 `0`，但那是 **HU 发给我们**的，不接受也没得选。
 
-表里的格式是**我们报给车机的**（`MSG_MEDIA_INIT`），不是它要求我们给的：采样率报的是手机上 AAC-LC 解出来的那个
-（解码不改采样率与声道数），所以它可能是 44.1 k 也可能是 48 k，见 §4.2。`MEDIA_SAMPLE_RATE` 那个开关因此只说明
-车机自己期望哪一档。
+表里的格式是**我们报给车机的**（`MSG_MEDIA_INIT`），不是它要求我们给的：采样率报的是手机上 AAC-LC 的采样率
+（解码不改采样率与声道数），**实测无线下手机给的是 48 kHz**（§4.2 有据）。车机自己期望哪一档由 feature config 的
+`MEDIA_SAMPLE_RATE` 说明（`1` = 48 kHz，默认 `0`），那只是车机的期望，我们不去满足它——我们只报手机给的那个。
 
 ### 3.8 触摸与按键
 
@@ -340,7 +340,13 @@ PCM 与 `102/media` AAC-LC 两条路，手机选的是后者；`info.rs:173-177`
 - **`symphonia` 只开 `aac`**（`default-features = false, features = ["aac"]`，落 0.5.5）：只要解器，不要
   demuxer 与其它编解码器。二进制增加约 230 KB（12.36 → 12.59 MB）。
 - **没有重采样**：`MSG_MEDIA_INIT` 里的 `sampleRate` 就报解出来的采样率，车机按它开 AudioTrack。解码不改变
-  采样率与声道数，所以报的就是手机上 SETUP 谈定那两个数（§3.9 的 `MEDIA_SAMPLE_RATE` 因此只影响车机自己的期望）。
+  采样率与声道数，所以报的就是手机上 SETUP 谈定那两个数。
+- **AAC-LC 一律按 48 kHz 读**（2026-10-16 实测）：手机在 SETUP 里把 `audioFormat` 回成 `0x400000`，而这个位按
+  LIVI 的表念是 44.1 k——**念错了**。同一次会话 20.71 s 收到 972 个包 = 46.93 包/s，一个包一个 1024 样本的
+  AAC 帧 ⇒ **48.06 kHz**，而 48000 ÷ 1024 = 46.875。所以 `from_format` 现在把两个 AAC 位都当 48 k。
+  **错一处的代价是三处**：重排按 1024/44100 = 23.22 ms/帧 走，比声音慢 8.8% ⇒ `pump_audio` 的队列一直涨
+  （5 秒涨 18 帧、20 秒攒到 90 帧 ≈ 2 s 音频），车机那头随之一直缺料；报给车机的 `MSG_MEDIA_INIT` 与
+  `/feedback` 里回报的播放位置也都跟着偏 8.8%。
 - **只有 media 进这条通道**：`sink.rs` 按 `AudioConfig` 的 `audioType` 认流（`media` / `telephony` /
   `speechrecognition` 是同一条事件流上的三样东西），只有 `media` 会被记住并转发；`AudioStopped` 转成
   `MSG_MEDIA_STOP`。格式只在变化时发一次 `MSG_MEDIA_INIT`。
@@ -356,13 +362,21 @@ PCM 与 `102/media` AAC-LC 两条路，手机选的是后者；`info.rs:173-177`
   现在**解码也挪到了「每帧到期的那一刻」**：收包时只存密文帧与（明文里的）时间戳，到期才解——一批 18 帧在
   收到时连着解，会让这一轮循环错过它自己的排期（回来时已经有几帧逾期，`PACE_SLACK` 一到就被一起发出去，
   正是重排想避免的那种 burst）。
-- **判据在日志里**（`CP2CL_LOG=debug`，每 5 秒一行 `[airplay] audio: …`）：`N held` 是堆在队列里的帧数，
-  **它必须不涨**，涨就是收得比发得快；`N decoded in X ms (worst Y ms)` 是解码侧，**一帧的预算**是 21.33 ms
-  （1024 样本 ÷ 48 k），`worst` 逼近它就是余量不够，`X` 对 5 秒窗口的占比就是单核占用。
+- **队列按时间戳排，不按到达顺序**（2026-10-16）：`hold()` 把每帧插到它时间戳该在的位置，并丢掉「比已经发出去
+  的那一帧还早」的帧。Wi-Fi 会偶发乱序（本次实测约 0.6 次/s，在日志里表现为 `missing` 以 65536 的整数倍往上
+  跳——那是序号倒退，不是丢包），乱序帧直接喂给解器，它自己就会说 `previous window is invalid`
+  （symphonia 的 `debug!`；日志里**没有 `[tag]` 前缀**的行都是依赖里的），21 ms 的错位听感上就是一声咔。
+- **判据在日志里**（`CP2CL_LOG=debug`，每 5 秒一行 `[airplay] audio: …`）：
+  - `missing` / `out of order` / `duplicates`：线上的事（丢包 / 乱序 / 重包），累计；
+  - `worst gap` / `bursts of N`：到达的块状程度（成块是手机的常态，一批 18 帧 ≈ 384 ms）；
+  - `N held`：堆在队列里的帧数——**它必须不涨**，涨就是收得比发得快；
+  - `X frames/s arrived (Y Hz), Z sent/s`：窗口内的收发速率，以及「到达速率换算成的采样率」。
+    `X` 与 `Z` 对不上就是排期与声音不同步；`Y` 落在 44.1 k 还是 48 k 一眼可辨；
+  - `N ms spent (worst M ms)`：解码侧。**一帧的预算**是 21.33 ms（1024 样本 ÷ 48 k），
+    `worst` 逼近它就是余量不够；`N` 对 5 秒窗口的占比就是单核占用。
 - **待验**：① Cortex-A7 单核实时解 AAC-LC 的余量——H3 四个核、视频侧只做搬运，理论上够，但这是整个方案里
-  **唯一**引入实时解码的地方，上板后用上面那行日志与 `top` 量；② `channelConfig`/`sampleFormat` 在真车上的取值；
-  ③ 一个 RTP 包里是不是只有一个 AAC 帧（`framesPerPacket`，现在打在音频流建立那行 info 日志里）——若不是，
-  解码器会逐帧拒收，日志里表现为「this stream's frames are being dropped」。
+  **唯一**引入实时解码的地方，上板后用上面那行日志与 `top` 量；② `channelConfig`/`sampleFormat` 在真车上的取值。
+  ③ 已确认：一个 RTP 包就是一个 AAC 帧（`packets = decoded + held` 一直精确成立）。
 
 ### 4.3 反向输入
 

@@ -55,6 +55,11 @@ const BURST_GAP: Duration = Duration::from_millis(50);
 /// the one stream that has to be re-timed on the way out.
 const BUFFERED_AUDIO: u8 = 102;
 
+/// Samples in one AAC-LC frame, which is every frame the re-timed stream carries.
+/// The pacer works in the phone's counter and has no need of this; the report
+/// reads that counter back as a rate with it.
+const FRAME_SAMPLES: u32 = 1024;
+
 /// How late a frame may be before the pacer stops resuming the schedule it was
 /// following and takes that frame as the new zero.
 ///
@@ -433,6 +438,33 @@ impl Drop for StopOnDrop {
 struct Pending {
     timestamp_us: u64,
     sealed: Vec<u8>,
+}
+
+/// Puts a frame where its moment says, among the ones already waiting.
+///
+/// The queue is in the order the phone stamped the frames rather than the order
+/// they arrived in. A packet that overtook another arrives after it, and handing
+/// the decoder the two out of turn is a frame it cannot place: it says so, and
+/// the twenty milliseconds come out as a click. Waiting a turn longer costs
+/// nothing — the queue is a lump deep at the least.
+///
+/// Returns whether it was taken. A frame the queue already holds is not worth a
+/// second decode, and one stamped at or before `sent` is a frame whose moment
+/// has passed: the car has been given the sound up to there, and this one now
+/// would land after its own neighbours.
+fn hold(queue: &mut VecDeque<Pending>, frame: Pending, sent: Option<u64>) -> bool {
+    if sent.is_some_and(|ts| frame.timestamp_us <= ts) {
+        return false;
+    }
+    let at = queue
+        .iter()
+        .position(|f| f.timestamp_us > frame.timestamp_us)
+        .unwrap_or(queue.len());
+    if at > 0 && queue[at - 1].timestamp_us == frame.timestamp_us {
+        return false;
+    }
+    queue.insert(at, frame);
+    true
 }
 
 /// Waits until the frame stamped `ts` is due, `last` being the deadline the one
@@ -1123,6 +1155,10 @@ impl Session {
                         .get("framesPerPacket")
                         .and_then(|v| v.as_signed_integer())
                         .unwrap_or(0) as u32;
+                    // The whole table, because the codec's own name for a stream
+                    // can be as much as 8% away from the rate it carries, and a
+                    // field naming the rate outright would settle it.
+                    tracing::debug!("[airplay] audio stream {stream_type} setup: {table:?}");
                     tracing::info!(
                         "[airplay] audio stream type {stream_type} {audio_type:?} \
                          (format 0x{fmt:x} -> {codec:?}), {frames_per_packet} frames per \
@@ -1321,12 +1357,18 @@ impl Session {
         // Sound that stutters is either packets that never arrived or ones that
         // arrived in lumps. The sequence number counts the first, the gap
         // between arrivals measures the second, and neither is visible from
-        // anywhere else — so both are reported, worst gap and all.
+        // anywhere else — so both are reported, worst gap and all. A counter
+        // that steps backwards is a third thing: a packet that overtook one
+        // already here, which the decoder sees as frames out of turn unless the
+        // queue puts them back in the order they were stamped.
         let mut last_seq: Option<u16> = None;
         let mut missing: u64 = 0;
+        let mut out_of_order: u64 = 0;
+        let mut duplicates: u64 = 0;
         let mut worst_gap = Duration::ZERO;
         let mut last_at = Instant::now();
         let mut report_at = last_at + AUDIO_REPORT;
+        let mut reported_at = last_at;
         // Lumps, counted directly: a gap longer than BURST_GAP closes the one
         // before it, so every closed lump is a burst and its packet count is
         // how much audio the phone handed over at once.
@@ -1343,7 +1385,14 @@ impl Session {
         let mut queue: VecDeque<Pending> = VecDeque::new();
         // Where the frame before this one was due; the next is measured from it.
         let mut aired = (0u64, tokio::time::Instant::now());
-        // What the decoder costs, which is the one thing in this loop that
+        // The frame the car was given last, by the phone's own counter. Anything
+        // stamped at or before it is a frame whose moment has passed — playing it
+        // now would put it after sound that has already gone out.
+        let mut sent: Option<u64> = None;
+        // Frames taken in, as against frames sent on: the two should keep step
+        // with each other, and a queue that grows is the two of them out of step.
+        let mut queued: u64 = 0;
+        // And what the decoder costs, which is the one thing in this loop that
         // has to keep up with the phone's encoder rather than with the wire.
         // Reported beside the gaps so that sound which stutters can be told
         // apart between packets that arrived in lumps and frames that took too
@@ -1359,6 +1408,7 @@ impl Session {
                 biased;
                 _ = wait_due(&mut aired, front.unwrap_or(0)), if front.is_some() => {
                     if let Some(frame) = queue.pop_front() {
+                        sent = Some(frame.timestamp_us);
                         let started = Instant::now();
                         let opened = rx.decode(&frame.sealed);
                         let spent = started.elapsed();
@@ -1396,8 +1446,14 @@ impl Session {
                         let seq = u16::from_be_bytes([buf[2], buf[3]]);
                         if let Some(prev) = last_seq {
                             // Wrapping subtraction, so a counter that rolls over
-                            // reads as the one packet it is.
-                            missing += u64::from(seq.wrapping_sub(prev.wrapping_add(1)));
+                            // reads as the one packet it is. Half the space is
+                            // forward and half backwards, which is what tells a
+                            // gap apart from a packet that overtook another.
+                            match seq.wrapping_sub(prev) {
+                                0 => duplicates += 1,
+                                step if step <= u16::MAX / 2 => missing += u64::from(step - 1),
+                                _ => out_of_order += 1,
+                            }
                         }
                         last_seq = Some(seq);
                     }
@@ -1407,10 +1463,13 @@ impl Session {
                         // before it is opened, and the decode it needs is
                         // spent when the moment comes.
                         if audio::could_be_a_frame(&buf[..n]) {
-                            queue.push_back(Pending {
+                            let frame = Pending {
                                 timestamp_us: audio::sample_stamp(codec.rate(), &buf[..n]),
                                 sealed: buf[..n].to_vec(),
-                            });
+                            };
+                            if hold(&mut queue, frame, sent) {
+                                queued += 1;
+                            }
                         }
                     } else {
                         rx.feed(&buf[..n]);
@@ -1434,16 +1493,27 @@ impl Session {
                         };
                         // `held` is what the re-timing shows: the lumps the phone
                         // hands over are spread out again here, so the queue
-                        // should sit inside one lump's worth rather than grow.
+                        // should sit inside one lump's worth rather than grow —
+                        // and whether it grows is `arrived` against `sent`.
                         //
                         // Debug level: it repeats every five seconds for as long
                         // as sound plays, which is noise unless something is
                         // being measured. The stream's closing line carries the
                         // same totals for the whole stream.
+                        let window = (now - reported_at).as_secs_f64();
+                        let in_rate = queued as f64 / window;
+                        let out_rate = decoded as f64 / window;
+                        // The rate the arrival implies, which is the number that
+                        // says whether the stream is being paced as the sound it
+                        // carries: a queue that grows for as long as the music
+                        // plays is this one not matching the codec's rate.
+                        let source = in_rate * f64::from(FRAME_SAMPLES);
                         tracing::debug!(
                             "[airplay] audio: {packets} packets, {missing} missing, \
+                             {out_of_order} out of order, {duplicates} duplicates, \
                              worst gap {:.0} ms, {bursts} bursts of {lo}-{hi} \
-                             (avg {avg:.1}), {} held, {decoded} decoded in {:.0} ms \
+                             (avg {avg:.1}), {} held, {in_rate:.1} frames/s arrived \
+                             ({source:.0} Hz), {out_rate:.1} sent/s, {:.0} ms spent \
                              (worst {:.0} ms)",
                             worst_gap.as_secs_f64() * 1000.0,
                             queue.len(),
@@ -1456,8 +1526,10 @@ impl Session {
                         burst_min = u32::MAX;
                         burst_max = 0;
                         decoded = 0;
+                        queued = 0;
                         decode_time = Duration::ZERO;
                         worst_decode = Duration::ZERO;
+                        reported_at = now;
                         report_at = now + AUDIO_REPORT;
                     }
                 }
@@ -1604,5 +1676,48 @@ mod tests {
     #[test]
     fn an_enlarged_canvas_stops_at_4k() {
         assert_eq!(params(3840, 2160, 75).canvas(), (3840, 2160));
+    }
+
+    fn frame(timestamp_us: u64) -> Pending {
+        Pending {
+            timestamp_us,
+            sealed: Vec::new(),
+        }
+    }
+
+    fn stamps(queue: &VecDeque<Pending>) -> Vec<u64> {
+        queue.iter().map(|f| f.timestamp_us).collect()
+    }
+
+    /// Frames are decoded in the order the phone stamped them, whatever order
+    /// they arrived in: one that overtook another is behind it again by the time
+    /// the decoder sees it, which is what keeps the twenty milliseconds it
+    /// carries in the place they belong.
+    #[test]
+    fn a_frame_that_arrived_out_of_turn_waits_its_turn() {
+        let mut queue = VecDeque::new();
+        assert!(hold(&mut queue, frame(300), None));
+        assert!(hold(&mut queue, frame(100), None));
+        assert!(hold(&mut queue, frame(200), None));
+        assert_eq!(stamps(&queue), vec![100, 200, 300]);
+    }
+
+    /// Two frames there is no point in: one the queue already holds, which would
+    /// only be decoded twice, and one whose moment has gone by, which the car
+    /// has already been given the sound up to.
+    #[test]
+    fn a_frame_that_has_no_turn_left_is_refused() {
+        let mut queue = VecDeque::new();
+        assert!(hold(&mut queue, frame(200), None));
+        assert!(!hold(&mut queue, frame(200), None), "the same frame twice");
+        assert!(
+            !hold(&mut queue, frame(100), Some(100)),
+            "a frame stamped where the car has already been taken to"
+        );
+        assert!(
+            hold(&mut queue, frame(100), Some(99)),
+            "one behind the watermark still has a place"
+        );
+        assert_eq!(stamps(&queue), vec![100, 200]);
     }
 }
