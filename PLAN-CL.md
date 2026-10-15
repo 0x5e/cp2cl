@@ -349,8 +349,18 @@ PCM 与 `102/media` AAC-LC 两条路，手机选的是后者；`info.rs:173-177`
   「8=8 bit，其余=16 bit」，所以这两个值是按位宽与声道数本身给的，不是编码值。
 - **TTS/VR（通道 4/5）仍然留空**：那两个低带宽流是车机自己的语音通道，而且 `symphonia` **没有** Opus 解器
   （早先记的「`symphonia` 的 `opus` feature」是错的），要做得另找库或移植。车机不会因为这两个通道没数据而拒会话。
+- **重排在上游，不在 CarLife 侧**（2026-10-16 订正）：`media` 那条流在 `102` 上是**成块**到达的（约 384 ms 一批，
+  18 包），接收侧 `airplay::server::pump_audio` 里一直有按手机时间戳的重新计时（`paced = stream_type == BUFFERED_AUDIO`、
+  `wait_due`/`PACE_SLACK` 8 ms/`PACE_RESET` 5 s），CarLife 侧只是把交到手上的 PCM 写出去。
+  **随浏览器一起删掉的只有前端自己的播放窗口（0.12/0.35），不是这段重排。**
+  现在**解码也挪到了「每帧到期的那一刻」**：收包时只存密文帧与（明文里的）时间戳，到期才解——一批 18 帧在
+  收到时连着解，会让这一轮循环错过它自己的排期（回来时已经有几帧逾期，`PACE_SLACK` 一到就被一起发出去，
+  正是重排想避免的那种 burst）。
+- **判据在日志里**（`CP2CL_LOG=debug`，每 5 秒一行 `[airplay] audio: …`）：`N held` 是堆在队列里的帧数，
+  **它必须不涨**，涨就是收得比发得快；`N decoded in X ms (worst Y ms)` 是解码侧，**一帧的预算**是 21.33 ms
+  （1024 样本 ÷ 48 k），`worst` 逼近它就是余量不够，`X` 对 5 秒窗口的占比就是单核占用。
 - **待验**：① Cortex-A7 单核实时解 AAC-LC 的余量——H3 四个核、视频侧只做搬运，理论上够，但这是整个方案里
-  **唯一**引入实时解码的地方，上板后要用 `top`/`pidstat` 量；② `channelConfig`/`sampleFormat` 在真车上的取值；
+  **唯一**引入实时解码的地方，上板后用上面那行日志与 `top` 量；② `channelConfig`/`sampleFormat` 在真车上的取值；
   ③ 一个 RTP 包里是不是只有一个 AAC 帧（`framesPerPacket`，现在打在音频流建立那行 info 日志里）——若不是，
   解码器会逐帧拒收，日志里表现为「this stream's frames are being dropped」。
 

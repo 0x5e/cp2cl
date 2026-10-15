@@ -423,9 +423,16 @@ impl Drop for StopOnDrop {
 }
 
 /// One audio frame waiting for the moment the phone's own timestamp gives it.
+///
+/// It is held sealed. Opening and decoding a frame is the most expensive thing
+/// this loop does, and doing it to the eighteen that arrive in one lump is what
+/// put the pacing behind its own schedule: the loop would spend a hundred
+/// milliseconds on the lump, come back to find four frames overdue, and fire
+/// them off together — which is the burst the re-timing exists to avoid. What is
+/// decoded now is one frame at a time, as each one comes due.
 struct Pending {
     timestamp_us: u64,
-    data: Vec<u8>,
+    sealed: Vec<u8>,
 }
 
 /// Waits until the frame stamped `ts` is due, `last` being the deadline the one
@@ -1336,6 +1343,14 @@ impl Session {
         let mut queue: VecDeque<Pending> = VecDeque::new();
         // Where the frame before this one was due; the next is measured from it.
         let mut aired = (0u64, tokio::time::Instant::now());
+        // What the decoder costs, which is the one thing in this loop that
+        // has to keep up with the phone's encoder rather than with the wire.
+        // Reported beside the gaps so that sound which stutters can be told
+        // apart between packets that arrived in lumps and frames that took too
+        // long to become PCM.
+        let mut decoded: u64 = 0;
+        let mut decode_time = Duration::ZERO;
+        let mut worst_decode = Duration::ZERO;
         loop {
             // A frame waiting to go out is the other thing this loop waits on.
             // With none there is nothing to wait for but the next packet.
@@ -1344,11 +1359,19 @@ impl Session {
                 biased;
                 _ = wait_due(&mut aired, front.unwrap_or(0)), if front.is_some() => {
                     if let Some(frame) = queue.pop_front() {
-                        sink.push(StreamEvent::AudioPacket {
-                            stream_type,
-                            timestamp_us: frame.timestamp_us,
-                            data: frame.data,
-                        });
+                        let started = Instant::now();
+                        let opened = rx.decode(&frame.sealed);
+                        let spent = started.elapsed();
+                        decode_time += spent;
+                        worst_decode = worst_decode.max(spent);
+                        if let Some((timestamp_us, data)) = opened {
+                            decoded += 1;
+                            sink.push(StreamEvent::AudioPacket {
+                                stream_type,
+                                timestamp_us,
+                                data,
+                            });
+                        }
                     }
                 }
                 got = socket.recv(&mut buf) => {
@@ -1379,8 +1402,15 @@ impl Session {
                         last_seq = Some(seq);
                     }
                     if paced {
-                        if let Some((timestamp_us, data)) = rx.decode(&buf[..n]) {
-                            queue.push_back(Pending { timestamp_us, data });
+                        // Held for its moment rather than decoded here: the
+                        // counter is in the clear, so a frame can be timed
+                        // before it is opened, and the decode it needs is
+                        // spent when the moment comes.
+                        if audio::could_be_a_frame(&buf[..n]) {
+                            queue.push_back(Pending {
+                                timestamp_us: audio::sample_stamp(codec.rate(), &buf[..n]),
+                                sealed: buf[..n].to_vec(),
+                            });
                         }
                     } else {
                         rx.feed(&buf[..n]);
@@ -1402,9 +1432,9 @@ impl Session {
                         } else {
                             (burst_min, burst_max, burst_sum as f64 / bursts as f64)
                         };
-                        // `held` is what the re-timing shows: a buffered stream
-                        // leaves at its own rate, so the queue should sit at a
-                        // steady depth instead of sawtoothing.
+                        // `held` is what the re-timing shows: the lumps the phone
+                        // hands over are spread out again here, so the queue
+                        // should sit inside one lump's worth rather than grow.
                         //
                         // Debug level: it repeats every five seconds for as long
                         // as sound plays, which is noise unless something is
@@ -1413,15 +1443,21 @@ impl Session {
                         tracing::debug!(
                             "[airplay] audio: {packets} packets, {missing} missing, \
                              worst gap {:.0} ms, {bursts} bursts of {lo}-{hi} \
-                             (avg {avg:.1}), {} held",
+                             (avg {avg:.1}), {} held, {decoded} decoded in {:.0} ms \
+                             (worst {:.0} ms)",
                             worst_gap.as_secs_f64() * 1000.0,
-                            queue.len()
+                            queue.len(),
+                            decode_time.as_secs_f64() * 1000.0,
+                            worst_decode.as_secs_f64() * 1000.0
                         );
                         worst_gap = Duration::ZERO;
                         bursts = 0;
                         burst_sum = 0;
                         burst_min = u32::MAX;
                         burst_max = 0;
+                        decoded = 0;
+                        decode_time = Duration::ZERO;
+                        worst_decode = Duration::ZERO;
                         report_at = now + AUDIO_REPORT;
                     }
                 }

@@ -82,7 +82,7 @@ impl AudioReceiver {
     /// The buffered stream is re-timed before it reaches the consumer, so the
     /// pacer wants the frame and its timestamp apart from the sink.
     pub fn decode(&mut self, packet: &[u8]) -> Option<(u64, Vec<u8>)> {
-        if packet.len() <= RTP_HEADER_LEN + TAG_LEN + NONCE_LEN {
+        if !could_be_a_frame(packet) {
             return None;
         }
         let end = packet.len() - NONCE_LEN;
@@ -101,7 +101,7 @@ impl AudioReceiver {
 
         // Read before the frame is decoded: decoding borrows the receiver
         // mutably, and so does reporting a frame that did not survive it.
-        let timestamp_us = self.timestamp_us(packet);
+        let at = sample_stamp(self.codec.rate(), packet);
         let data = match self.codec {
             // Raw samples, but every consumer wants them little-endian and
             // CarPlay sends them big-endian. Swapping every pair is the whole
@@ -130,7 +130,7 @@ impl AudioReceiver {
             // the top of this file.
             AudioCodec::Opus { .. } => return None,
         };
-        Some((timestamp_us, data))
+        Some((at, data))
     }
 
     pub fn feed(&mut self, packet: &[u8]) {
@@ -142,14 +142,27 @@ impl AudioReceiver {
             });
         }
     }
+}
 
-    /// The RTP timestamp is the phone's own sample counter. Turning it into
-    /// microseconds here is what lets playback be scheduled; for PCM it also
-    /// happens to be exact, since the counter *is* the sample index.
-    fn timestamp_us(&self, packet: &[u8]) -> u64 {
-        let sample = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]) as u64;
-        sample * 1_000_000 / self.codec.rate().max(1) as u64
-    }
+/// Whether a datagram is shaped like one of the phone's sealed frames at all.
+///
+/// The length is all that can be judged from outside the crypto; `decode` is
+/// what answers for the contents. The pacer asks this before it decides to hold
+/// a packet back for a later moment, which is the only thing it can ask without
+/// spending the decode.
+pub fn could_be_a_frame(packet: &[u8]) -> bool {
+    packet.len() > RTP_HEADER_LEN + TAG_LEN + NONCE_LEN
+}
+
+/// The moment the frame in this packet is due, in microseconds.
+///
+/// The counter is in the clear, ahead of the ciphertext, so a packet can be
+/// timed before it is opened — which is what lets the pacer put a frame on the
+/// schedule the phone's own timestamps give it, and decode it only when the
+/// moment arrives.
+pub fn sample_stamp(rate: u32, packet: &[u8]) -> u64 {
+    let sample = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]) as u64;
+    sample * 1_000_000 / rate.max(1) as u64
 }
 
 /// Big-endian s16 → little-endian s16, which is what every consumer expects.
@@ -159,4 +172,25 @@ fn to_le16(payload: &[u8]) -> Vec<u8> {
         pair.swap(0, 1);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What the pacer does before it decodes anything: one datagram, shaped like
+    /// a sealed frame, with the counter it is to be timed by in the clear.
+    #[test]
+    fn a_sealed_frame_is_timed_before_it_is_opened() {
+        let mut packet = vec![0u8; RTP_HEADER_LEN + TAG_LEN + NONCE_LEN + 4];
+        // The counter is the phone's sample index: one second at 44.1 kHz.
+        packet[4..8].copy_from_slice(&44_100u32.to_be_bytes());
+        assert!(could_be_a_frame(&packet));
+        assert_eq!(sample_stamp(44_100, &packet), 1_000_000);
+
+        // Header, tag and nonce with nothing carried between them: not a frame,
+        // and nothing in it to time either.
+        packet.truncate(RTP_HEADER_LEN + TAG_LEN + NONCE_LEN);
+        assert!(!could_be_a_frame(&packet));
+    }
 }
