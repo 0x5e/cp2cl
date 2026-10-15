@@ -69,13 +69,16 @@ const HEARTBEAT: Duration = Duration::from_secs(1);
 pub enum Frames {
     /// Nothing but heartbeats: the session is up and the car is kept waiting.
     None,
-    /// One access unit, repeated at the agreed rate.
+    /// The access units of a file, in the order the file holds them, at the
+    /// agreed rate, started over at the end.
     ///
-    /// Not a picture a person would watch — every frame is a keyframe and none
-    /// of them change — but it is a real H.264 stream, so it is enough to prove
-    /// the channel and the car's decoder end to end with no encoder and no phone
-    /// in the picture. `CP2CL_INPUT_FILE` names the file it comes from.
-    Still(Vec<u8>),
+    /// A file with one access unit in it is the case the bench is run on when
+    /// there is no phone: one picture, sent again and again, which is nothing a
+    /// person would watch but is a real H.264 stream all the same, and proves the
+    /// channel and the car's decoder end to end with no encoder in the picture. A
+    /// file with a stream in it is what makes the picture move. `CP2CL_INPUT_FILE`
+    /// names the file.
+    Cycle(Vec<Vec<u8>>),
     /// The CarPlay side, as it arrives. Frames are written to the car as they
     /// come in rather than on the session's own clock: they are a coded stream,
     /// and it is the phone's encoder that decides the rate.
@@ -83,7 +86,7 @@ pub enum Frames {
 }
 
 impl Frames {
-    /// One access unit from the file `CP2CL_INPUT_FILE` names.
+    /// The access units of the file `CP2CL_INPUT_FILE` names, in file order.
     ///
     /// A file that cannot be read is worth a warning and not a failure: the
     /// session is still useful without it, and saying so beats refusing to start.
@@ -101,11 +104,20 @@ impl Frames {
         };
         match std::fs::read(&path) {
             Ok(bytes) if !bytes.is_empty() => {
+                let units = access_units(&bytes);
+                if units.is_empty() {
+                    tracing::warn!(
+                        "[cl] {path} holds no access unit; sending heartbeats only"
+                    );
+                    return Self::None;
+                }
                 tracing::info!(
-                    "[cl] the video channel will repeat {path} ({} bytes)",
-                    bytes.len()
+                    "[cl] the video channel will play {path} \
+                     ({} bytes in {} access units)",
+                    bytes.len(),
+                    units.len()
                 );
-                Self::Still(bytes)
+                Self::Cycle(units)
             }
             Ok(_) => {
                 tracing::warn!("[cl] {path} is empty; sending heartbeats only");
@@ -117,6 +129,67 @@ impl Frames {
             }
         }
     }
+}
+
+/// Splits an annex-B stream into access units, one per coded picture.
+///
+/// What a decoder is handed is a picture together with the parameter sets that
+/// describe it, so the boundaries are where a slice arrives after another slice
+/// and where a parameter set or an access unit delimiter arrives after a
+/// picture. Splitting on the slices alone would leave each picture's parameter
+/// sets at the end of the picture before it.
+///
+/// Anything ahead of the first start code is dropped, and a stream with no start
+/// code in it has no access units.
+fn access_units(bytes: &[u8]) -> Vec<Vec<u8>> {
+    // Where each NAL begins and what kind it is; the type is the low five bits
+    // of the byte after the start code, which is the whole of a NAL header.
+    let mut nals: Vec<(usize, u8)> = Vec::new();
+    let mut at = 0;
+    while at + 3 <= bytes.len() {
+        let header = if bytes[at..at + 3] == [0, 0, 1] {
+            at + 3
+        } else if at + 4 <= bytes.len() && bytes[at..at + 4] == [0, 0, 0, 1] {
+            at + 4
+        } else {
+            at += 1;
+            continue;
+        };
+        if header >= bytes.len() {
+            break;
+        }
+        nals.push((at, bytes[header] & 0x1f));
+        at = header;
+    }
+
+    // A stream with no start code in it has no access units to give.
+    if nals.is_empty() {
+        return Vec::new();
+    }
+
+    // Where the units begin, starting at the first NAL. A unit opens at every
+    // slice that follows one, and at every parameter set or delimiter that
+    // follows a picture.
+    let mut starts = vec![0usize];
+    let mut in_picture = false;
+    for (index, &(_, kind)) in nals.iter().enumerate() {
+        if let 1..=5 = kind {
+            if in_picture {
+                starts.push(index);
+            }
+            in_picture = true;
+        } else if in_picture && matches!(kind, 7 | 8 | 9) {
+            starts.push(index);
+            in_picture = false;
+        }
+    }
+
+    let mut bounds: Vec<usize> = starts.iter().map(|&index| nals[index].0).collect();
+    bounds.push(bytes.len());
+    bounds
+        .windows(2)
+        .map(|unit| bytes[unit[0]..unit[1]].to_vec())
+        .collect()
 }
 
 /// Runs one session until the car goes away.
@@ -145,7 +218,13 @@ where
                 (None, Source::None)
             }
         },
-        Frames::Still(still) => (None, Source::Still(still.clone())),
+        Frames::Cycle(units) => (
+            None,
+            Source::Cycle {
+                units: units.clone(),
+                next: 0,
+            },
+        ),
         Frames::None => (None, Source::None),
     };
 
@@ -242,7 +321,8 @@ enum ChunkOrEnd {
 /// about it: the receiving half is not here, because it belongs to the `select!`.
 enum Source {
     None,
-    Still(Vec<u8>),
+    /// The file's access units, and which of them goes out next.
+    Cycle { units: Vec<Vec<u8>>, next: usize },
     Live,
 }
 
@@ -472,12 +552,13 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             // still alive, because it is what notices when that changes.
             return Ok(());
         };
+        // The file's next picture, taken before it is written: the write wants
+        // the session mutably and the file is part of the session.
+        if let Some(unit) = self.next_file_unit() {
+            let elapsed = started_at.elapsed().as_millis() as u32;
+            return self.send_frame(VIDEO_DATA, elapsed, &unit).await;
+        }
         match &self.source {
-            Source::Still(still) => {
-                let elapsed = started_at.elapsed().as_millis() as u32;
-                let still = still.clone();
-                self.send_frame(VIDEO_DATA, elapsed, &still).await
-            }
             // Pictures arrive on the phone's own clock, so there is nothing for
             // the tick to send while they do. A heartbeat goes out once they
             // stop, which is what tells the car the channel is still ours.
@@ -492,8 +573,22 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     Ok(())
                 }
             }
-            Source::None => self.send(VIDEO_HEARTBEAT, &[]).await,
+            _ => self.send(VIDEO_HEARTBEAT, &[]).await,
         }
+    }
+
+    /// The file's next access unit, moving the file past it, or nothing at all
+    /// when the pictures are coming from somewhere else.
+    ///
+    /// The end of the file is the start of it: a file that ran out would leave
+    /// the channel with heartbeats and a picture that stopped.
+    fn next_file_unit(&mut self) -> Option<Vec<u8>> {
+        let Source::Cycle { units, next } = &mut self.source else {
+            return None;
+        };
+        let unit = units[*next].clone();
+        *next = (*next + 1) % units.len();
+        Some(unit)
     }
 
     /// One access unit from the CarPlay side, on the video channel.
@@ -516,7 +611,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     /// heartbeat's.
     fn period(&self) -> Duration {
         match (&self.source, self.started_at, self.agreed) {
-            (Source::Still(_), Some(_), Some(agreed)) if agreed.frame_rate > 0 => {
+            (Source::Cycle { .. }, Some(_), Some(agreed)) if agreed.frame_rate > 0 => {
                 Duration::from_millis(1000 / agreed.frame_rate as u64)
             }
             _ => HEARTBEAT,
@@ -646,7 +741,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_repeated_frame_goes_out_on_the_video_channel_with_a_timestamp() {
+    async fn the_files_access_units_go_out_in_order_and_start_over_at_the_end() {
         let cfg = Config::from_env();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
@@ -655,16 +750,61 @@ mod tests {
             let mut car = Car { pipe };
             car.handshake(asked()).await;
             car.start_the_encoder().await;
-            let first = car.expect(VIDEO_DATA).await;
-            assert_eq!(first.body, vec![0x00, 0x00, 0x00, 0x01, 0x65]);
-            assert!(first.timestamp_ms.is_some());
+            // A file two units long: the third picture out is the first again.
+            for expected in [
+                [0x00, 0x00, 0x00, 0x01, 0x65],
+                [0x00, 0x00, 0x00, 0x01, 0x41],
+                [0x00, 0x00, 0x00, 0x01, 0x65],
+            ] {
+                let picture = car.expect(VIDEO_DATA).await;
+                assert_eq!(picture.body, expected);
+                assert!(picture.timestamp_ms.is_some());
+            }
         });
 
-        let still = Frames::Still(vec![0x00, 0x00, 0x00, 0x01, 0x65]);
-        run(device, &still, &cfg, &mut carplay)
+        let frames = Frames::Cycle(vec![
+            vec![0x00, 0x00, 0x00, 0x01, 0x65],
+            vec![0x00, 0x00, 0x00, 0x01, 0x41],
+        ]);
+        run(device, &frames, &cfg, &mut carplay)
             .await
             .expect("the session ends cleanly");
         car.await.unwrap();
+    }
+
+    #[test]
+    fn a_stream_is_split_into_one_access_unit_per_picture() {
+        // Parameter sets, an IDR, a picture that follows it, and then a picture
+        // with its parameter sets written out again, the way an encoder does at
+        // a keyframe.
+        let stream: Vec<u8> = [
+            &[0u8, 0, 0, 1, 0x67][..],
+            &[0, 0, 0, 1, 0x68][..],
+            &[0, 0, 0, 1, 0x65][..],
+            &[0, 0, 1, 0x41][..],
+            &[0, 0, 0, 1, 0x67][..],
+            &[0, 0, 0, 1, 0x68][..],
+            &[0, 0, 0, 1, 0x41][..],
+        ]
+        .concat();
+
+        let units = access_units(&stream);
+        assert_eq!(units.len(), 3, "one unit per picture");
+        assert_eq!(
+            units[0],
+            [0, 0, 0, 1, 0x67, 0, 0, 0, 1, 0x68, 0, 0, 0, 1, 0x65],
+            "the first picture keeps the parameter sets in front of it"
+        );
+        assert_eq!(units[1], [0, 0, 1, 0x41], "a picture on its own");
+        assert_eq!(
+            units[2],
+            [0, 0, 0, 1, 0x67, 0, 0, 0, 1, 0x68, 0, 0, 0, 1, 0x41],
+            "a repeat of the parameter sets opens the unit, not closes it"
+        );
+
+        // One picture in a file is one access unit; nothing in a file is none.
+        assert_eq!(access_units(&[0, 0, 0, 1, 0x65, 0xaa]).len(), 1);
+        assert!(access_units(&[1, 2, 3, 4]).is_empty());
     }
 
     #[tokio::test]
@@ -680,8 +820,8 @@ mod tests {
             car.expect_silence(Duration::from_millis(500)).await;
         });
 
-        let still = Frames::Still(vec![0x00, 0x00, 0x00, 0x01, 0x65]);
-        run(device, &still, &cfg, &mut carplay)
+        let frames = Frames::Cycle(vec![vec![0x00, 0x00, 0x00, 0x01, 0x65]]);
+        run(device, &frames, &cfg, &mut carplay)
             .await
             .expect("the session ends cleanly");
         car.await.unwrap();
