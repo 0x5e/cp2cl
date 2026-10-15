@@ -10,16 +10,13 @@
 //! It also owns the two pieces both halves share rather than duplicate: the
 //! bringup loop, and the latch that lets a session be ended from the outside.
 //!
-//! Where the carkit stream comes from differs by platform. macOS asks the system
-//! `usbmuxd`, which already owns every iPhone plugged into the machine. A board has
-//! nothing to ask — Alpine does not even package a usbmuxd — so Linux claims the phone
-//! itself: `iap2_usbmux` puts it into its CarPlay USB configuration and drives the mux
-//! off it, and `iap2_wired::open_carkit` runs lockdown over that to open
-//! `com.apple.carkit.service`. The Linux half therefore holds that claim for as long as
-//! the session lasts, because letting go hands the phone back to its default
-//! configuration.
+//! A board has no usbmuxd to ask — Alpine does not even package one — so the phone is
+//! claimed here instead: `iap2_usbmux` puts it into its CarPlay USB configuration and
+//! drives the mux off it, and `iap2_wired::open_carkit` runs lockdown over that to open
+//! `com.apple.carkit.service`. The claim is held for as long as the session lasts,
+//! because letting go hands the phone back to its default configuration.
 //!
-//! The Linux half also has to bring the phone's USB network function up itself: nothing
+//! The session also has to bring the phone's USB network function up itself: nothing
 //! else on a board gets there before the phone is answered. See `bridge`, and the second
 //! handle the session holds onto.
 
@@ -63,20 +60,17 @@ pub(crate) enum Ended {
     Restart,
 }
 
-/// One phone on the cable, in whatever form this platform's transport wants it.
+/// One phone on the cable.
 struct Phone {
     /// Names it in the log and in the "is it still plugged in" check.
     id: String,
-    /// macOS: the daemon's own record, needed to open the channel again.
-    #[cfg(not(target_os = "linux"))]
-    daemon: idevice::usbmuxd::UsbmuxdDevice,
 }
 
 /// Who is on the cable right now.
 ///
-/// Linux reads `/sys/bus/usb/devices` itself: a board has no usbmuxd to ask, so the
-/// phone is claimed in-process instead — see `claim` and `carkit` below.
-#[cfg(target_os = "linux")]
+/// Read out of `/sys/bus/usb/devices` rather than asked of a daemon: a board has no
+/// usbmuxd to ask, so the phone is claimed in-process instead — see `claim` and
+/// `carkit` below.
 async fn attached() -> Vec<Phone> {
     iap2_usbmux::find_iphones()
         .into_iter()
@@ -84,28 +78,11 @@ async fn attached() -> Vec<Phone> {
         .collect()
 }
 
-/// Who is on the cable right now, according to the daemon that already owns it.
-#[cfg(not(target_os = "linux"))]
-async fn attached() -> Vec<Phone> {
-    match iap2_wired::usbmuxd::devices().await {
-        Ok(devices) => devices
-            .into_iter()
-            .map(|daemon| Phone { id: daemon.udid.clone(), daemon })
-            .collect(),
-        Err(e) => {
-            // Silence is normal before any phone has ever been trusted.
-            tracing::trace!("usbmuxd query failed: {e}");
-            Vec::new()
-        }
-    }
-}
-
 /// Claims the phone's CarPlay USB configuration and its mux, and keeps both.
 ///
 /// Only the CarPlay configuration carries the mux and the network function, so this is
 /// what makes either reachable at all. The handle has to outlive every session it
 /// serves: dropping it hands the phone back to its default configuration.
-#[cfg(target_os = "linux")]
 async fn claim(serial: String) -> anyhow::Result<Arc<iap2_usbmux::MuxDevice>> {
     // The phone is given up to five seconds to re-enumerate with the CarPlay
     // configurations, so this sleeps — keep it off the runtime's threads.
@@ -127,7 +104,6 @@ async fn claim(serial: String) -> anyhow::Result<Arc<iap2_usbmux::MuxDevice>> {
 ///
 /// The handle has to outlive every session it serves, because letting go returns the
 /// interfaces to `cdc_ncm` and takes the interface — and so the address — with it.
-#[cfg(target_os = "linux")]
 async fn bridge(serial: String) -> anyhow::Result<iap2_usbmux::NcmBridge> {
     // Claiming interfaces and bringing a link up are all blocking work.
     tokio::task::spawn_blocking(move || iap2_usbmux::NcmBridge::start(&serial))
@@ -137,21 +113,12 @@ async fn bridge(serial: String) -> anyhow::Result<iap2_usbmux::NcmBridge> {
 }
 
 /// The carkit stream for a phone we claimed ourselves.
-#[cfg(target_os = "linux")]
 async fn carkit(mux: &Arc<iap2_usbmux::MuxDevice>) -> anyhow::Result<Box<dyn idevice::ReadWrite>> {
     iap2_wired::open_carkit(mux)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .into_stream()
         .ok_or_else(|| anyhow::anyhow!("carkit stream unavailable after opening the service"))
-}
-
-/// The carkit stream for a phone the system daemon is holding.
-#[cfg(not(target_os = "linux"))]
-async fn carkit(phone: &Phone) -> anyhow::Result<Box<dyn idevice::ReadWrite>> {
-    iap2_wired::usbmuxd::open(&phone.daemon)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// Keeps asking who is plugged in until we stop being asked to stop.
@@ -216,35 +183,26 @@ async fn attach(
     // carkit is coming up is still waiting for us rather than lost.
     let mut changed = restart.subscribe();
 
-    // Linux owns the phone's USB configuration from here on, so it is claimed once and
-    // held across every session this attach produces; macOS leaves it to the daemon.
-    #[cfg(target_os = "linux")]
+    // The phone's USB configuration is ours from here on, so it is claimed once and
+    // held across every session this attach produces.
     let mux = claim(phone.id.clone()).await?;
 
-    // The stream the phone sends its media over. On macOS this is the enX the phone's USB
-    // network function shows up as; on Linux it is the interface we lay over that same
-    // function ourselves, because asking the kernel for it means asking nobody to bring
-    // it up in time. See `bridge` — and note the handle is kept, not just read: dropping
-    // it hands the function back to `cdc_ncm` and takes the interface with it.
-    #[cfg(target_os = "linux")]
+    // The stream the phone sends its media over: the interface laid over the phone's USB
+    // network function ourselves, because asking the kernel for it means asking nobody to
+    // bring it up in time. See `bridge` — and note the handle is kept, not just read:
+    // dropping it hands the function back to `cdc_ncm` and takes the interface with it.
     let ncm = bridge(phone.id.clone()).await;
-    #[cfg(target_os = "linux")]
     let av_iface = match &ncm {
         Ok(ncm) => Some(ncm.ifname.clone()),
         Err(e) => {
             tracing::warn!("[cp] no NCM bridge ({e}); falling back to the kernel's interface");
-            av_interface(&phone.id).await
+            av_interface().await
         }
     };
-    #[cfg(not(target_os = "linux"))]
-    let av_iface = av_interface(&phone.id).await;
     tracing::info!("[cp] av interface: {:?}", av_iface);
 
     loop {
-        #[cfg(target_os = "linux")]
         let tunnel = carkit(&mux).await?;
-        #[cfg(not(target_os = "linux"))]
-        let tunnel = carkit(phone).await?;
         tracing::info!("[cp] {} carkit up, starting iAP2", short(&phone.id));
 
         let identity = Identity {
@@ -485,31 +443,17 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Latched<S> {
     }
 }
 
-/// Which interface carries CarPlay's own media, per platform.
-///
-/// Linux rarely needs this: the NCM bridge names the interface it builds and
-/// brings up itself. This is the fallback for when that bridge could not be
-/// started, and it is the primary answer on macOS.
-async fn av_interface(_udid: &str) -> Option<String> {
-    #[cfg(target_os = "macos")]
-    {
-        // The phone's own USB network function, looked up by UDID.
-        return iap2_wired::mac_network::discover(_udid).await.ok();
-    }
-    #[cfg(target_os = "linux")]
-    {
-        // A board usually names it usb0; take the first one that looks like it.
-        let entries = std::fs::read_dir("/sys/class/net").ok()?;
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with("usb") || name.starts_with("enp") {
-                return Some(name);
-            }
+/// Which interface carries CarPlay's own media, when the NCM bridge could not be
+/// started: the bridge normally names the interface it builds and brings up
+/// itself, so this is only the fallback.
+async fn av_interface() -> Option<String> {
+    // A board usually names it usb0; take the first one that looks like it.
+    let entries = std::fs::read_dir("/sys/class/net").ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("usb") || name.starts_with("enp") {
+            return Some(name);
         }
-        None
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        None
-    }
+    None
 }

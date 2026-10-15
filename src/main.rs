@@ -12,10 +12,6 @@
 //!   session feeding a head unit — never both.
 
 mod airplay;
-// The protocol half of CarLife is plain code and its tests run anywhere, but
-// presenting a USB device is something only Linux does, so off Linux nothing
-// reaches into the module and most of it would be reported as unused.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod carlife;
 mod commands;
 mod config;
@@ -36,10 +32,7 @@ use tokio::sync::Mutex;
 use crate::airplay::clock::SyncedClock;
 use crate::airplay::pairing::Pairings;
 use crate::airplay::{AudioClock, EventSink, MicSink, SharedScreen};
-use crate::config::{Config, Sink};
-// Only the CarLife half reads this, and only Linux has one.
-#[cfg(target_os = "linux")]
-use crate::config::Input;
+use crate::config::{Config, Input, Sink};
 use crate::sink::{AudioCodec, ClOutlet, MediaSink};
 
 #[tokio::main]
@@ -198,7 +191,6 @@ async fn main() -> Result<()> {
     // the other end of the bridge, and both go away again when it does. The
     // outlet is what says the car is the reader, so it is also what says to start
     // the CarLife half.
-    #[cfg(target_os = "linux")]
     if let Some(outlet) = outlet.clone() {
         let opening = carplay.clone();
         let nudge = restart.clone();

@@ -18,6 +18,9 @@ use super::{parse_mac, ready, run_session, short};
 use crate::config::Config;
 use crate::session::Ended;
 
+/// Keeps serving phones until the program stops. Nothing pushes "a phone just
+/// paired" from outside, so a session that ends puts us back to waiting for the
+/// same phone to come again.
 pub async fn watch(
     cfg: Arc<Config>,
     auth: SharedCoprocessor,

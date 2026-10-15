@@ -5,9 +5,7 @@
 //! identification, same MFi challenge, same `run_accessory`. What changes is
 //! only:
 //!
-//! * the bytes come from Bluetooth, and both platforms hand them over
-//!   differently (BlueZ over D-Bus on Linux, an IOBluetooth helper over a unix
-//!   socket on macOS),
+//! * the bytes come from Bluetooth, by way of BlueZ,
 //! * `Transport::Wireless`, which puts a Bluetooth component and a wireless
 //!   CarPlay component in the identification message,
 //! * `CarPlayStartSession` has to name a Wi-Fi network and an address on it,
@@ -30,15 +28,9 @@ use tokio::sync::{broadcast, mpsc};
 use crate::config::Config;
 use crate::session::{run_bringup, Ended};
 
-#[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "macos")]
-mod macos;
 
-#[cfg(target_os = "linux")]
 pub use linux::watch;
-#[cfg(target_os = "macos")]
-pub use macos::watch;
 
 /// Runs the iAP2 half of one wireless session on a channel that is already up,
 /// and says whether the phone should be asked back for another one.
@@ -89,8 +81,8 @@ pub(crate) async fn run_session(
         av_iface_late: None,
         available_current_ma: 500,
         // The router's BSSID when we know it. Without it the accessory's device
-        // identifier is this machine's Wi-Fi MAC, which recent macOS SDKs report
-        // as a placeholder, and the phone then has nothing stable to recognise.
+        // identifier is this machine's Wi-Fi MAC, and the phone then has
+        // nothing stable to recognise.
         ap_mac: cfg.ap_mac.clone(),
         ap_on_air: None,
         // Nothing here watches the cable: a phone seen over Bluetooth is taken
@@ -133,19 +125,10 @@ pub(crate) async fn run_session(
     ended
 }
 
-/// The SSID and channel an interface is on air with. Linux answers from
-/// nl80211; a platform without it never has an answer.
-#[cfg(target_os = "linux")]
+/// The SSID and channel an interface is on air with, read from nl80211.
 fn on_air(iface: &str) -> Option<(String, u8)> {
     let (ssid, channel) = livi_runtime::net::ap_ssid_channel(iface);
     ssid.zip(channel)
-}
-
-/// There is no reading here — what an interface beacons is asked of nl80211 —
-/// so this is always nothing.
-#[cfg(not(target_os = "linux"))]
-fn on_air(_iface: &str) -> Option<(String, u8)> {
-    None
 }
 
 /// The SSID and channel of the access point `cfg.wifi_iface` is on air with,
@@ -175,19 +158,8 @@ fn wifi_parameters(cfg: &Config) -> (String, String, u8) {
         );
         return (ssid, cfg.passphrase.clone(), channel);
     }
-    #[cfg(target_os = "linux")]
     tracing::info!(
         "[cp-wifi] {} is not on air as an access point; the phone is told {:?} on channel {} \
-         from CP2CL_WIFI_SSID / CP2CL_WIFI_CHANNEL",
-        cfg.wifi_iface,
-        cfg.ssid,
-        cfg.wifi_channel
-    );
-    // Nothing to read with on a Mac, so the environment is the whole of the
-    // answer there.
-    #[cfg(not(target_os = "linux"))]
-    tracing::info!(
-        "[cp-wifi] {} cannot be read on this platform; the phone is told {:?} on channel {} \
          from CP2CL_WIFI_SSID / CP2CL_WIFI_CHANNEL",
         cfg.wifi_iface,
         cfg.ssid,
@@ -235,25 +207,4 @@ pub(crate) fn ready(cfg: &Config) -> Result<(), String> {
         );
     }
     Ok(())
-}
-
-/// Keeps asking the platform for phones until the program stops.
-///
-/// Neither platform pushes "a phone just paired", so both poll. A session that
-/// ends puts us back to waiting for the same phone to come again.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub async fn watch(
-    cfg: Arc<Config>,
-    _auth: SharedCoprocessor,
-    _airplay_port: u32,
-    _restart: broadcast::Sender<()>,
-    _gate: tokio::sync::watch::Receiver<bool>,
-) {
-    tracing::error!(
-        "[cp-wifi] wireless CarPlay needs Bluetooth, and this platform has no \
-         backend for it: {}",
-        std::env::consts::OS
-    );
-    let _ = cfg;
-    std::future::pending::<()>().await;
 }

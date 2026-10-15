@@ -37,6 +37,10 @@ to half screen.
 
 ## Build and run
 
+This crate only builds for Linux: the CarLife half talks to configfs, FunctionFS
+and nl80211 directly, so there is nothing for another platform to build. On a
+Linux machine, from the checkout:
+
 ```bash
 git submodule update --init --recursive
 
@@ -81,8 +85,8 @@ Then plug the phone in and unlock it. You should see:
 ### Cross-compiling for the board
 
 The board is a **NanoPi Duo2** — armv7 hard-float, Ubuntu 24.04, glibc 2.39. It
-cannot build this crate itself, and macOS has no armv7 toolchain, so the build
-runs in the container defined by `docker/`. Build the image once:
+cannot build this crate itself, so the build runs in the container defined by
+`docker/`. Build the image once:
 
 ```bash
 docker build --platform linux/arm64 -t cp2cl-armv7-builder docker/
@@ -99,7 +103,9 @@ docker run --rm --platform linux/arm64 -u "$(id -u):$(id -g)" \
 `cp2cl-cargo` is a named volume holding the cargo cache, so only the first build
 downloads anything. `-u` keeps the build products owned by you rather than by
 root. Use `cargo check` in place of `cargo build --release` to type-check the
-Linux-only `#[cfg]` branches — the only way to reach them from macOS.
+whole crate without generating code, and `cargo test` to run the unit tests:
+**this crate only builds for Linux**, and the container is the shortest way to a
+Linux compiler from here.
 
 **The binary is statically linked, and that is the point.** The target is musl
 rather than the board's glibc, and `.cargo/config.toml` asks for `+crt-static` on
@@ -185,8 +191,8 @@ Tearing the link down is more than dropping a handle. LIVI's link driver splits
 the stream it is given and parks the read half in a task of its own, so a read
 has to be made to return before the socket actually closes —
 `src/session.rs::Latched` is that, and it is why the wired path wraps its carkit
-stream in it. On macOS wireless the same wrapper is around the bridge's unix
-socket, which is what makes the helper close the RFCOMM channel under the phone.
+stream in it. Wireless wraps the RFCOMM socket in the same thing, which is what
+closes the BlueZ channel under the phone.
 
 The phone is left alone for 750ms between the two sessions, because it has to
 notice the first one ending before it will act on the second.
@@ -195,12 +201,10 @@ notice the first one ending before it will act on the second.
 |---|---|
 | `[cp] ... is being told to start over; reopening carkit` | wired: the old tunnel is closed and another is being opened |
 | `[cp-wifi] ... is being told to start over; dropping the Bluetooth link` | wireless: the link is closed; the platform has to bring the phone back |
-| `cp2cl: reopening the iAP2 channel after the receiver restarted` | the macOS bridge noticed and is asking for the channel again |
 
 The wireless half depends on something outside this program bringing the phone
-back: on macOS the bridge polls the paired devices and opens the channel itself,
-and on Linux BlueZ's `AutoConnect` pages it. **Wired has been confirmed on
-hardware; wireless has not.**
+back: BlueZ's `AutoConnect` pages a phone that has paired before. **Wired has
+been confirmed on hardware; wireless has not.**
 
 Asking for **more pixels and expecting a sharper picture does not work**: the
 phone keeps the bitrate, so twice the pixels means half the bits each and the
@@ -232,7 +236,7 @@ reason.
 | `CP2CL_WIRELESS` | off | take CarPlay over Bluetooth and Wi-Fi instead of USB |
 | `CP2CL_WIFI_PASS` | — | the passphrase of the network the phone is told to join. Required once wireless is on: it is the one value no reading can supply |
 | `CP2CL_WIFI_SSID` | — | the same network, for when no access point is on air. An interface that is beaconing answers this itself |
-| `CP2CL_WIFI_IFACE` | `en0` on macOS, `wlan0` elsewhere | the interface facing that network; its IPv6 link-local address is what the phone connects back to, and on Linux it is the one asked about an access point |
+| `CP2CL_WIFI_IFACE` | `wlan0` | the interface facing that network; its IPv6 link-local address is what the phone connects back to, and it is the one asked about an access point |
 | `CP2CL_WIFI_CHANNEL` | `36` | channel reported to the phone, for when no access point is on air |
 | `CP2CL_AP_MAC` | this machine's Wi-Fi MAC | the router's BSSID, sent as the accessory identifier |
 | `CP2CL_TARGET_BT` | any | only accept this phone's Bluetooth address |
@@ -266,24 +270,19 @@ What it needs:
   so enterprise networks are refused up front rather than failing at the phone
 * `CP2CL_WIFI_SSID` and `CP2CL_WIFI_CHANNEL` only when nothing is beaconing:
   the interface is asked what it is on air with, and that answer is what the
-  phone is told. macOS cannot make that reading, so the two variables are
-  always the answer there
-* macOS: the Bluetooth bridge is compiled by `build.rs` with clang, and the first
-  run asks for Bluetooth permission
+  phone is told
 
-| | How the phone reaches us |
-|---|---|
-| Linux | `livi_runtime::bt` registers the iAP and CarPlay profiles with BlueZ and hands us the phone's RFCOMM socket. None of that is ours — it is LIVI's code called directly |
-| macOS | a small IOBluetooth helper, `native/cp2cl-bluetooth/main.m`, publishes the two SDP records, advertises the controller as in-car audio/video, polls the paired iPhones, and relays RFCOMM bytes to us over a unix socket. CoreBluetooth cannot do any of this: CarPlay's wireless handshake is SDP plus RFCOMM, not GATT |
+`livi_runtime::bt` registers the iAP and CarPlay profiles with BlueZ and hands us
+the phone's RFCOMM socket. None of that is ours — it is LIVI's code called
+directly.
 
 Two things worth knowing if it does not connect. The device class matters — the
-helper advertises `0x200408` for 120 seconds at a time and renews it, because
-without it the phone does not treat the machine as a car. And a channel that
-opens but never carries anything usually means the phone's service records are
-stale, which the bridge recovers from by asking again.
+controller has to advertise itself as in-car audio/video, or the phone does not
+treat the machine as a car. And a channel that opens but never carries anything
+usually means the phone's service records are stale.
 
 `CP2CL_TARGET_BT` narrows it to one phone when several are paired, and
-`CP2CL_LOG=debug` brings up the bridge's own lines.
+`CP2CL_LOG=debug` brings up the per-event detail.
 
 ## CarLife
 
@@ -685,8 +684,6 @@ this a derivative work, so cp2cl inherits that.
 | `src/session.rs` | the wired half — USB, iAP2, MFi, `CarPlayStartSession` |
 | `src/wireless/mod.rs` | the wireless half of the same: iAP2 over Bluetooth, and the Wi-Fi answers |
 | `src/wireless/linux.rs` | BlueZ, through LIVI's `livi_runtime::bt` |
-| `src/wireless/macos.rs` | the unix socket the IOBluetooth helper relays into |
-| `native/cp2cl-bluetooth/main.m` | macOS: SDP records, device class, RFCOMM → unix socket |
 | `src/carlife/mod.rs` | the CarLife half: this device standing in for a phone |
 | `src/carlife/desc.rs` | the accessory interface as bytes, and the three AOA requests |
 | `src/carlife/usb.rs` | Linux only — the gadget, the FunctionFS instance, and the two forms the device takes |

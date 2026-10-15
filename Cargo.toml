@@ -20,9 +20,9 @@ iap2-wired = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-wired" }
 iap2-usbmux = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-usbmux" }
 iap2-mfi = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-mfi" }
 iap2-csm = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-csm" }
-# Needed directly to name `usbmuxd::UsbmuxdDevice` in our own function
-# signatures. Same version LIVI resolves, so these unify into one build.
-idevice = { version = "0.1", features = ["usbmuxd"] }
+# Needed directly to name `idevice::ReadWrite` in our own function signatures.
+# Same version LIVI resolves, so it unifies into one build.
+idevice = "0.1"
 
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"

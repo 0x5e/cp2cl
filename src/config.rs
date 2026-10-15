@@ -140,8 +140,7 @@ pub struct Config {
     /// the phone is told to connect back to.
     pub wifi_iface: String,
     /// The router's BSSID. Sent as the accessory's device identifier; without
-    /// it the phone falls back to this machine's Wi-Fi MAC, which on recent
-    /// macOS SDKs comes back as a placeholder.
+    /// it the phone falls back to this machine's Wi-Fi MAC.
     pub ap_mac: Option<String>,
     /// Who reads the streams: the browser client, or a CarLife head unit.
     pub sink: Sink,
@@ -166,20 +165,6 @@ impl Config {
                 Sink::Web
             }),
             None => Sink::Web,
-        };
-        // Presenting a USB device is something only Linux does, so anywhere else
-        // `cl` would name a consumer that cannot exist — and with the browser
-        // client also out of the picture, the streams would have no reader at
-        // all. Fall back rather than run blind.
-        #[cfg(not(target_os = "linux"))]
-        let sink = if sink == Sink::Cl {
-            tracing::warn!(
-                "[cp2cl] CP2CL_SINK=cl needs a USB device and only Linux can present \
-                 one; using web"
-            );
-            Sink::Web
-        } else {
-            sink
         };
         let input = match env("CP2CL_INPUT") {
             Some(text) => Input::parse(&text).unwrap_or_else(|| {
@@ -209,7 +194,7 @@ impl Config {
             ssid: env_or("CP2CL_WIFI_SSID", ""),
             passphrase: env_or("CP2CL_WIFI_PASS", ""),
             wifi_channel: env_num("CP2CL_WIFI_CHANNEL", 36),
-            wifi_iface: env_or("CP2CL_WIFI_IFACE", default_wifi_iface()),
+            wifi_iface: env_or("CP2CL_WIFI_IFACE", "wlan0"),
             ap_mac: env("CP2CL_AP_MAC"),
             sink,
             input,
@@ -263,18 +248,6 @@ fn web_addr_from_env() -> SocketAddr {
 fn default_web_addr() -> SocketAddr {
     // A constant, so this cannot fail.
     DEFAULT_WEB_ADDR.parse().expect("the default web address parses")
-}
-
-/// The interface the phone will be told to reach us on, per platform.
-fn default_wifi_iface() -> &'static str {
-    #[cfg(target_os = "macos")]
-    {
-        "en0"
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        "wlan0"
-    }
 }
 
 #[cfg(test)]

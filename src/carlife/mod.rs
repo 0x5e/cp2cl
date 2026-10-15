@@ -10,18 +10,14 @@
 //!
 //! `desc`, `frame`, `proto` and `session` are plain code with no USB in them,
 //! which is what lets them be tested against an in-memory pipe. `usb` and
-//! `gadget` are the two that need the board, and the only two that are
-//! Linux-only.
+//! `gadget` are the two that need the board.
 
 pub mod desc;
 pub mod frame;
 pub mod proto;
 pub mod session;
 
-#[cfg(target_os = "linux")]
 pub mod gadget;
-#[cfg(target_os = "linux")]
 pub mod usb;
 
-#[cfg(target_os = "linux")]
 pub use gadget::run as serve;
