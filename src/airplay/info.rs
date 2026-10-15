@@ -51,8 +51,11 @@ pub fn build(static_: &Static) -> Result<Vec<u8>, plist::Error> {
     d.insert("sourceVersion".into(), Value::String(SOURCE_VERSION.into()));
     d.insert("features".into(), Value::Integer(CARPLAY_FEATURES.into()));
     d.insert("statusFlags".into(), Value::Integer(4.into()));
-    d.insert("model".into(), Value::String("cp2cl".into()));
-    d.insert("manufacturer".into(), Value::String("cp2cl".into()));
+    // What the accessory is, under the name the machine goes by. Nothing here
+    // invents a second name for it: the phone shows this one in its CarPlay
+    // list, and the car is told the same in the CarLife handshake.
+    d.insert("model".into(), Value::String(static_.name.clone()));
+    d.insert("manufacturer".into(), Value::String(static_.name.clone()));
     // One address under two keys: this machine's own Bluetooth address is the
     // only identifier the accessory has.
     d.insert("deviceID".into(), Value::String(static_.bt_mac.clone()));

@@ -96,7 +96,7 @@ impl Usb {
         let strings = usb.root.join("configs/c.1/strings/0x409");
         fs::create_dir_all(&strings)
             .with_context(|| format!("creating {}", strings.display()))?;
-        usb.attribute(&strings.join("configuration"), "cp2cl")?;
+        usb.attribute(&strings.join("configuration"), &identity.serial)?;
         usb.attribute(&usb.root.join("configs/c.1/MaxPower"), &MAX_POWER_MA.to_string())?;
 
         // The FunctionFS function, linked into the configuration. Left empty on

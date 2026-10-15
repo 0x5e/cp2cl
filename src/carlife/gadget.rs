@@ -74,7 +74,7 @@ pub async fn run<F>(
 where
     F: FnMut(bool),
 {
-    let identity = desc::Identity::phone();
+    let identity = desc::Identity::phone(&cfg.name);
     let (usb, endpoints) = Usb::open(&identity)?;
     let Endpoints {
         control,

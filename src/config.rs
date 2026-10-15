@@ -3,8 +3,10 @@
 //! Nothing here is required: the defaults build a working wired session and hand
 //! it to whatever head unit turns up. See README for the full table.
 //!
-//! One value is not a setting at all: the Bluetooth address is a property of the
-//! controller, so it is read off the adapter — see `bt_address`.
+//! Two values are not settings at all, because they are properties of the
+//! machine rather than choices: the name it goes by is the hostname
+//! (`hostname`), and its Bluetooth address is read off the controller
+//! (`bt_address`).
 
 use std::path::{Path, PathBuf};
 
@@ -36,6 +38,10 @@ fn env_num<T: std::str::FromStr>(key: &str, default: T) -> T {
 /// something stable and shaped like a MAC, and this is all that can be said.
 const NO_ADDRESS: &str = "00:11:22:33:44:55";
 
+/// What a machine that cannot say what it is called goes by. Something has to
+/// go in the identification, and this is the program's own name.
+const DEFAULT_NAME: &str = "cp2cl";
+
 /// A Bluetooth controller's own address, which is the only place one is written
 /// down — the phone checks it against the one it paired with, so a made-up value
 /// is rejected where it matters.
@@ -45,6 +51,23 @@ pub(crate) fn bt_address(adapter: &str) -> String {
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| NO_ADDRESS.to_string())
+}
+
+/// What the machine goes by, which is what the accessory is called: the phone
+/// shows this name in its CarPlay list, and it is the one the car is told the
+/// model is.
+fn hostname() -> String {
+    read_hostname(Path::new("/proc/sys/kernel/hostname"))
+}
+
+/// Split from the fixed path so that a machine which cannot say what it is
+/// called is something a test can reach.
+fn read_hostname(path: &Path) -> String {
+    std::fs::read_to_string(path)
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_NAME.to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -64,7 +87,8 @@ pub struct Config {
     /// This machine's own Bluetooth address, which is also the identifier
     /// `/info` reports — see `bt_address`.
     pub bt_mac: String,
-    /// Accessory name shown on the phone.
+    /// What the accessory is called: the machine's hostname, which is what the
+    /// phone lists it as — see `hostname`.
     pub name: String,
 
     /// Take CarPlay over Bluetooth and Wi-Fi instead of the cable.

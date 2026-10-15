@@ -244,13 +244,17 @@ impl Identity {
     /// what a head unit expects to find on its port and what it does the
     /// handshake with. The manufacturer is named because hosts that decide what
     /// they are looking at by the strings read that one.
-    pub fn phone() -> Self {
+    ///
+    /// The serial is what the machine is called: a head unit that keeps a device
+    /// apart from the next one it sees has this string to do it with, and a name
+    /// that is the same on every board is no use for that.
+    pub fn phone(name: &str) -> Self {
         Self {
             vid: PHONE_VID,
             pid: PHONE_PID,
             manufacturer: "Google".to_string(),
             product: "Android".to_string(),
-            serial: "cp2cl".to_string(),
+            serial: name.to_string(),
         }
     }
 
@@ -422,7 +426,7 @@ mod tests {
 
     #[test]
     fn the_accessory_form_is_the_numbers_and_the_strings_the_head_unit_asked_for() {
-        let phone = Identity::phone();
+        let phone = Identity::phone("nanopi-duo2");
         assert!(!phone.is_accessory(), "a phone is not an accessory yet");
 
         let mut asked = Asked::default();
@@ -440,10 +444,10 @@ mod tests {
 
     #[test]
     fn what_a_head_unit_did_not_send_stays_as_it_was() {
-        let accessory = Identity::phone().accessory(&Asked::default());
+        let accessory = Identity::phone("nanopi-duo2").accessory(&Asked::default());
 
         assert_eq!(accessory.manufacturer, "Google");
         assert_eq!(accessory.product, "Android");
-        assert_eq!(accessory.serial, "cp2cl");
+        assert_eq!(accessory.serial, "nanopi-duo2");
     }
 }

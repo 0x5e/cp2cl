@@ -401,7 +401,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             HU_INFO => {
                 let body = proto::device_info(&proto::DeviceInfo {
                     os: "Android".into(),
-                    brand: "cp2cl".into(),
+                    brand: self.cfg.name.clone(),
                     model: self.cfg.name.clone(),
                     release: "10".into(),
                     sdk_int: 29,
