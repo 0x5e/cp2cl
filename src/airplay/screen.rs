@@ -16,10 +16,9 @@
 //! badly.
 //!
 //! The plaintext is a run of length-prefixed NAL units (four byte big-endian
-//! length, no start codes). A decoder wants annex-B, so we convert. The codec
-//! description goes out both ways at once: as annex-B parameter sets, and as the
-//! raw avcC record, which is what a browser needs to configure its decoder
-//! before the first frame arrives.
+//! length, no start codes). CarLife's video channel takes annex-B, so we convert,
+//! and the codec description goes out the same way: the SPS/PPS the avcC record
+//! holds, in front of the frames rather than out of band.
 
 use super::crypto::{open, SymKey};
 use crate::sink::{MediaSink, StreamEvent};
@@ -76,7 +75,6 @@ impl VideoReceiver {
                         );
                         self.nal_length_size = config.nal_length_size;
                         self.sink.push(StreamEvent::VideoConfig {
-                            codec_data: config.codec_data,
                             parameter_sets: config.parameter_sets,
                         });
                     }
@@ -138,11 +136,9 @@ impl VideoReceiver {
     }
 }
 
-/// The codec description, in both shapes a consumer might want.
+/// What the codec description says.
 struct VideoConfig {
-    /// The raw avcC record, exactly as it arrived after its fourcc.
-    codec_data: Vec<u8>,
-    /// The parameter sets inside it, converted to annex-B.
+    /// The parameter sets inside the avcC record, converted to annex-B.
     parameter_sets: Vec<Vec<u8>>,
     /// Bytes in front of each NAL unit. Read from the avcC record rather than
     /// assumed: guessing four when the stream uses two garbles every frame, and
@@ -160,7 +156,6 @@ fn parse_video_config(body: &[u8]) -> Option<VideoConfig> {
         // avcC byte 4: 0xFC | (lengthSizeMinusOne), so +1 for the real width.
         let nal_length_size = (avcc[4] & 0x03) as usize + 1;
         Some(VideoConfig {
-            codec_data: avcc.to_vec(),
             parameter_sets: params,
             nal_length_size,
         })

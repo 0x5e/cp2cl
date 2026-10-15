@@ -196,31 +196,41 @@ impl AudioStream {
     }
 }
 
-/// What the phone should render at, when something other than the configuration
-/// knows better — a size the operator picked in the browser's display panel.
+/// What the phone should render at.
 ///
-/// `GET /info` prefers this to `Config` once it is set. It only lands if it is
-/// written before the session starts, which is why changing it costs a session:
-/// the iPhone reads `/info` once and does not ask again.
-#[derive(Debug, Clone, Copy)]
+/// A head unit names it over the CarLife session — `VIDEO_ENCODER_INIT` carries
+/// the width, the height and the frame rate it wants — and `/info` is answered
+/// from here. It only lands if it is written before the session starts, which is
+/// why changing it costs a session: the iPhone reads `/info` once and does not
+/// ask again. See `main`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScreenParams {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
-    /// Screen size in millimetres, or zero to let `info` work it out from the
-    /// aspect ratio. Nothing in the program measures a panel, so this is what
-    /// the environment says.
-    pub width_mm: u32,
-    pub height_mm: u32,
     /// Canvas scale in percent, the way PlayPort's "UI size" control means it:
     /// the phone is asked for a canvas of `100/percent` the size, and the
-    /// browser fits the result back to its own surface, so a larger canvas
-    /// draws proportionally *smaller* CarPlay controls. 100 leaves it alone.
+    /// display side fits the result to its own surface, so a larger canvas draws
+    /// proportionally *smaller* CarPlay controls. 100 leaves it alone.
     pub ui_scale: u32,
 }
 
-/// The canvas scales the browser's display panel offers. Anything else is the
-/// default, which is what PlayPort's own panel does with a typed-in value.
+impl Default for ScreenParams {
+    /// Until a head unit names a screen of its own: 720p at 30 fps, which is the
+    /// shape a car's decoder is surest of, and the same numbers the CarLife side
+    /// falls back on when a car names no size.
+    fn default() -> Self {
+        Self {
+            width: 1280,
+            height: 720,
+            fps: 30,
+            ui_scale: 100,
+        }
+    }
+}
+
+/// The canvas scales that are offered. Anything else is the default, which is
+/// what PlayPort's own panel does with a typed-in value.
 pub const UI_SCALES: [u32; 4] = [75, 85, 100, 115];
 
 impl ScreenParams {
@@ -255,7 +265,8 @@ impl ScreenParams {
     }
 }
 
-/// Shared with whoever negotiates on our behalf; `None` means "use `Config`".
+/// What the phone should render at, as the CarLife session writes it. `None`
+/// means no head unit has named a screen yet, and the default stands.
 pub type SharedScreen = Arc<std::sync::Mutex<Option<ScreenParams>>>;
 
 /// Everything the airplay side needs, owned once and shared per connection.
@@ -264,8 +275,8 @@ pub struct Shared {
     pub pairings: Arc<Mutex<Pairings>>,
     pub video_sink: Arc<dyn MediaSink>,
     pub audio_sink: Arc<dyn MediaSink>,
-    /// Set by the browser's display panel once it has asked for a size of its
-    /// own. Read by `GET /info`.
+    /// Set by the CarLife session, once a head unit has named its own screen.
+    /// Read by `GET /info`.
     pub screen: SharedScreen,
     /// Fired when what the phone should be rendering has changed. `/info` is
     /// answered once per session, so dropping the session is the only way a
@@ -286,11 +297,11 @@ pub struct Shared {
     pub timing: Arc<Mutex<SyncedClock>>,
     /// Announced to the phone so it knows what audio to send.
     pub audio_codec: Arc<Mutex<AudioCodec>>,
-    /// Where input lands; the browser dispatches into this once pairing
-    /// completes.
+    /// Where input lands. Nothing dispatches into it yet; the CarLife side will,
+    /// once it carries touch and keys back up.
     pub event_sink: Arc<EventSink>,
     /// The one stream that runs both ways. Opened when the phone asks for
-    /// bidirectional audio, and where the browser's microphone audio goes.
+    /// bidirectional audio, and where audio captured at this end goes.
     pub mic: Arc<MicSink>,
 }
 
@@ -456,8 +467,7 @@ struct Pump {
 
 struct Session {
     cfg: Arc<Config>,
-    /// What the browser's display panel asked for, if it has. Read when
-    /// answering `/info`.
+    /// What the car asked for, if it has asked. Read when answering `/info`.
     screen: SharedScreen,
     /// Fires when the session should end so the phone re-reads `/info`.
     restart: tokio::sync::broadcast::Receiver<()>,
@@ -700,24 +710,17 @@ impl Session {
     }
 
     fn info(&self) -> Result<Response, String> {
-        // The browser's display panel wins when it has been used: it is the end
-        // that has to decode the picture, so asking the phone for something else
-        // just makes it scale.
-        let negotiated = self.negotiated();
-        let (width, height, fps) = match negotiated {
-            Some(s) => {
-                let (width, height) = s.canvas();
-                (width, height, s.fps)
-            }
-            None => (self.cfg.width, self.cfg.height, self.cfg.fps),
-        };
+        // Whatever the car named, or the default until it names one: it is the
+        // end that decodes the picture that knows what it can take, and asking
+        // the phone for anything else just makes it scale.
+        let screen = self.negotiated().unwrap_or_default();
+        let (width, height) = screen.canvas();
+        let fps = screen.fps;
         // The physical size is the other half of what the phone draws at: it
         // turns millimetres back into a dpi, and a wrong one is a picture at the
-        // wrong scale. `CP2CL_WIDTH_MM` is what says it.
-        let (width_mm, height_mm) = match negotiated {
-            Some(s) => (s.width_mm, s.height_mm),
-            None => (self.cfg.width_mm, self.cfg.height_mm),
-        };
+        // wrong scale. No CarLife message carries one, so `CP2CL_WIDTH_MM` is
+        // what says it.
+        let (width_mm, height_mm) = (self.cfg.width_mm, self.cfg.height_mm);
         let plist = info::build(&info::Static {
             device_id: self.cfg.device_id.clone(),
             bt_mac: self.cfg.bt_mac.clone(),
@@ -816,8 +819,8 @@ impl Session {
     ///
     /// Aborting the pump is the only way a UDP stream ever ends, and it means
     /// the pump never reaches its own goodbye — so the sink is told here or not
-    /// at all, or the browser keeps a mixer channel for a stream nobody will
-    /// ever send again.
+    /// at all, or whoever mixes keeps a channel for a stream nobody will ever
+    /// send again.
     async fn close_stream(&mut self, stream_type: i64) {
         self.audio_clock.lock().await.close_type(stream_type);
         if let Some(pump) = self.pumps.remove(&stream_type) {
@@ -1090,8 +1093,8 @@ impl Session {
                     let codec = AudioCodec::from_format(fmt);
                     let stream_type = type_.unwrap_or(0);
                     // The phone labels each stream itself — `media`, `telephony`,
-                    // `speechRecognition` — and the browser shows one mixer
-                    // channel per name, so the label is carried through as-is.
+                    // `speechRecognition` — and each name is a channel of its
+                    // own at the far end, so the label is carried through as-is.
                     let audio_type = table
                         .get("audioType")
                         .and_then(|v| v.as_string())
@@ -1199,7 +1202,7 @@ impl Session {
     ///
     /// The packets go back to the phone's own address on the port it named. A
     /// failure here is not worth failing the SETUP over: the downlink is already
-    /// running, and the worst case is a browser whose microphone does nothing.
+    /// running, and the worst case is an uplink whose microphone does nothing.
     async fn open_mic(
         &self,
         stream_id: i64,
@@ -1533,17 +1536,15 @@ mod tests {
             width,
             height,
             fps: 60,
-            width_mm: 0,
-            height_mm: 0,
             ui_scale,
         }
     }
 
-    /// The browser's panel sends a percentage and the phone is asked for a
-    /// canvas of `100/percent` the size. These are the values PlayPort's
-    /// `CarPlayUiScale.apply` produces for the same input, worked out by hand
-    /// from its expression — a mismatch would move every touch by the same
-    /// ratio, which is the kind of bug that looks like a broken touchscreen.
+    /// A percentage turns into a request for a canvas of `100/percent` the size.
+    /// These are the values PlayPort's `CarPlayUiScale.apply` produces for the
+    /// same input, worked out by hand from its expression — a mismatch would move
+    /// every touch by the same ratio, which is the kind of bug that looks like a
+    /// broken touchscreen.
     #[test]
     fn canvas_matches_the_ui_scale_presets() {
         assert_eq!(params(1280, 720, 100).canvas(), (1280, 720));

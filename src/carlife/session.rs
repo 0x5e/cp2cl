@@ -27,6 +27,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use super::{frame, proto};
+use crate::airplay::ScreenParams;
 use crate::config::Config;
 use crate::sink::ClOutlet;
 
@@ -192,6 +193,11 @@ fn access_units(bytes: &[u8]) -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// Where the size a head unit asks to be rendered at is reported, once it has
+/// named one: width, height and frame rate. It has to be `Send` because a session
+/// runs in a task of its own.
+pub type ScreenReport<'a> = &'a mut (dyn FnMut(u32, u32, u32) + Send);
+
 /// Runs one session until the car goes away.
 ///
 /// `carplay` is told `true` the first time the car has been given our device
@@ -199,7 +205,18 @@ fn access_units(bytes: &[u8]) -> Vec<Vec<u8>> {
 /// somewhere to hand its streams — and `false` once, when the session ends for
 /// any reason. On the board that switch is what starts and stops the whole
 /// CarPlay half; see `main`.
-pub async fn run<S, F>(stream: S, frames: &Frames, cfg: &Config, carplay: &mut F) -> Result<()>
+///
+/// `screen` is told the size the car asked to be rendered at, as width, height
+/// and frame rate. The car is the one that knows its own screen, so this is where
+/// what the phone is asked to render comes from; `main` is what does something
+/// with it.
+pub async fn run<S, F>(
+    stream: S,
+    frames: &Frames,
+    cfg: &Config,
+    screen: ScreenReport<'_>,
+    carplay: &mut F,
+) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     F: FnMut(bool),
@@ -251,6 +268,7 @@ where
     let mut session = Session {
         writer,
         cfg,
+        screen,
         source,
         channel_touched: None,
         agreed: None,
@@ -339,6 +357,8 @@ async fn recv_video(video: &mut Option<mpsc::Receiver<Vec<u8>>>) -> Option<Vec<u
 struct Session<'a, W> {
     writer: W,
     cfg: &'a Config,
+    /// Told the size the car asked to be rendered at, whenever it changes.
+    screen: ScreenReport<'a>,
     source: Source,
     /// When the video channel last carried anything at all. With pictures
     /// arriving on their own clock, this is what decides whether the heartbeat
@@ -438,20 +458,21 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // What we can actually produce, which is what `INIT_DONE` is
                 // for: the reference says both ends work from the device's
                 // answer, and the car scales if the two disagree.
+                let fallback = ScreenParams::default();
                 let agreed = proto::VideoEncoderInfo {
                     width: if asked.width > 0 {
                         asked.width
                     } else {
-                        self.cfg.width as i32
+                        fallback.width as i32
                     },
                     height: if asked.height > 0 {
                         asked.height
                     } else {
-                        self.cfg.height as i32
+                        fallback.height as i32
                     },
                     frame_rate: match asked.frame_rate {
                         3..=30 => asked.frame_rate,
-                        _ => self.cfg.fps as i32,
+                        _ => fallback.fps as i32,
                     },
                 };
                 tracing::info!(
@@ -466,6 +487,13 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 self.agreed = Some(agreed);
                 let body = proto::video_encoder_info(agreed);
                 self.send(VIDEO_ENCODER_INIT_DONE, &body).await?;
+                // The car has just said what its screen is, and that is what the
+                // phone is asked to render at: the two halves meet here.
+                (self.screen)(
+                    agreed.width as u32,
+                    agreed.height as u32,
+                    agreed.frame_rate as u32,
+                );
             }
             HU_VIDEO_ENCODER_START => {
                 tracing::info!("[cl] the car started the encoder; video begins");
@@ -493,6 +521,9 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 let body = proto::frame_rate(accepted);
                 self.send(VIDEO_ENCODER_FRAME_RATE_CHANGE_DONE, &body)
                     .await?;
+                // The size is unchanged, and the rate is the channel's pacing
+                // rather than anything the phone produces, so the CarPlay side is
+                // not told: it would cost a session for a number it ignores.
             }
             HU_GO_TO_FOREGROUND => {
                 // There is no window here to bring forward, so the honest reply
@@ -732,12 +763,45 @@ mod tests {
             // Dropping the pipe is the car going away.
         });
 
-        run(device, &Frames::None, &cfg, &mut carplay)
+        run(device, &Frames::None, &cfg, &mut |_, _, _| {}, &mut carplay)
             .await
             .expect("the session ends cleanly");
         car.await.unwrap();
 
         assert_eq!(*switches.lock().unwrap(), vec![true, false]);
+    }
+
+    /// The car's own screen is what the other half is told to render at: no one
+    /// else knows how big it is, so it is the car that decides.
+    #[tokio::test]
+    async fn the_cars_screen_is_reported_to_the_other_half() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        // Deliberately unlike the fallback, so a report of the fallback would
+        // not pass.
+        let car_screen = proto::VideoEncoderInfo {
+            width: 1920,
+            height: 480,
+            frame_rate: 24,
+        };
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.handshake(car_screen).await;
+        });
+
+        let screens = Arc::new(Mutex::new(Vec::new()));
+        let seen = screens.clone();
+        let mut screen = move |width: u32, height: u32, fps: u32| {
+            seen.lock().unwrap().push((width, height, fps));
+        };
+        run(device, &Frames::None, &cfg, &mut screen, &mut carplay)
+            .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+
+        assert_eq!(*screens.lock().unwrap(), vec![(1920, 480, 24)]);
     }
 
     #[tokio::test]
@@ -766,7 +830,7 @@ mod tests {
             vec![0x00, 0x00, 0x00, 0x01, 0x65],
             vec![0x00, 0x00, 0x00, 0x01, 0x41],
         ]);
-        run(device, &frames, &cfg, &mut carplay)
+        run(device, &frames, &cfg, &mut |_, _, _| {}, &mut carplay)
             .await
             .expect("the session ends cleanly");
         car.await.unwrap();
@@ -821,7 +885,7 @@ mod tests {
         });
 
         let frames = Frames::Cycle(vec![vec![0x00, 0x00, 0x00, 0x01, 0x65]]);
-        run(device, &frames, &cfg, &mut carplay)
+        run(device, &frames, &cfg, &mut |_, _, _| {}, &mut carplay)
             .await
             .expect("the session ends cleanly");
         car.await.unwrap();
@@ -841,7 +905,7 @@ mod tests {
             car.expect_silence(Duration::from_millis(500)).await;
         });
 
-        run(device, &Frames::None, &cfg, &mut carplay)
+        run(device, &Frames::None, &cfg, &mut |_, _, _| {}, &mut carplay)
             .await
             .expect("the session ends cleanly");
         car.await.unwrap();
@@ -879,7 +943,7 @@ mod tests {
             });
         });
 
-        run(device, &frames, &cfg, &mut carplay)
+        run(device, &frames, &cfg, &mut |_, _, _| {}, &mut carplay)
             .await
             .expect("the session ends cleanly");
         car.await.unwrap();
@@ -900,7 +964,7 @@ mod tests {
             // Dropping the pipe is the car going away.
         });
 
-        run(device, &frames, &cfg, &mut carplay)
+        run(device, &frames, &cfg, &mut |_, _, _| {}, &mut carplay)
             .await
             .expect("the session ends cleanly");
         car.await.unwrap();
@@ -927,7 +991,7 @@ mod tests {
             car.expect_silence(Duration::from_millis(300)).await;
         });
 
-        run(device, &Frames::None, &cfg, &mut carplay)
+        run(device, &Frames::None, &cfg, &mut |_, _, _| {}, &mut carplay)
             .await
             .expect("the session ends cleanly");
         car.await.unwrap();

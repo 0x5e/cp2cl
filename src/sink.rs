@@ -1,11 +1,9 @@
 //! Where the media goes once CarPlay has handed it over.
 //!
-//! One consumer takes the streams: the browser client, or the head unit on the
-//! other end of a CarLife session. The events below carry the *description* of a
-//! stream as well as its bytes, because a consumer that has to be told what it is
-//! reading needs both: the phone sends the codec's parameter sets after the
-//! consumer has already started, and a browser decoding with WebCodecs needs them
-//! out of band while anything reading an elementary stream needs them in it.
+//! One consumer takes the streams: the head unit on the other end of a CarLife
+//! session. The events below carry the *description* of a stream as well as its
+//! bytes, because the phone sends the codec's parameter sets after the stream has
+//! already started, and a consumer has to know where to put them.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,8 +16,8 @@ use tokio::sync::mpsc;
 pub enum AudioCodec {
     /// 16-bit PCM, already swapped to little-endian for the consumer.
     Pcm { rate: u32, channels: u16 },
-    /// Raw AAC-LC frames with no ADTS header: the browser is told the framing
-    /// separately, so an ADTS header would only be in the way.
+    /// Raw AAC-LC frames with no ADTS header: the framing is stated alongside
+    /// them, so an ADTS header would only be in the way.
     AacLc { rate: u32, channels: u16 },
     /// Raw Opus frames.
     Opus { rate: u32, channels: u16 },
@@ -93,35 +91,36 @@ impl AudioCodec {
     }
 }
 
-/// One thing a stream produced, on its way to the browser.
+/// One thing a stream produced, on its way to the car.
+///
+/// Not everything here has a reader yet: the CarLife side takes the video and
+/// nothing else, so the audio half and the keyframe flag are carried for the
+/// channels that will be built for them. See `PLAN-CL.md` §4.2 and §4.3.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum StreamEvent {
     /// A video stream's codec description, sent once before any frame.
     ///
-    /// The same record in both shapes a consumer might want. `codec_data` is the
-    /// raw avcC record, which is what WebCodecs wants as its decoder
-    /// `description` and is told to the browser out of band; `parameter_sets`
-    /// are the SPS/PPS the record holds, already converted to annex-B, which is
-    /// what a consumer reading an elementary stream has to put in it.
+    /// `parameter_sets` are the SPS/PPS the avcC record holds, already converted
+    /// to annex-B, which is what a consumer reading an elementary stream has to
+    /// put in front of the frames. That is what CarLife's video channel is.
     VideoConfig {
-        codec_data: Vec<u8>,
         parameter_sets: Vec<Vec<u8>>,
     },
     /// One access unit as annex-B, and whether it is a keyframe.
     VideoFrame { keyframe: bool, data: Vec<u8> },
-    /// The screen stream opened or closed. The browser uses it to tell whether a
-    /// session is up at all.
+    /// The screen stream opened or closed. Says whether a session is up at all.
     ScreenActive(bool),
     /// An audio stream's format. `name` is the phone's own `audioType` from the
-    /// SETUP — `media`, `telephony`, `speechRecognition` — which the browser
-    /// shows as one mixer channel per name.
+    /// SETUP — `media`, `telephony`, `speechRecognition` — which the car hears
+    /// as its own separate channels.
     AudioConfig {
         stream_type: u8,
         codec: AudioCodec,
         name: String,
     },
     /// One audio frame. `timestamp_us` is the phone's RTP sample counter turned
-    /// into microseconds, the only clock a browser has to schedule against.
+    /// into microseconds, which is what playback has to be scheduled against.
     AudioPacket {
         stream_type: u8,
         timestamp_us: u64,
@@ -231,10 +230,8 @@ impl MediaSink for ClSink {
     fn push(&self, event: StreamEvent) {
         match event {
             // The car reads an elementary stream, so the parameter sets have to
-            // be in it. The raw record is for decoders told out of band and is
-            // dropped here; `parameter_sets` is the same thing already
-            // converted.
-            StreamEvent::VideoConfig { parameter_sets, .. } => {
+            // be in it. There is nothing else in the event for the car's sake.
+            StreamEvent::VideoConfig { parameter_sets } => {
                 if let Ok(mut pending) = self.pending.lock() {
                     pending.clear();
                     for set in parameter_sets {

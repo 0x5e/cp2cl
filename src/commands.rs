@@ -1,8 +1,12 @@
 //! The vocabulary of input.
 //!
-//! Nothing here parses text: the browser client sends JSON over its WebSocket,
-//! and `web` turns that into one of these. `event.rs` is the only place that
-//! knows how each one reaches the phone.
+//! Nothing here parses anything: whoever has an input event — the CarLife
+//! session, once it carries touch and keys back up — turns it into one of these.
+//! `event.rs` is the only place that knows how each one reaches the phone.
+//!
+//! Nothing produces one yet, which is what the allow below is about: the CarLife
+//! side is the caller this is kept for. See `PLAN-CL.md` §4.3.
+#![allow(dead_code)]
 
 /// One finger in a touch report, in the display's own pixel space.
 ///
@@ -34,23 +38,23 @@ pub enum Command {
     Right,
     Up,
     Down,
-    /// A wheel tick, produced by the browser when it reads one off its knob
-    /// state. No reference implementation exposes a wheel *key*, so there is no
-    /// named command for this — only the axis, which the HID descriptor keeps.
+    /// A wheel tick, read off a knob's axis. No reference implementation
+    /// exposes a wheel *key*, so there is no named command for this — only the
+    /// axis, which the HID descriptor keeps.
     Wheel(i8),
     /// A multitouch report: one entry per slot the /info descriptor declares,
     /// whether or not a finger is on it.
     Touch([TouchContact; TOUCH_SLOTS]),
-    /// A raw telephony index, straight from the browser client. Its call buttons
-    /// are indices into the telephony report rather than named keys, and passing
-    /// one through is the whole of the mapping the front end needs.
+    /// A raw telephony index. Its call buttons are indices into the telephony
+    /// report rather than named keys, so passing one through unchanged is the
+    /// whole of the mapping needed.
     Telephony(u8),
     KeyFrame,
     // Session level.
     Siri,
-    /// Day or night rendering, from the browser's toggle. A session command
-    /// rather than a HID report: the phone is told to redraw, not to press
-    /// anything.
+    /// Day or night rendering, from a setting of the operator's. A session
+    /// command rather than a HID report: the phone is told to redraw, not to
+    /// press anything.
     Night(bool),
 }
 

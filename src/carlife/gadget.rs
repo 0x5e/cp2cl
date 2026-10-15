@@ -65,7 +65,12 @@ enum Answered {
 /// The session outlives the form the device is in — the device stays up, and only
 /// what it calls itself changes — so a session that ends leaves it ready for the
 /// next head unit rather than needing to be rebuilt.
-pub async fn run<F>(cfg: Arc<Config>, frames: &Frames, carplay: &mut F) -> Result<()>
+pub async fn run<F>(
+    cfg: Arc<Config>,
+    frames: &Frames,
+    screen: session::ScreenReport<'_>,
+    carplay: &mut F,
+) -> Result<()>
 where
     F: FnMut(bool),
 {
@@ -100,7 +105,7 @@ where
             Event::Enabled => match bulk(&from_car, &to_car) {
                 Ok(pair) => {
                     tracing::info!("[cl-usb] the host has enumerated us; starting the session");
-                    if let Err(e) = session::run(pair, frames, &cfg, carplay).await {
+                    if let Err(e) = session::run(pair, frames, &cfg, &mut *screen, carplay).await {
                         tracing::warn!("[cl] the session ended badly: {e:#}");
                     }
                 }

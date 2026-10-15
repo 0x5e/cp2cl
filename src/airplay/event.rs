@@ -15,8 +15,13 @@
 //! control channel they are *not* read/write swapped (see `VerifyKeys`).
 //!
 //! The channel runs both ways. `EventSink` is the half the rest of the program
-//! talks to — the browser client hands it commands — and `pump_events` is the
-//! half that reads what the phone posts back and answers it.
+//! talks to — wherever input comes from hands it commands — and `pump_events` is
+//! the half that reads what the phone posts back and answers it.
+//!
+//! The writing half of `EventSink` has no caller yet: input reaches this program
+//! through the CarLife session, which does not carry it up yet. The `dead_code`
+//! allowances below are for that, not for anything abandoned — see `PLAN-CL.md`
+//! §4.3.
 
 use std::sync::Arc;
 
@@ -34,6 +39,7 @@ use crate::commands::{self, Command, TouchContact};
 /// How far the absolute X/Y axes deflect: a full throw in one direction. The
 /// phone reads an absolute axis as a position, so a full throw scrolls many
 /// rows at once.
+#[allow(dead_code)]
 const AXIS_DEFLECT: i8 = 127;
 
 /// Input only becomes possible after pair-verify derives the keys, so the sink
@@ -73,6 +79,7 @@ impl EventSink {
         *self.writer.lock().await = Some(writer);
     }
 
+    #[allow(dead_code)]
     pub async fn dispatch(self: &Arc<Self>, cmd: Command) -> std::io::Result<()> {
         let key = self.key.lock().await.clone();
         let Some(key) = key else {
@@ -175,12 +182,14 @@ pub(crate) async fn pump_events(
     tracing::info!("[airplay] event channel closed");
 }
 
+#[allow(dead_code)]
 pub struct EventChannel<W> {
     write: SymKey,
     counter: u64,
     writer: W,
 }
 
+#[allow(dead_code)]
 impl<W: AsyncWrite + Unpin> EventChannel<W> {
     pub fn new(write: SymKey, writer: W) -> Self {
         Self {
@@ -353,6 +362,7 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
 /// because the phone identifies a finger by the slot it keeps arriving in.
 /// Mirrors LIVI's `touchReport`, and has to agree with
 /// `info::multitouch_descriptor`.
+#[allow(dead_code)]
 fn touch_report(contacts: &[TouchContact]) -> Vec<u8> {
     let mut out = Vec::with_capacity(contacts.len() * 6);
     for (slot, c) in contacts.iter().enumerate() {

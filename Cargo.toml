@@ -2,7 +2,7 @@
 name = "cp2cl"
 version = "0.6.1"
 edition = "2021"
-description = "Headless CarPlay receiver that serves an iPhone's streams to a browser client"
+description = "Headless CarPlay receiver that hands an iPhone's streams to a CarLife head unit"
 license = "GPL-3.0-or-later"
 
 # The LIVI crates come from the `vendor/LIVI` submodule, pinned to the
@@ -60,23 +60,6 @@ anyhow = "1"
 libc = "0.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-serde = { version = "1", features = ["derive"] }
+# Read back so a paired phone is not asked to pair again.
 serde_json = "1"
 
-# The debug UI is PlayPort's own browser client, served out of the submodule.
-# Its Kotlin server is replaced by these: an HTTPS host (WebCodecs refuses to
-# decode outside a secure context, so plain HTTP only works on localhost) with
-# a WebSocket carrying the same JSON control messages and binary media wire.
-#
-# `tls-rustls-no-provider` rather than `tls-rustls`: the latter would pull in
-# `aws-lc-rs` as the crypto provider, and rustls then refuses to guess which one
-# the process wants — the same refusal that keeps `aws-lc-sys` out of the
-# cross-compiled build. Naming no provider means the process has to install one
-# itself, which `main` does; `ring` is the one, and it is named here so the
-# binary can install it.
-axum = { version = "0.8", features = ["ws"] }
-axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
-rcgen = "0.13"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-# Enumerating the interfaces, to print every address the page can be opened at.
-if-addrs = "0.15"

@@ -1,9 +1,8 @@
 //! Everything the operator can tune, read once from the environment.
 //!
-//! Nothing here is required: the defaults build a working wired session and serve
-//! it to the browser client. See README for the full table.
+//! Nothing here is required: the defaults build a working wired session and hand
+//! it to whatever head unit turns up. See README for the full table.
 
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 fn env(key: &str) -> Option<String> {
@@ -28,33 +27,6 @@ pub fn log_filter() -> String {
 
 fn env_num<T: std::str::FromStr>(key: &str, default: T) -> T {
     env(key).and_then(|s| s.parse().ok()).unwrap_or(default)
-}
-
-/// Who reads the streams CarPlay hands over.
-///
-/// Both ends are the same media, so the choice is only about the destination:
-/// the browser client on this machine, or a head unit that thinks we are a
-/// phone. One or the other, never both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Sink {
-    /// Serve the browser client over HTTPS and push the streams to it. The
-    /// default.
-    Web,
-    /// Send to a CarLife head unit, over the USB device this program presents.
-    /// There is no browser client in this mode.
-    Cl,
-}
-
-impl Sink {
-    fn parse(text: &str) -> Option<Self> {
-        if text.eq_ignore_ascii_case("web") {
-            Some(Self::Web)
-        } else if text.eq_ignore_ascii_case("cl") {
-            Some(Self::Cl)
-        } else {
-            None
-        }
-    }
 }
 
 /// Where the CarLife video channel's pictures come from.
@@ -84,24 +56,14 @@ impl Input {
 pub struct Config {
     /// Directory holding identity.pk8 + certificate.p7b (the MFi credentials).
     pub auth_dir: Option<PathBuf>,
-    /// What the phone is asked to render. 1280x720 is the safe CarPlay default.
-    ///
-    /// These are the web sink's screen, which is what the `CP2CL_WEB_` prefix on
-    /// them says: they are the four settings that describe the surface the
-    /// browser client draws on. A CarLife head unit describes its own screen —
-    /// `VIDEO_ENCODER_INIT` names the width, height and frame rate it wants — so
-    /// there is nothing here for the operator to state in that mode.
-    pub width: u32,
-    pub height: u32,
-    pub fps: u32,
     /// Screen size in millimetres, which is how CarPlay decides its dpi — and
     /// therefore how finely it draws. This is the whole difference between a
     /// sharp picture and a blurry one: MacPlay reports the window's real share
     /// of the panel and gets ~254 dpi, while inventing a large value drops it to
     /// ~162 and the phone quietly renders at 1×.
     ///
-    /// No CarLife message carries a physical size, so this one stays the
-    /// operator's in both modes.
+    /// No CarLife message carries a physical size, so this one is always the
+    /// operator's.
     pub width_mm: u32,
     pub height_mm: u32,
     /// Advertised as deviceID / bluetoothIDs. The phone only wants something
@@ -110,17 +72,6 @@ pub struct Config {
     pub bt_mac: String,
     /// Accessory name shown on the phone.
     pub name: String,
-    /// Where the browser client is served, read from `CP2CL_WEB_ADDR` as
-    /// `address:port`. The scheme is not part of it because there is only one:
-    /// the page decodes with WebCodecs, which a browser only offers in a secure
-    /// context, so this is HTTPS whether or not anyone says so.
-    pub web_addr: SocketAddr,
-    /// The access token the page has to carry — on the socket, and when changing
-    /// the display. Fixed rather than minted per run, so the URL to open, and
-    /// any bookmark of it, survives a restart. The default is a single `0`: the
-    /// URL gets typed in by hand often enough that a long token is a nuisance,
-    /// and this is a debug surface on a LAN either way.
-    pub web_token: String,
 
     /// Take CarPlay over Bluetooth and Wi-Fi instead of the cable.
     ///
@@ -142,9 +93,8 @@ pub struct Config {
     /// The router's BSSID. Sent as the accessory's device identifier; without
     /// it the phone falls back to this machine's Wi-Fi MAC.
     pub ap_mac: Option<String>,
-    /// Who reads the streams: the browser client, or a CarLife head unit.
-    pub sink: Sink,
-    /// What the CarLife video channel sends. Only meaningful with `Sink::Cl`.
+    /// Where the CarLife video channel's pictures come from: `Input::Cp` unless
+    /// `CP2CL_INPUT` says otherwise.
     pub input: Input,
     /// Only talk to this Bluetooth MAC. Several iPhones paired with the same
     /// machine otherwise race for the session.
@@ -155,17 +105,6 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
-        // Named first so the window and the physical size can default to them.
-        let width = env_num("CP2CL_WEB_WIDTH", 1280);
-        let height = env_num("CP2CL_WEB_HEIGHT", 720);
-        let width_mm = env_num("CP2CL_WIDTH_MM", 0);
-        let sink = match env("CP2CL_SINK") {
-            Some(text) => Sink::parse(&text).unwrap_or_else(|| {
-                tracing::warn!("[cp2cl] CP2CL_SINK={text} is neither `web` nor `cl`; using web");
-                Sink::Web
-            }),
-            None => Sink::Web,
-        };
         let input = match env("CP2CL_INPUT") {
             Some(text) => Input::parse(&text).unwrap_or_else(|| {
                 tracing::warn!("[cp2cl] CP2CL_INPUT={text} is neither `cp` nor `file`; using cp");
@@ -175,17 +114,12 @@ impl Config {
         };
         Self {
             auth_dir: Self::resolve_auth_dir(),
-            width,
-            height,
-            fps: env_num("CP2CL_WEB_FPS", 60),
-            width_mm,
+            width_mm: env_num("CP2CL_WIDTH_MM", 0),
             // Left to `info.rs` to derive from the aspect ratio when zero.
             height_mm: env_num("CP2CL_HEIGHT_MM", 0),
             device_id: env_or("CP2CL_DEVICE_ID", "00:11:22:33:44:55"),
             bt_mac: env_or("CP2CL_BT_MAC", "00:11:22:33:44:55"),
             name: env_or("CP2CL_NAME", "cp2cl"),
-            web_addr: web_addr_from_env(),
-            web_token: env_or("CP2CL_WEB_TOKEN", "0"),
             // Wired stays the default: it needs nothing the operator has to
             // look up first.
             wireless: std::env::var("CP2CL_WIRELESS")
@@ -196,7 +130,6 @@ impl Config {
             wifi_channel: env_num("CP2CL_WIFI_CHANNEL", 36),
             wifi_iface: env_or("CP2CL_WIFI_IFACE", "wlan0"),
             ap_mac: env("CP2CL_AP_MAC"),
-            sink,
             input,
             target_bt: env("CP2CL_TARGET_BT"),
             bt_adapter: env_or("CP2CL_BT_ADAPTER", "hci0"),
@@ -230,43 +163,14 @@ impl Config {
     }
 }
 
-/// Where the browser client listens unless told otherwise. `0.0.0.0` is every
-/// interface, which is what makes the page reachable from another device.
-const DEFAULT_WEB_ADDR: &str = "0.0.0.0:8080";
-
-/// `CP2CL_WEB_ADDR`, or the default when it is unset or not an `address:port`.
-fn web_addr_from_env() -> SocketAddr {
-    let Some(text) = env("CP2CL_WEB_ADDR") else {
-        return default_web_addr();
-    };
-    text.parse().unwrap_or_else(|_| {
-        tracing::warn!("[cp2cl] CP2CL_WEB_ADDR={text} is not `address:port`; using {DEFAULT_WEB_ADDR}");
-        default_web_addr()
-    })
-}
-
-fn default_web_addr() -> SocketAddr {
-    // A constant, so this cannot fail.
-    DEFAULT_WEB_ADDR.parse().expect("the default web address parses")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn the_consumer_and_the_input_source_are_named_as_the_two_that_exist() {
-        assert_eq!(Sink::parse("web"), Some(Sink::Web));
-        assert_eq!(Sink::parse("CL"), Some(Sink::Cl));
-        assert_eq!(Sink::parse("aa"), None);
-
+    fn the_input_source_is_named_as_one_of_the_two_that_exist() {
         assert_eq!(Input::parse("cp"), Some(Input::Cp));
         assert_eq!(Input::parse("File"), Some(Input::File));
         assert_eq!(Input::parse("still"), None);
-    }
-
-    #[test]
-    fn the_default_web_address_is_every_interface_on_8080() {
-        assert_eq!(default_web_addr().to_string(), "0.0.0.0:8080");
     }
 }

@@ -44,30 +44,16 @@ Linux machine, from the checkout:
 ```bash
 git submodule update --init --recursive
 
-# The browser client is PlayPort's, and is not committed — build it once.
-cd vendor/playport/web && npm install && npm run build && cd -
-
 cargo build --release
 
 export CP2CL_AUTH_DIR=./authentication         # identity.pk8 + certificate.p7b
 ./target/release/cp2cl
 ```
 
-It prints an address per interface, since which of them the browser is on the
-other side of depends on where you are. All of them carry the same token:
-
-```
-[cp2cl] airplay receiver listening on 52843
-[web] browser client: https://127.0.0.1:8080/?token=0
-[web] browser client on wlan0: https://192.168.4.1:8080/?token=0
-[web] accept the certificate warning once; WebCodecs needs HTTPS
-```
-
-Run it from the repository root: the browser client is served out of
-`vendor/playport/web/dist`, relative to the working directory. That is the build
-for the machine you are on; the board is built in a container instead, since it
-cannot build this itself — see [Cross-compiling for the
-board](#cross-compiling-for-the-board).
+Run it from the repository root: `authentication/` is read relative to the
+working directory, and that is the only thing it needs from there. The board is
+built in a container instead, since it cannot build this itself — see
+[Cross-compiling for the board](#cross-compiling-for-the-board).
 
 Then plug the phone in and unlock it. You should see:
 
@@ -120,56 +106,28 @@ nothing resolved through NSS or mDNS resolves here. Neither the CarPlay nor the
 CarLife path resolves a name.
 
 The result is `target/armv7-unknown-linux-musleabihf/release/cp2cl`. Copy it to
-the board and run it there; it reads `vendor/playport/web/dist` and
-`authentication/` relative to the working directory, and everything else comes
-from the environment — see [Running it on the board](#running-it-on-the-board).
+the board and run it there; it reads `authentication/` relative to the working
+directory, and everything else comes from the environment — see
+[Running it on the board](#running-it-on-the-board).
 
-### Why HTTPS, and what to do about the certificate
+### What the phone renders at
 
-WebCodecs — the browser's hardware decoder — only exists in a **secure context**.
-A LAN address over plain HTTP is not one, so the page would load and then refuse
-to decode anything. So the server is TLS, with a certificate it generates for
-this machine at startup.
+The head unit is asked what its screen is, at the start of every CarLife session
+— `VIDEO_ENCODER_INIT` carries a width, a height and a frame rate, and the answer
+that goes back is what both ends work from. That answer is what the phone is
+asked to render at, and `GET /info` is where it is said: one display, named
+`cp2cl`, sized to the car's own pixels. A car that names nothing gets 1280x720 at
+30.
 
-That certificate is self-signed by us, so the browser does not know it. Click
-through the warning once and the page works. The certificate is regenerated on
-every start, so nothing has to be stored or renewed.
+Changing it costs a session, and that is not a shortcut: the phone reads `/info`
+exactly once, at the start of a session, and never asks again, so a new size only
+reaches it on the next one. A car whose screen is not the default has its CarPlay
+session rebuilt once, early on, for exactly this reason — the log says so:
 
-The server listens wherever `CP2CL_WEB_ADDR` says — `0.0.0.0:8080` by default.
-Every address it prints is named in the certificate, so any of them works once
-the warning has been accepted: the loopback one on the machine itself, the rest
-from other devices.
-
-### The token
-
-The page carries one in the URL, hands it back on the WebSocket and when
-changing the display, and anything without it is refused. It is fixed —
-`0` unless `CP2CL_WEB_TOKEN` says otherwise — so the printed URL,
-and any bookmark of it, works across restarts. The front end will not connect
-without a token, so there is no token-less mode to fall back to. This is a debug
-surface on a LAN, not something to expose: a fixed token is a convenience, not a
-substitute for keeping the port off the network at large.
-
-### What the browser is doing
-
-Three things, all in PlayPort's own front end — which is used unmodified, so the
-backend is written to it rather than the other way round:
-
-* **One WebSocket, two protocols.** JSON control messages down (`hello`,
-  `session`, `mic`) and up (`touch`, `knob`, `media`, `siri`, `night`,
-  `telephony`, `keyframe`, `ping`); binary frames down for the media itself,
-  little-endian with one type byte up front, and binary frames up for captured
-  microphone audio.
-* **`GET /api/status` and `GET /api/display`.** Who we are, whether a session is
-  up, and what the display panel should show.
-* **`POST /api/display`.** A new size, frame rate and UI scale — see the
-  display panel below.
-
-### The display panel
-
-Changing anything there restarts CarPlay. That is not a shortcut: the phone reads
-`/info` exactly once, at the start of a session, and never asks again, so a new
-size only reaches it on the next one.
+```
+[cl] the car asked for 1920x480 at 24 fps; agreeing to 1920x480 at 24
+[cp2cl] the car's screen is 1920x480 at 24 fps; the phone is asked for the same
+```
 
 Two things have to happen, and closing the connection is only the first:
 
@@ -214,23 +172,18 @@ The codec is not a choice here. CarLife carries an elementary stream and its
 head units decode `video/avc`, so `/info` offers H.264 and nothing else — a
 phone told H.265 is available would send pictures the car cannot read.
 
-`uiScale` is PlayPort's UI-size control, and it works by asking the phone for a
-larger canvas (`100/percent` of the size) and letting the browser fit it back to
-the same surface — so a bigger canvas draws proportionally *smaller* CarPlay
-controls. Touch is mapped through the canvas, not the panel size, for the same
-reason.
+`uiScale` is PlayPort's UI-size control, and it still means what it did there:
+ask the phone for a canvas `100/percent` the size and fit the result back to the
+panel, so a larger canvas draws proportionally *smaller* CarPlay controls. Touch
+is mapped through the canvas rather than the panel size for the same reason.
+Nothing sets it at the moment, so the car's own pixels are asked for as they are.
 
 ## Environment
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `CP2CL_AUTH_DIR` | `./authentication` | MFi credentials |
-| `CP2CL_WEB_ROOT` | `./vendor/playport/web/dist` | the built browser client |
-| `CP2CL_WEB_ADDR` | `0.0.0.0:8080` | where the browser client is served. HTTPS is not part of it because there is no other option — WebCodecs needs a secure context — and `0.0.0.0` is every interface |
-| `CP2CL_WEB_TOKEN` | `0` | the token the page has to carry; fixed, so the URL is stable and short enough to type. Give it a real value before the port is reachable from anywhere but this LAN |
-| `CP2CL_WEB_WIDTH` / `CP2CL_WEB_HEIGHT` | `1280` / `720` | the web sink's screen: what the phone renders, until the display panel says otherwise. A CarLife head unit names its own width and height instead |
-| `CP2CL_WEB_FPS` | `60` | the web sink's max frame rate |
-| `CP2CL_WIDTH_MM` / `CP2CL_HEIGHT_MM` | derived | physical size; drives UI scale. No CarLife message carries a physical size, so this is the operator's either way |
+| `CP2CL_WIDTH_MM` / `CP2CL_HEIGHT_MM` | derived | physical size, which is how CarPlay decides its dpi and therefore how finely it draws. No CarLife message carries a physical size, so this is the operator's; the height is derived from the width and the aspect ratio when only the width is given |
 | `CP2CL_DEVICE_ID` / `CP2CL_BT_MAC` | `00:11:22:33:44:55` | identifiers in `/info` |
 | `CP2CL_LOG` | `info` | log level: `error`, `warn`, `info`, `debug`, `trace` |
 | `CP2CL_WIRELESS` | off | take CarPlay over Bluetooth and Wi-Fi instead of USB |
@@ -240,8 +193,7 @@ reason.
 | `CP2CL_WIFI_CHANNEL` | `36` | channel reported to the phone, for when no access point is on air |
 | `CP2CL_AP_MAC` | this machine's Wi-Fi MAC | the router's BSSID, sent as the accessory identifier |
 | `CP2CL_TARGET_BT` | any | only accept this phone's Bluetooth address |
-| `CP2CL_BT_ADAPTER` | `hci0` | Linux: which Bluetooth adapter |
-| `CP2CL_SINK` | `web` | who reads the streams: `web` is the browser client, `cl` is a CarLife head unit over the micro-USB port, and there is no browser client in that mode. See [CarLife](#carlife) |
+| `CP2CL_BT_ADAPTER` | `hci0` | which Bluetooth adapter |
 | `CP2CL_INPUT` | `cp` | what the CarLife video channel sends: `cp` is the CarPlay session, `file` is the file below, sent an access unit per tick and started over at the end |
 | `CP2CL_INPUT_FILE` | — | that file: an annex-B stream. A name that cannot be read falls back to heartbeats |
 
@@ -286,16 +238,16 @@ usually means the phone's service records are stale.
 
 ## CarLife
 
-`CP2CL_SINK=cl` makes the head unit the reader instead of the browser client.
-The device presents itself to the car as a phone over the micro-USB port, and the
-two halves become one thing: the CarPlay side is held shut until the car's session
-is up, and is torn down when the car's session ends. Being the reader is what
-turns the CarLife half on, so there is no second switch for it.
+The head unit is the only consumer. The device presents itself to the car as a
+phone over the micro-USB port, and the two halves become one thing: the CarPlay
+side is held shut until the car's session is up, and is torn down when the car's
+session ends. Nothing is published to the phone and nothing is accepted from it
+before a car is talking, which is why a head unit is what starts the whole thing —
+see [Trying it without a car](#trying-it-without-a-car) for the one that stands in
+for it on a desk.
 
-There is no browser client in this mode, which means no page to open and no
-display panel: what the phone is asked to render comes from `CP2CL_WEB_WIDTH`,
-`CP2CL_WEB_HEIGHT` and `CP2CL_WEB_FPS` — the web sink's screen, which is where
-those names come from. The head unit states its own geometry over the session.
+That also means there is nothing to watch here: no page, no panel, and the
+picture goes to the car. `CP2CL_LOG` is where a run is read.
 
 What is there: the USB interface the car enumerates, the AOA control requests,
 the session a head unit drives — the version handshake, device information,
@@ -314,7 +266,7 @@ so everything up to the picture can be exercised without one:
 ```bash
 # On the board, in the foreground. Ctrl-C ends the run and takes the device off
 # the bus with it.
-CP2CL_SINK=web CP2CL_WIRELESS=1 ./cp2cl
+CP2CL_WIRELESS=1 ./cp2cl
 ```
 
 The video channel then carries the phone's frames, which needs both a phone and a
@@ -322,7 +274,7 @@ car session. To drive the channel with no CarPlay in the picture at all, point i
 at a file instead:
 
 ```bash
-CP2CL_SINK=cl CP2CL_INPUT=file CP2CL_INPUT_FILE=/root/moving.h264 ./cp2cl
+CP2CL_INPUT=file CP2CL_INPUT_FILE=/root/moving.h264 ./cp2cl
 ```
 
 Any annex-B stream will do. Its access units go out one per tick, at the rate the
@@ -488,10 +440,11 @@ replaced on every run. There are no unit files for the program here: it is start
 by hand, and its settings are the environment it is started with — see [Running it
 on the board](#running-it-on-the-board).
 
-**The board is reached on its access point.** `192.168.4.1`, with the browser
-client on 8080 once the program is running. Nothing about the board needs the USB
-port: the program composes the device, so a board with nothing running on the port
-at all still boots, brings up its access point, and can be logged into.
+**The board is reached on its access point.** `192.168.4.1`, and nothing else: the
+program has no port of its own to log into, and everything it has to say goes to
+the terminal it was started from. Nothing about the board needs the USB port: it
+composes the device itself, so a board with nothing running on the port at all
+still boots, brings up its access point, and can be logged into.
 
 **What is not here.** The gadget, the FunctionFS mount, the bind, the DHCP server
 for the link that gadget carried and the socket that opened its control endpoint
@@ -553,14 +506,13 @@ the controller — is done by the program, and is a no-op where it is not loaded
 ### Running it on the board
 
 There is no package and no unit: the binary is copied over and run in the
-foreground. Everything it reads from its working directory — the built browser
-client and the MFi credentials — is copied over beside it:
+foreground. The one thing it reads from its working directory — the MFi
+credentials — is copied over beside it:
 
 ```bash
 # From the checkout, after the cross-build above.
-ssh root@192.168.4.1 'mkdir -p /root/cp2cl/web /root/cp2cl/authentication'
+ssh root@192.168.4.1 'mkdir -p /root/cp2cl/authentication'
 scp target/armv7-unknown-linux-musleabihf/release/cp2cl root@192.168.4.1:/root/cp2cl/
-scp -r vendor/playport/web/dist/. root@192.168.4.1:/root/cp2cl/web/
 scp authentication/* root@192.168.4.1:/root/cp2cl/authentication/
 ```
 
@@ -600,56 +552,41 @@ out is what the hardware is for.
 
 ## Input
 
-Input goes through the browser client, which is the control surface: the
-bindings below are the ones that count. With `CP2CL_SINK=cl` there is no browser
-client, so there is no input panel at all — the car's own touch and panel keys
-arrive on the CarLife session and are reported rather than forwarded.
+The car is where input comes from: its touch and panel keys arrive on the CarLife
+session, and that is the control surface. Nothing carries them any further yet —
+they are logged, and the CarPlay side would be the thing to forward them to.
 
-| | In the browser |
-|---|---|
-| touch | anywhere on the picture, two fingers at once |
-| arrows | the knob's absolute X/Y axes |
-| `Enter` | select |
-| `Escape` / `Backspace` | back |
-| `Home` | home |
-| `s` | Siri |
-| `Space` | play/pause |
-| `MediaTrackNext` / `MediaTrackPrevious` | next / previous |
-
-Buttons for the call keys and for day/night sit next to those. Day/night and the
-call keys go out as session commands rather than HID reports; everything else is
-a HID report on one of the four devices `/info` declares — touchscreen, knob,
-media and telephony.
+The vocabulary they are mapped onto is in `src/commands.rs`, and `event.rs` is the
+one place that knows how each command reaches the phone: a HID report on one of
+the four devices `/info` declares — touchscreen, knob, media and telephony — or a
+session command for day/night and the call keys.
 
 A press is always two reports, the press and an all-zero one. The phone tracks a
 button by whether it is still down, so a key that is never released does not
 register as a press at all; the same is true of the touchscreen, where a lifted
 finger has to leave its slot behind rather than disappear from the list, and at
-the position it was last seen at. The browser drops a finger the moment it lifts,
-so a slot a message does not name is carried over from the last report with only
-its touch bit cleared. Naming the origin instead reads as the finger jumping
-there, and the phone cancels a press that moves off the control before it lifts.
+the position it was last seen at.
 
 ## The microphone
 
 CarPlay has no microphone stream. The phone asks for one by naming a *send* port
 in the SETUP of its main audio stream and labelling that stream `telephony` or
-`speechRecognition`; the browser then captures, encodes, and sends the payloads
-back up the same WebSocket, and this process seals them and puts them on that
-port.
+`speechRecognition`; whatever captures the audio then encodes it, and this process
+seals the payloads and puts them on that port.
 
 The codec follows the transport rather than being chosen: Opus over Wi-Fi, PCM
 over the cable, at the rate and channel count the phone's own audio stream
 arrived at.
 
-It is live only while the phone is listening — the browser is told when to start
-and stop, because holding a microphone open for nobody is a light that never
-goes out. Which means the way to test it is to start a call or invoke Siri.
+Nothing captures it yet — there is no microphone on the board, and no path from
+the car up to this side — so the uplink opens and is reported
+(`[mic] uplink open to ...`) for a capture that does not exist. It is open while
+the phone is listening and shut the rest of the time, so the way to see it is to
+start a call or invoke Siri.
 
 ## Depending on LIVI
 
-LIVI and the browser client are git submodules under `vendor/`, pinned to
-exact commits:
+LIVI is a git submodule under `vendor/`, pinned to an exact commit:
 
 ```bash
 git submodule update --init --recursive
@@ -658,7 +595,6 @@ git submodule update --init --recursive
 | Submodule | Upstream | Pinned to |
 |---|---|---|
 | `vendor/LIVI` | `0x5e/LIVI` | `feature/local-credential` |
-| `vendor/playport` | `youcci/playport` | `main` |
 
 `Cargo.toml` takes the LIVI crates by path from the submodule:
 
@@ -670,9 +606,8 @@ LIVI's repository root is an Electron app with no top-level `Cargo.toml`; its
 Rust lives under `native/`, which is why every path spells that out.
 
 Because the submodule is pinned rather than tracking a branch, nothing moves on
-its own — `git submodule update --remote vendor/LIVI` and
-`git submodule update --remote vendor/playport` are the deliberate, manual steps
-that advance them.
+its own — `git submodule update --remote vendor/LIVI` is the deliberate, manual
+step that advances it.
 
 Note the licence: LIVI is **GPL-3.0-or-later**, and linking its crates makes
 this a derivative work, so cp2cl inherits that.
@@ -699,8 +634,7 @@ this a derivative work, so cp2cl inherits that.
 | `src/airplay/event.rs` | input: HID reports and session commands, over the event channel |
 | `src/airplay/mic.rs` | the microphone uplink, sealed and sent back to the phone |
 | `src/sink.rs` | what a stream *is* — codec and description as well as bytes |
-| `src/commands.rs` | the vocabulary of input the browser client produces |
-| `src/web/mod.rs` | the browser client's server: the wire framing, the API, the WebSocket, TLS |
+| `src/commands.rs` | the vocabulary of input |
 | `docker/` | the image that cross-compiles for the board, and the CMake toolchain it needs |
 | `board/` | the firmware half: the access point and its unit, laid out as the filesystem they land on |
 
@@ -717,8 +651,9 @@ this a derivative work, so cp2cl inherits that.
 * **Media keys do nothing until something has played.** With nothing playing,
   iOS has no now-playing app for them to reach. Play something once and they work
   for the rest of the session.
-* **A display change blanks the screen for a moment.** See the display panel
-  above: the session has to be rebuilt for the new size to reach the phone.
+* **A new screen size blanks the picture for a moment.** See [what the phone
+  renders at](#what-the-phone-renders-at) above: the session has to be rebuilt for
+  the new size to reach the phone.
 * **Wireless audio is re-timed on the way out.** A *buffered* media stream does
   not arrive packet by packet: the phone hands it over in lumps — measured at a
   steady 18 packets, 384 ms of audio, with nothing in between — which is more

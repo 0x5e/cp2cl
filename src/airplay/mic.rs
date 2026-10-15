@@ -1,15 +1,19 @@
-//! The microphone uplink: what the browser captured, on its way to the phone.
+//! The microphone uplink: what was captured at this end, on its way to the phone.
 //!
 //! CarPlay has no microphone stream of its own. The phone asks for one by
 //! naming a *send* port in the SETUP of its main audio stream (type 100) and
 //! labelling that stream `telephony` or `speechRecognition`; audio then travels
 //! the other way over UDP, sealed with the mirror of the key the phone seals its
-//! own audio with. Nothing here decodes: the browser encodes and the phone says
-//! what it will take, which is exactly how the downlink works.
+//! own audio with. Nothing here decodes: whoever captures encodes, and the phone
+//! says what it will take, which is exactly how the downlink works.
 //!
 //! The receiver fills the sink in as the phone opens and closes such a stream,
-//! and the browser reads the published state to decide whether to capture at
+//! and the capture side reads the published state to decide whether to start at
 //! all — one object, because both sides have to change together.
+//!
+//! Nothing captures anything yet, so the half that takes a captured payload and
+//! sends it is the one the `dead_code` allowances below are for: the microphone
+//! will be the CarLife side's. See `PLAN-CL.md` §4.4.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -21,17 +25,19 @@ use super::crypto::{seal, SymKey};
 use crate::sink::AudioCodec;
 
 /// The RTP-shaped header the phone reads before the sealed payload.
+#[allow(dead_code)]
 const RTP_HEADER_LEN: usize = 12;
 /// How much audio one packet carries when the phone does not say: twenty
 /// milliseconds, the same default both reference implementations use.
 const DEFAULT_FRAME_MS: u32 = 20;
 /// Eight bytes of the nonce follow the Poly1305 tag, so the phone can tell a
 /// replayed packet from a late one.
+#[allow(dead_code)]
 const NONCE_LEN: usize = 8;
 
 /// Which family the captured audio is in. The phone decides by transport rather
-/// than by preference — PCM over the cable, Opus over Wi-Fi — and the browser is
-/// told which one to produce.
+/// than by preference — PCM over the cable, Opus over Wi-Fi — and the capture
+/// side is told which one to produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MicCodec {
     Lpcm,
@@ -39,7 +45,8 @@ pub enum MicCodec {
 }
 
 impl MicCodec {
-    /// The name the browser's capture path knows it by.
+    /// The name the capture path knows it by.
+    #[allow(dead_code)]
     pub fn name(self) -> &'static str {
         match self {
             Self::Lpcm => "lpcm",
@@ -48,7 +55,7 @@ impl MicCodec {
     }
 }
 
-/// What the browser needs to set up its capture, and what the uplink needs to
+/// What a capture path needs to set itself up, and what the uplink needs to
 /// seal what comes back. Derived once, from the phone's own audio SETUP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MicConfig {
@@ -66,9 +73,9 @@ impl MicConfig {
     /// Reads the uplink's shape off the codec the downlink already agreed on.
     ///
     /// There is no separate negotiation: a stream that arrived as Opus is one
-    /// the browser is asked to capture in Opus, at the same rate and with the
-    /// single channel a microphone has. `frames_per_packet` is the phone's own
-    /// packet timing, which is what keeps the RTP timestamp right.
+    /// the capture side is asked to produce in Opus, at the same rate and with
+    /// the single channel a microphone has. `frames_per_packet` is the phone's
+    /// own packet timing, which is what keeps the RTP timestamp right.
     pub fn from_codec(codec: AudioCodec, frames_per_packet: u32) -> Self {
         let (mic, channels) = match codec {
             AudioCodec::Opus { .. } => (MicCodec::Opus, 1),
@@ -92,9 +99,9 @@ impl MicConfig {
     /// How far the RTP timestamp moves for one payload.
     ///
     /// Whole frames, not bytes — and for Opus a fixed frame rather than a count,
-    /// because the browser hands over whatever the encoder produced. Getting
-    /// this wrong is not fatal, but it is what the phone positions the audio
-    /// against.
+    /// because the encoder decides its own frame size. Getting this wrong is not
+    /// fatal, but it is what the phone positions the audio against.
+    #[allow(dead_code)]
     fn samples(&self, payload: &[u8]) -> u32 {
         match self.codec {
             MicCodec::Opus => self.samples_per_packet,
@@ -107,6 +114,7 @@ impl MicConfig {
 }
 
 /// One open uplink: where the packets go and how they are sealed.
+#[allow(dead_code)]
 struct Uplink {
     socket: UdpSocket,
     key: SymKey,
@@ -120,6 +128,7 @@ struct Uplink {
     nonce: u64,
 }
 
+#[allow(dead_code)]
 impl Uplink {
     /// How far the RTP timestamp moves for one payload: the phone's own packet
     /// size, which for Opus is a fixed frame rather than a byte count.
@@ -128,14 +137,14 @@ impl Uplink {
     }
 }
 
-/// Where the browser's captured microphone audio goes.
+/// Where audio captured at this end goes.
 ///
 /// One of these is built at startup and shared: the receiver opens and closes it
-/// as the phone asks for bidirectional audio, and the browser reads the state to
-/// know whether to capture — which is why the two change under one lock.
+/// as the phone asks for bidirectional audio, and the capture side reads the
+/// state to know whether to start — which is why the two change under one lock.
 pub struct MicSink {
     uplink: Mutex<Option<Uplink>>,
-    /// Published so the browser is told to start and stop. `None` means the
+    /// Published so the capture side is told to start and stop. `None` means the
     /// phone is not listening, and packets are dropped without a word.
     state: watch::Sender<Option<MicConfig>>,
 }
@@ -185,20 +194,23 @@ impl MicSink {
         let _ = self.state.send(None);
     }
 
-    /// What to tell the browser now, and a subscription for later changes.
+    /// What to tell the capture side now, and a subscription for later changes.
+    #[allow(dead_code)]
     pub fn current(&self) -> Option<MicConfig> {
         *self.state.borrow()
     }
 
+    #[allow(dead_code)]
     pub fn subscribe(&self) -> watch::Receiver<Option<MicConfig>> {
         self.state.subscribe()
     }
 
     /// Seals one captured payload and sends it.
     ///
-    /// Silently does nothing when there is no uplink: the browser may have a
-    /// capture running when the phone stops listening, and racing it to a stop
-    /// would only lose the last packet either way.
+    /// Silently does nothing when there is no uplink: a capture may still be
+    /// running when the phone stops listening, and racing it to a stop would
+    /// only lose the last packet either way.
+    #[allow(dead_code)]
     pub async fn send(&self, payload: &[u8]) {
         if payload.is_empty() {
             return;

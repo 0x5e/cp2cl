@@ -26,7 +26,7 @@ const NONCE_LEN: usize = 8;
 
 pub struct AudioReceiver {
     key: SymKey,
-    /// Which of the phone's audio streams this is; the browser mixes one channel
+    /// Which of the phone's audio streams this is; the far end mixes one channel
     /// per stream, so it has to travel with every frame.
     stream_type: u8,
     codec: AudioCodec,
@@ -86,8 +86,8 @@ impl AudioReceiver {
     }
 
     /// The RTP timestamp is the phone's own sample counter. Turning it into
-    /// microseconds here is what lets a browser schedule playback; for PCM it
-    /// also happens to be exact, since the counter *is* the sample index.
+    /// microseconds here is what lets playback be scheduled; for PCM it also
+    /// happens to be exact, since the counter *is* the sample index.
     fn timestamp_us(&self, packet: &[u8]) -> u64 {
         let sample = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]) as u64;
         sample * 1_000_000 / self.codec.rate().max(1) as u64
