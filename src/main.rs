@@ -10,6 +10,7 @@
 //! * the CarLife session, which presents this device to a head unit as a phone
 //!   and feeds it those streams.
 
+mod aac;
 mod airplay;
 mod carlife;
 mod commands;
@@ -86,15 +87,17 @@ async fn main() -> Result<()> {
     let mic = MicSink::new();
 
     // The car is the consumer, and this is the queue between the two halves:
-    // access units arrive from CarPlay and wait here for a CarLife session to
-    // take them out on the video channel.
+    // access units and the phone's sound arrive from CarPlay and wait here for a
+    // CarLife session to take them out, on the video channel and the media one.
     let outlet = Arc::new(ClOutlet::new());
 
     // One object per stream, not two: a video event and an audio event differ
-    // only in what the consumer converts them to. The CarLife sink is one object
-    // for the same reason — it takes both and has a channel for the first only.
+    // only in which channel the consumer converts them to. There are two of them
+    // because there are two streams that can be told apart this early — the
+    // screen and the sound — and the CarLife sink is one object because both of
+    // them are the same car on the same connection.
     let (video_sink, audio_sink): (Arc<dyn MediaSink>, Arc<dyn MediaSink>) = {
-        let sink = outlet.video();
+        let sink = outlet.sink();
         (sink.clone(), sink)
     };
 

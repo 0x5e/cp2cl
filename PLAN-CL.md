@@ -50,7 +50,7 @@ iPhone ──无线 CarPlay(AirPlay)──► cp2cl ──USB(AOA)──► MBUX
 | 会话重启                                 | `src/main.rs` 的 `restart`（`broadcast`），`airplay::serve` 与两个 watch 各自订阅    | CarLife 侧发起几何变更时走同一条路                        |
 | `/info` 的音频宣示                        | `src/airplay/info.rs:178` `audio_formats()`（条目在 `:187-197`）      | 音频走 AAC-LC，`102/media` 那条留着（§4.2）             |
 | 视频帧（**已是 annex-B**）                  | `src/airplay/screen.rs` → `StreamEvent::VideoFrame`              | 直接塞进 CarLife 视频通道（§4.1）                      |
-| 音频帧与格式                               | `src/sink.rs` `AudioCodec`（含 `Pcm{rate,channels}`）               | AAC-LC 需在本地解码后转成 PCM 再进通道（§4.2）               |
+| 音频帧与格式                               | `src/airplay/audio.rs` → `StreamEvent::AudioPacket`（解码后是 PCM）      | 直通：AAC-LC 在这条路的起点就解成 PCM，进 CarLife Media 通道（§4.2） |
 | 输入上行（HID + 会话命令）                     | `src/airplay/event.rs`、`src/commands.rs`                         | CarLife 触摸/按键接到这套词汇上                         |
 | 麦克风上行                                | `src/airplay/mic.rs`                                             | CarLife VR 通道的 PCM 接过来                       |
 
@@ -63,7 +63,7 @@ iPhone ──无线 CarPlay(AirPlay)──► cp2cl ──USB(AOA)──► MBUX
 | AOA 控制请求的应答          | `src/carlife/gadget.rs`         | 已实现：ep0 事件循环、51/52/53 应答、触发重枚举、把两个 bulk 端点交给会话（只在 Linux 编） |
 | CarLife MD 协议栈    | `src/carlife/{frame,proto,session}.rs` | 已实现：帧编解码、protobuf、握手状态机、心跳      |
 | 桥接：视频             | `src/sink.rs` `ClOutlet`         | 已实现：`VideoFrame` 直通视频通道，参数集在下一帧前带出；`CP2CL_INPUT_FILE` 则改为重复一个文件 |
-| 桥接：音频             | 待定                              | 未实现：Media 通道要 PCM，拿到的却是 AAC-LC，落在 `ClSink` 里被丢弃（§4.2） |
+| 桥接：音频             | `src/aac.rs` + `src/sink.rs` `Media` | 已实现：AAC-LC 在 `airplay::audio` 里解成 PCM，经第二条队列进 Media 通道；`MSG_MEDIA_INIT` 在第一批采样之前发（§4.2）。**CPU 余量与两个取值未在真机确认** |
 
 ---
 
@@ -278,6 +278,10 @@ MD 收到 `GO_TO_FOREGROUND` 后 5 秒没切前台要回 `0x0001004C`。**都是
 `AUDIO_TRANSMISSION_MODE`（feature config 下发，默认 `0` = 专用音频通道，`1` = 走蓝牙）决定 HU 是听通道还是  
 听蓝牙；我们要的是 `0`，但那是 **HU 发给我们**的，不接受也没得选。
 
+表里的格式是**我们报给车机的**（`MSG_MEDIA_INIT`），不是它要求我们给的：采样率报的是手机上 AAC-LC 解出来的那个
+（解码不改采样率与声道数），所以它可能是 44.1 k 也可能是 48 k，见 §4.2。`MEDIA_SAMPLE_RATE` 那个开关因此只说明
+车机自己期望哪一档。
+
 ### 3.8 触摸与按键
 
 - 触摸是 **HU→MD**，`0x00068001` `TOUCH_ACTION{action,x,y}`（action：0=DOWN 1=UP 2=MOVE）或  
@@ -325,20 +329,30 @@ AirPlay 侧交出来的是 **annex-B** 访问单元（`src/airplay/screen.rs` �
 PCM 与 `102/media` AAC-LC 两条路，手机选的是后者；`info.rs:173-177` 的注释原本假设「只有有线会出现 PCM」，而这一侧  
 就是无线，所以 PCM 从来不会来。⇒ **音频必须在本地解 AAC-LC**，不能直通。
 
-落点：
+已落地的做法（2026-10-16）：
 
 - `/info` 的 `audio_formats()`（`info.rs:178-197`）保持现状——`100/media` 的 PCM 位留着无用但无害，`102/media` 的  
   `aac_lc` 是手机真正会用的那条。**不要试图删掉 AAC 条目来把手机逼回 PCM**：实测无线下手机不产生 PCM，  
   删掉这一条只会让媒体流无从选择，不会换来 PCM。
-- 解码用 `symphonia`（`aac` feature）：输入 = `sink.rs` 的 `AudioCodec::AacLc` 帧（带 `StreamEvent::AudioConfig` 给的  
-  ASC），输出 = CarLife Media 通道要的 **PCM 44.1 kHz / 双声道 / 16 bit 小端**。重采样只在采样率不是 44.1 k 时做。
-- **待验**：Cortex-A7 单核实时解 AAC-LC 的余量。H3 四个核，视频侧只做搬运，理论上够；但这是整个方案里**唯一**
-  引入实时编解码的地方，所以 Phase 3 一开始就要用 `top`/`pidstat` 量出来，不要等到上车才发现。
-  ALAC 也可能出现（无损源），`symphonia` 同样能解，代价一样。
-
-TTS/VR 通道是 16 kHz 单声道——CarPlay 侧对应的是 `speechRecognition`/`telephony` 那两个低带宽流，手机给的是  
-**OPUS**（同一次实测），也需要解码（`symphonia` 的 `opus` feature）再做一次重采样。若嫌重，可先只把 Media 通道  
-打通，TTS/VR 留空（车机不会因为这两个通道没数据而拒会话）。
+- **解码在 `airplay::audio`（`AudioReceiver`），不在 CarLife 侧**：流是什么编解码器只有那里知道，而且那是
+  每条流一个实例、生命周期与流一致的地方。`new` 时按 `AudioCodec` 建 `aac::Decoder`，`decode()` 出来就已经是
+  PCM，`sink.rs` 收到的 `AudioPacket` 是 PCM。
+- **`symphonia` 只开 `aac`**（`default-features = false, features = ["aac"]`，落 0.5.5）：只要解器，不要
+  demuxer 与其它编解码器。二进制增加约 230 KB（12.36 → 12.59 MB）。
+- **没有重采样**：`MSG_MEDIA_INIT` 里的 `sampleRate` 就报解出来的采样率，车机按它开 AudioTrack。解码不改变
+  采样率与声道数，所以报的就是手机上 SETUP 谈定那两个数（§3.9 的 `MEDIA_SAMPLE_RATE` 因此只影响车机自己的期望）。
+- **只有 media 进这条通道**：`sink.rs` 按 `AudioConfig` 的 `audioType` 认流（`media` / `telephony` /
+  `speechrecognition` 是同一条事件流上的三样东西），只有 `media` 会被记住并转发；`AudioStopped` 转成
+  `MSG_MEDIA_STOP`。格式只在变化时发一次 `MSG_MEDIA_INIT`。
+- `MSG_MEDIA_INIT` 的三个字段：`sampleRate` = 解出来的采样率，`channelConfig` = 声道数，`sampleFormat` = 16。
+  车机侧 `AudioTrackManagerSingle` 把 `channelConfig` 读成「1=单声道，其余=立体声」、把 `sampleFormat` 读成
+  「8=8 bit，其余=16 bit」，所以这两个值是按位宽与声道数本身给的，不是编码值。
+- **TTS/VR（通道 4/5）仍然留空**：那两个低带宽流是车机自己的语音通道，而且 `symphonia` **没有** Opus 解器
+  （早先记的「`symphonia` 的 `opus` feature」是错的），要做得另找库或移植。车机不会因为这两个通道没数据而拒会话。
+- **待验**：① Cortex-A7 单核实时解 AAC-LC 的余量——H3 四个核、视频侧只做搬运，理论上够，但这是整个方案里
+  **唯一**引入实时解码的地方，上板后要用 `top`/`pidstat` 量；② `channelConfig`/`sampleFormat` 在真车上的取值；
+  ③ 一个 RTP 包里是不是只有一个 AAC 帧（`framesPerPacket`，现在打在音频流建立那行 info 日志里）——若不是，
+  解码器会逐帧拒收，日志里表现为「this stream's frames are being dropped」。
 
 ### 4.3 反向输入
 
@@ -426,19 +440,24 @@ Mac 是 host、Duo2 是 device，拓扑与「车机 ↔ 我们的设备」完全
 反过来角色：Mac 跑 `carlife-link` 当车机，插上装了 CarLife 的 **Pixel 7a**，把手机端在完整会话里的  
 报文逐条录下来（`carLifeLibTest` 的回调、`aoa-probe` 的收发、或 `stonexu1986/carlife-protocol-analysis-tool`  
 的解析器）。我们写 MD 侧时，**手机的行为才是标准答案**：消息顺序、`MD_INFO` 里填了什么、  
-`encryptValue` 的长度与形态、视频包的时间戳步进、`MEDIA_INIT` 的 `channelConfig/sampleFormat` 取值。  
+`encryptValue` 的长度与形态、视频包的时间戳步进、`MEDIA_INIT` 的 `channelConfig/sampleFormat` 取值（我们现在按
+声道数 / 16 位给，见 §4.2）。  
 这份录音应当作为 Phase 0 的产出归档（`docs/carlife-md-capture.md` 之类）。
 
 ### 5.3 离线验证
 
 已落地的单测（`cargo test`，全部不需要 USB）：
 
-- **帧编解码**（`frame.rs`，8 条）：头长与长度字段、带/不带时间戳的往返、`reserved` 非零不影响、方向位含例外、  
+- **帧编解码**（`frame.rs`，10 条）：头长与长度字段、带/不带时间戳的往返、`reserved` 非零不影响、方向位含例外、  
   逐字节分片仍能拼整、一次 write 两个块分别读出、截断报错、未知通道拒绝、空管道当结束。
 - **protobuf**（`proto.rs`，14 条）：逐条消息的字节级断言（含 `1280` 在线上是 `08 80 0A` 这类 varint 细节）、  
-  未设字段不写 0、负 int32 十字节符号扩展、截断体之前仍可读。
-- **状态机**（`session.rs`，6 条）：自带一个 `tokio::io::duplex` 假车机，喂完整握手序列并断言发出的消息与顺序；  
-  另含两条**否定式**断言——未 `START` 前视频通道静默、默认策略下鉴权请求不回。
+  未设字段不写 0、负 int32 十字节符号扩展、截断体之前仍可读、`MSG_MEDIA_INIT` 三个字段的字节序。
+- **状态机**（`session.rs`，13 条）：自带一个 `tokio::io::duplex` 假车机，喂完整握手序列并断言发出的消息与顺序；  
+  含触摸/按键上行的映射、fps 上限、两条**否定式**断言（未 `START` 前视频通道静默、默认策略下鉴权请求不回），  
+  以及 Media 通道（格式先于采样、同格式不重发、电话流不进来、`AudioStopped` 转 `MSG_MEDIA_STOP`）。
+- **音频解码**（`aac.rs`，3 条）：一帧真 AAC-LC（ffmpeg 编的 440 Hz 正弦，去 ADTS 头）解成 1024 帧 × 2 声道 ×  
+  2 字节且不是静音；截断帧与空帧被拒；不支持的采样率/声道数在建解器时就拒。
+- **流向**（`sink.rs`，1 条）：只有 `media` 那条流会进 Media 通道，并且格式先于采样。
 - **描述符**（`desc.rs`，9 条，跨平台）：把 blob 当字节读，核对 magic/flags/两个 count、接口的  
   class/subclass/protocol、**IN 在 OUT 之前**、两段的 `wMaxPacketSize`（FS 64 / HS 512）、strings blob 的  
   magic/length；51/52/53 被识别而别的请求不被识别、逐字段解包、短读返回 `None`、六条身份落位与越界索引被丢弃、  
@@ -536,7 +555,7 @@ ffmpeg -f lavfi -i testsrc=size=1280x720:rate=30 -frames:v 1 -c:v libx264 \
 | 4  | 单帧 > 600 KB                          | 车机侧解析失败或丢帧       | 分辨率控制在 720p，IDR 体积实测；必要时限制码率             |
 | 5  | ffs + musb 在 4.14 上的吞吐与稳定性           | 花屏/断流            | Phase 1 就先压测：600 KB/帧 × 30 fps ≈ 18 MB/s |
 | 6  | **程序自组设备**：`reidentify()` 假设 4.14 的 ffs + configfs 在解绑/重绑之间端点 fd 仍然有效       | 换身份后会话断，要重插      | 已对着 `gadget_dev_desc_UDC_store` 与 `ffs_ep0_read` 的实现核对（§2.5）；验收就是「Mac 侧完整做一次 51/52/53，然后操作重枚举后的设备」 |
-| 7  | **已确认**：无线 CarPlay 不给媒体 LPCM，只给 AAC-LC | 音频必须本地解码        | `symphonia`（§4.2）；**真正的风险转移到 CPU**：H3 实时解 AAC-LC 的余量在 Phase 3 量 |
+| 7  | **已确认**：无线 CarPlay 不给媒体 LPCM，只给 AAC-LC | 音频必须本地解码        | 已实现：`symphonia`（§4.2）；**风险仍在 CPU**：H3 实时解 AAC-LC 的余量等上板量 |
 | 8  | CarLife 会话建立前后，CarPlay 侧是否在监听                 | 手机连上一个没人应答的会话          | 已解：闸门式（§4.5），车机没到时 CarPlay 侧什么都不开                    |
 | 9  | 车机 USB 口供电不足                         | 掉电重启             | 已知取舍：车机供电，不足时扩展板独立供电                     |
 | 10 | 单 USB 口的角色冲突（管理链路 vs 车机）             | 场景互斥             | **已解**：USB 口整个交给 CarLife，管理链路走 AP（§2.5）                   |
@@ -553,7 +572,7 @@ ffmpeg -f lavfi -i testsrc=size=1280x720:rate=30 -frames:v 1 -c:v libx264 \
 | D4  | 先试**路径 A**（直接 accessory 枚举），后补路径 B                                       | 少写一半代码，且真机先例支持                                        |
 | D5  | protobuf **手写最小编解码**，不引入 codegen                                         | 只用到十几条消息、字段全是定长标量/字符串；`proto/` 里放参考 `.proto` 作文档与单测依据 |
 | D6  | 视频**不重编码**，annex-B 直通                                                    | H3 没有重编码余量；两端都是 H.264 annex-B                         |
-| D7  | 音频**必须本地解 AAC-LC**，不指望 PCM                                         | 无线 CarPlay 实测只给 AAC-LC（§4.2）；`symphonia` 是唯一的实时解码点 |
+| D7  | 音频**必须本地解 AAC-LC**，不指望 PCM                                         | 无线 CarPlay 实测只给 AAC-LC（§4.2）；`symphonia`（只开 `aac`）是唯一的实时解码点 |
 | D8  | 几何由 HU 的 `VIDEO_ENCODER_INIT` 决定，写进 `SharedScreen` 并在变化时发 `restart` | 车机才知道自己屏幕多大；环境变量给不出这个值（已完成）                        |
 | D9  | 浏览器客户端**去掉**（`src/web/` 与 `CP2CL_SINK` 一并删除）                            | CarLife 是唯一的消费者；CarPlay 侧改用 CarLifePort 当假车机来验，不再维护一份前端       |
 | D10 | USB 口整个交给 CarLife，管理链路改走 AP                                          | 设备要模拟手机、还要在会话中间换身份，接口里放不下网络；AP 与 USB 互不相干             |

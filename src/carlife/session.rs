@@ -32,7 +32,7 @@ use super::{frame, proto};
 use crate::airplay::{EventSink, ScreenParams};
 use crate::commands::{Command, TouchContact, PHONE_DROP, PHONE_HOOK_SWITCH, PHONE_MUTE};
 use crate::config::Config;
-use crate::sink::ClOutlet;
+use crate::sink::{ClOutlet, Media};
 
 // What the car sends, by name — the numbers are CarLifeVehicleLib's
 // `EPackageHeadType`.
@@ -60,6 +60,9 @@ const GO_TO_FOREGROUND_RESPONSE: u32 = 0x0001_004C;
 const FEATURE_CONFIG_REQUEST: u32 = 0x0001_0051;
 const VIDEO_DATA: u32 = 0x0002_0001;
 const VIDEO_HEARTBEAT: u32 = 0x0002_0002;
+const MEDIA_INIT: u32 = 0x0003_0001;
+const MEDIA_STOP: u32 = 0x0003_0002;
+const MEDIA_DATA: u32 = 0x0003_0006;
 
 const TOUCH_ACTION: u32 = 0x0006_8001;
 const TOUCH_HARD_KEY: u32 = 0x0006_8008;
@@ -264,28 +267,30 @@ where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     F: FnMut(bool),
 {
-    // A session is what drains the bridge, so it takes the receiving half for as
-    // long as it runs. The car unplugged and plugged back in is a new session and
-    // a new call to this function, which is why the half is given back on the way
+    // A session is what drains the bridge, so it takes both receiving halves for
+    // as long as it runs: one channel carries pictures and the other the phone's
+    // sound. The car unplugged and plugged back in is a new session and a new
+    // call to this function, which is why the halves are given back on the way
     // out rather than dropped with everything else.
-    let (mut video, source) = match frames {
-        Frames::Live(outlet) => match outlet.take_receiver() {
-            Some(rx) => (Some(rx), Source::Live),
+    let (mut video, mut media, source) = match frames {
+        Frames::Live(outlet) => match outlet.take_video() {
+            Some(rx) => (Some(rx), outlet.take_media(), Source::Live),
             None => {
                 tracing::warn!(
                     "[cl] the video channel is already being read; sending heartbeats only"
                 );
-                (None, Source::None)
+                (None, None, Source::None)
             }
         },
         Frames::Cycle(units) => (
+            None,
             None,
             Source::Cycle {
                 units: units.clone(),
                 next: 0,
             },
         ),
-        Frames::None => (None, Source::None),
+        Frames::None => (None, None, Source::None),
     };
 
     // Reads are their own task. A frame can be six hundred kilobytes and the
@@ -317,6 +322,7 @@ where
         channel_touched: None,
         agreed: None,
         started_at: None,
+        media_format: None,
         next_tick: Instant::now(),
         up: false,
         last_touch: None,
@@ -351,6 +357,18 @@ where
                 // heartbeats are what is left to keep the channel alive.
                 None => video = None,
             },
+            // The phone's sound, on the media channel. Written as it arrives,
+            // like the pictures and for the same reason: the phone is what
+            // decides when it plays.
+            item = recv_media(&mut media) => match item {
+                Some(item) => {
+                    if let Err(e) = session.send_media(item).await {
+                        break Err(e);
+                    }
+                }
+                // The CarPlay side has gone; there is nothing left to play.
+                None => media = None,
+            },
             // Only a tick moves the schedule forward, so a busy stream of
             // messages cannot starve the video channel.
             _ = tokio::time::sleep_until(deadline) => {
@@ -363,8 +381,13 @@ where
     };
 
     reading.abort();
-    if let (Some(rx), Frames::Live(outlet)) = (video, frames) {
-        outlet.return_receiver(rx);
+    if let Frames::Live(outlet) = frames {
+        if let Some(rx) = video {
+            outlet.return_video(rx);
+        }
+        if let Some(rx) = media {
+            outlet.return_media(rx);
+        }
     }
     if session.up {
         carplay(false);
@@ -429,6 +452,14 @@ async fn recv_video(video: &mut Option<mpsc::Receiver<Vec<u8>>>) -> Option<Vec<u
     }
 }
 
+/// The same, for the media channel.
+async fn recv_media(media: &mut Option<mpsc::Receiver<Media>>) -> Option<Media> {
+    match media {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 struct Session<'a, W> {
     writer: W,
     cfg: &'a Config,
@@ -446,6 +477,10 @@ struct Session<'a, W> {
     /// When the encoder started, which is what the video channel's timestamps
     /// are measured from.
     started_at: Option<Instant>,
+    /// The format the car has been told the media channel's samples are in, once
+    /// it has been told. A stream that opens with the same one is not worth a
+    /// second message: nothing about it has changed.
+    media_format: Option<(u32, u16)>,
     next_tick: Instant,
     up: bool,
     /// Where the finger was the last time the car said. A release has to name it
@@ -775,6 +810,36 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         self.send_frame(VIDEO_DATA, timestamp_ms, &access_unit).await
     }
 
+    /// One thing the phone's audio produced, on the media channel.
+    ///
+    /// The car is told the format before it is given any samples, and only when
+    /// it changes: the message is what sets a player up, and the same one twice
+    /// is a player set up for a stream that did not begin. A stream that opens
+    /// after a silence is the case this is here for.
+    async fn send_media(&mut self, item: Media) -> Result<()> {
+        match item {
+            Media::Format { rate, channels } => {
+                if self.media_format == Some((rate, channels)) {
+                    return Ok(());
+                }
+                tracing::info!("[cl] the media channel carries PCM at {rate} Hz, {channels}ch");
+                self.media_format = Some((rate, channels));
+                let body = proto::media_init(rate, channels);
+                self.send(MEDIA_INIT, &body).await
+            }
+            Media::Pcm {
+                timestamp_ms,
+                data,
+            } => self.send_frame(MEDIA_DATA, timestamp_ms, &data).await,
+            // The phone stopped playing. Saying so is what lets the car put down
+            // what it took up for the stream rather than hold it over silence.
+            Media::Ended => {
+                self.media_format = None;
+                self.send(MEDIA_STOP, &[]).await
+            }
+        }
+    }
+
     /// How long until the next tick: a frame's worth of time when there is a
     /// picture to send on a schedule and one has been agreed, otherwise the
     /// heartbeat's.
@@ -808,7 +873,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sink::{MediaSink, StreamEvent};
+    use crate::sink::{AudioCodec, MediaSink, StreamEvent};
     use std::sync::{Arc, Mutex};
     use tokio::io::DuplexStream;
 
@@ -969,6 +1034,97 @@ mod tests {
         car.await.unwrap();
     }
 
+    /// The media channel is told what its samples are before it is given any,
+    /// and then the sound follows on the channel the format named. A stream that
+    /// opens with the format the car is already holding is not worth a second
+    /// message, and the phone's own voice streams are not the car's music.
+    #[tokio::test]
+    async fn the_media_channel_is_told_the_format_before_it_is_given_any_sound() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
+
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+        let sink = outlet.sink();
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+
+            // The music: the stream opens, and then there is sound on it.
+            sink.push(StreamEvent::AudioConfig {
+                stream_type: 102,
+                codec: AudioCodec::AacLc {
+                    rate: 44_100,
+                    channels: 2,
+                },
+                name: "media".into(),
+            });
+            let init = car.expect(MEDIA_INIT).await;
+            assert_eq!(init.body, proto::media_init(44_100, 2));
+
+            sink.push(StreamEvent::AudioPacket {
+                stream_type: 102,
+                timestamp_us: 1_234_000,
+                data: vec![0x11, 0x22, 0x33, 0x44],
+            });
+            let sound = car.expect(MEDIA_DATA).await;
+            assert_eq!(sound.body, vec![0x11, 0x22, 0x33, 0x44]);
+            assert_eq!(sound.timestamp_ms, Some(1_234));
+
+            // The same format again says nothing the car is not already holding.
+            sink.push(StreamEvent::AudioConfig {
+                stream_type: 102,
+                codec: AudioCodec::AacLc {
+                    rate: 44_100,
+                    channels: 2,
+                },
+                name: "media".into(),
+            });
+            sink.push(StreamEvent::AudioPacket {
+                stream_type: 102,
+                timestamp_us: 1_300_000,
+                data: vec![0x55, 0x66],
+            });
+            assert_eq!(car.expect(MEDIA_DATA).await.body, vec![0x55, 0x66]);
+
+            // A call is one of the car's own channels, not this one: what comes
+            // out next is the music, with nothing between them.
+            sink.push(StreamEvent::AudioConfig {
+                stream_type: 100,
+                codec: AudioCodec::Opus {
+                    rate: 48_000,
+                    channels: 1,
+                },
+                name: "telephony".into(),
+            });
+            sink.push(StreamEvent::AudioPacket {
+                stream_type: 100,
+                timestamp_us: 1_400_000,
+                data: vec![0x77],
+            });
+            sink.push(StreamEvent::AudioPacket {
+                stream_type: 102,
+                timestamp_us: 1_500_000,
+                data: vec![0x88],
+            });
+            assert_eq!(car.expect(MEDIA_DATA).await.body, vec![0x88]);
+
+            // The phone stopped playing, and the car is told rather than left
+            // holding a player open over nothing.
+            sink.push(StreamEvent::AudioStopped { stream_type: 102 });
+            car.expect(MEDIA_STOP).await;
+        });
+
+        run(device, &frames, &cfg, &mut screen, EventSink::new(), &mut carplay)
+            .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
     #[tokio::test]
     async fn the_files_access_units_go_out_in_order_and_start_over_at_the_end() {
         let cfg = Config::from_env();
@@ -1102,7 +1258,7 @@ mod tests {
         let pushing = tokio::spawn(async move {
             let _ = started_rx.await;
             tokio::time::sleep(Duration::from_millis(100)).await;
-            outlet.video().push(StreamEvent::VideoFrame {
+            outlet.sink().push(StreamEvent::VideoFrame {
                 keyframe: false,
                 data: vec![0x00, 0x00, 0x00, 0x01, 0x41],
             });
@@ -1116,7 +1272,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_video_channel_is_given_back_when_the_session_ends() {
+    async fn both_channels_are_given_back_when_the_session_ends() {
         let cfg = Config::from_env();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
@@ -1134,11 +1290,13 @@ mod tests {
             .expect("the session ends cleanly");
         car.await.unwrap();
 
-        // The next session after the car is plugged back in gets a receiver that
-        // still works, which means the first one was handed back rather than
+        // The next session after the car is plugged back in gets receivers that
+        // still work, which means the first ones were handed back rather than
         // dropped with the session.
-        let rx = outlet.take_receiver().expect("it was handed back");
-        outlet.return_receiver(rx);
+        let rx = outlet.take_video().expect("the video channel was handed back");
+        outlet.return_video(rx);
+        let rx = outlet.take_media().expect("the media channel was handed back");
+        outlet.return_media(rx);
     }
 
     #[tokio::test]

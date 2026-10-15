@@ -18,7 +18,7 @@ to half screen.
 
 ## Features
 
-- No video/audio transcoding on bridge, only transfer.
+- No video transcoding on bridge, only transfer.
 - Support both wired and wireless CarPlay.
 
 ## Requirements
@@ -75,13 +75,13 @@ cannot build this crate itself, so the build runs in the container defined by
 `docker/`. Build the image once:
 
 ```bash
-docker build --platform linux/arm64 -t cp2cl-armv7-builder docker/
+docker build -t cp2cl-armv7-builder docker/
 ```
 
 Then, from the repository root:
 
 ```bash
-docker run --rm --platform linux/arm64 -u "$(id -u):$(id -g)" \
+docker run --rm -u "$(id -u):$(id -g)" \
   -v "$PWD":/work -v cp2cl-cargo:/cargo \
   cp2cl-armv7-builder cargo build --release --target armv7-unknown-linux-musleabihf
 ```
@@ -183,12 +183,12 @@ Nothing sets it at the moment, so the car's own pixels are asked for as they are
 | Variable | Default | Meaning |
 |---|---|---|
 | `CP2CL_AUTH_DIR` | `./authentication` | MFi credentials |
-| `CP2CL_PPI` | `120` | the panel's density, in pixels per inch. The phone is told a physical size and turns it back into a dpi, so this is what decides how finely it draws; the size itself is derived from this and the canvas the car asks to be rendered at, because no CarLife message carries one |
+| `CP2CL_PPI` | `120` | the panel's density, in pixels per inch |
 | `CP2CL_LOG` | `info` | log level: `error`, `warn`, `info`, `debug`, `trace` |
-| `CP2CL_WIRELESS` | off | take CarPlay over Bluetooth and Wi-Fi instead of USB |
-| `CP2CL_WIFI_IFACE` | `wlan0` | the interface the access point runs on. Its IPv6 link-local address is what the phone connects back to, and it is what picks the configuration below |
+| `CP2CL_WIRELESS` | off | take CarPlay over Wi-Fi instead of USB |
+| `CP2CL_WIFI_IFACE` | `wlan0` | the interface the access point runs on |
 | `CP2CL_BT_ADAPTER` | `hci0` | which Bluetooth adapter |
-| `CP2CL_INPUT_FILE` | — | the CarLife video channel's source when it is set: an annex-B stream, sent an access unit per tick and started over at the end. Unset means the source is the CarPlay session. A name that cannot be read falls back to heartbeats |
+| `CP2CL_INPUT_FILE` | — | test video stream file |
 
 On the board every one of these is an environment variable of the process: the
 program is started by hand and has no settings file of its own — see [Running it
@@ -250,10 +250,12 @@ picture goes to the car. `CP2CL_LOG` is where a run is read.
 What is there: the USB interface the car enumerates, the AOA control requests,
 the session a head unit drives — the version handshake, device information,
 feature configuration, the video encoder's negotiation, and the heartbeat that
-keeps the channel alive — and the video channel itself, carrying CarPlay's frames
-from the moment the car starts the encoder. What is not: the audio channels, which
-want PCM and are handed AAC-LC and are therefore dropped; and input, which the car
-sends and this program reports but does not act on.
+keeps the channel alive — the video channel, carrying CarPlay's frames from the
+moment the car starts the encoder, the media channel, carrying the phone's sound
+with the AAC-LC taken off it on the way, and the car's own touch and panel keys,
+which reach the phone as the events a phone understands. What is not: the two
+voice channels, which are the car's own and stay empty, and the phone's
+microphone, which nothing feeds.
 
 ### Trying it without a car
 
@@ -627,17 +629,18 @@ this a derivative work, so cp2cl inherits that.
 | `src/carlife/desc.rs` | the accessory interface as bytes, and the three AOA requests |
 | `src/carlife/usb.rs` | Linux only — the gadget, the FunctionFS instance, and the two forms the device takes |
 | `src/carlife/gadget.rs` | Linux only — `ep0`: the requests arriving on it, and the answers |
-| `src/carlife/session.rs` | the session a head unit drives: handshake, heartbeats, touch |
+| `src/carlife/session.rs` | the session a head unit drives: handshake, heartbeats, pictures, sound, touch |
 | `src/carlife/frame.rs` | the USB framing — the outer chunk header and the per-channel message head |
 | `src/carlife/proto.rs` | as much protobuf as these messages need, written by hand |
 | `src/airplay/mod.rs` | RTSP server: pairing, SETUP, `/info`, streams |
 | `src/airplay/pairing.rs` | SRP-6a pair-setup, X25519/Ed25519 pair-verify, every key HKDF derives |
 | `src/airplay/crypto.rs` | HKDF-SHA512, ChaCha20-Poly1305, the two nonce shapes |
 | `src/airplay/screen.rs` | video: sealed TCP frames → annex-B H.264 |
-| `src/airplay/audio.rs` | audio: sealed UDP datagrams → PCM/AAC/Opus |
+| `src/airplay/audio.rs` | audio: sealed UDP datagrams → PCM, with the phone's AAC-LC decoded here |
+| `src/aac.rs` | AAC-LC → the PCM the car's media channel takes, a frame at a time |
 | `src/airplay/event.rs` | input: HID reports and session commands, over the event channel |
 | `src/airplay/mic.rs` | the microphone uplink, sealed and sent back to the phone |
-| `src/sink.rs` | what a stream *is* — codec and description as well as bytes |
+| `src/sink.rs` | what a stream *is* — codec and description as well as bytes — and the two channels the car drains |
 | `src/commands.rs` | the vocabulary of input |
 | `docker/` | the image that cross-compiles for the board, and the CMake toolchain it needs |
 | `board/` | the firmware half: the access point and its unit, laid out as the filesystem they land on |
@@ -672,9 +675,10 @@ this a derivative work, so cp2cl inherits that.
 
 ## Known gaps
 
-* The CarLife video channel carries the phone's frames, but the audio channels
-  stay empty, and what the car sends back is logged and dropped. So the head unit
-  gets a picture and no sound, and touches it in vain.
+* The CarLife video and media channels carry the phone's picture and its sound,
+  and the car's touch and panel keys reach the phone. The two voice channels are
+  the car's own and stay empty, so navigation speech and the voice assistant are
+  silent. None of it has been through a head unit yet.
 * Whether a head unit accepts a device that is not a phone is not known — the
   authentication challenge cannot be answered, and no hardware has been tried on
   yet. See `PLAN-CL.md` §3.5.
@@ -683,10 +687,11 @@ this a derivative work, so cp2cl inherits that.
   from the protocol and the reference implementations, and are unverified against
   hardware. The parts that could be checked without one are checked — see the
   tests in `src/carlife/desc.rs`.
-* The CarLife audio cannot be passed through: a phone on wireless CarPlay hands
-  media over as AAC-LC, which the CarLife media channel does not take, so it has
-  to be decoded on the way across. That decoder is not written, and whether the
-  board can do it in real time is not measured.
+* Whether the board can decode the phone's sound in real time is not measured.
+  The car's media channel takes PCM and a phone on wireless CarPlay hands media
+  over as AAC-LC, so it is decoded on the way across (`src/aac.rs`). That is the
+  one place in the program that has to keep up with the phone's encoder rather
+  than with the wire, and on a Cortex-A7 it is the number to watch.
 * `up`/`down` overshoot. The knob's absolute Y axis is a *position* to the phone
   rather than a step, so a full throw scrolls several rows. Wired it is reliable,
   wireless it is intermittent. The knob's wheel axis cannot stand in for it: that

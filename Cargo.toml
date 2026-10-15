@@ -27,6 +27,12 @@ idevice = "0.1"
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 
+# The car's media channel takes PCM and a phone on wireless CarPlay sends its
+# music as AAC-LC, so the codec has to come off on the way past. Only the
+# decoder is wanted — no demuxers, no other codecs — which is what the empty
+# default feature set leaves out. See PLAN-CL.md §4.2.
+symphonia = { version = "0.5", default-features = false, features = ["aac"] }
+
 # CarPlay airplay net audio/video is sealed with ChaCha20-Poly1305 and its keys
 # come from an X25519 + Ed25519 handshake (see src/airplay/pairing.rs).
 x25519-dalek = { version = "2", features = ["static_secrets", "getrandom"] }

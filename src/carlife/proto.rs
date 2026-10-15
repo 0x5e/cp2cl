@@ -228,6 +228,26 @@ pub fn frame_rate(rate: i32) -> Vec<u8> {
     out
 }
 
+/// `MSG_MEDIA_INIT` — the media channel's `CarlifeMusicInit`, which is what the
+/// PCM that follows is. All three fields are required by the phone's own schema,
+/// so all three are written.
+///
+/// Nothing else about the channel is negotiated, and the car sets a player up
+/// from these two numbers alone, so how it reads them is the whole of it.
+/// CarLife-Android-Vehicle's `AudioTrackManagerSingle` reads each one exactly one
+/// way: `channelConfig` is the channel count, with 1 mono and 2 stereo; and
+/// `sampleFormat` is the width of a sample in bits, with 8 meaning 8-bit and
+/// anything else meaning 16 — which is why the width is written down rather than
+/// a code. Both readings are still unconfirmed against a real car; see
+/// `PLAN-CL.md` §5.
+pub fn media_init(rate: u32, channels: u16) -> Vec<u8> {
+    let mut out = Vec::new();
+    put_int(&mut out, 1, rate as i32);
+    put_int(&mut out, 2, i32::from(channels));
+    put_int(&mut out, 3, 16);
+    out
+}
+
 // --------------------------------------------------------- what comes down ---
 
 pub fn decode_protocol_version(body: &[u8]) -> (i32, i32) {
@@ -336,6 +356,17 @@ mod tests {
     fn the_match_status_body_is_the_field_the_reference_sends() {
         assert_eq!(protocol_version_match_status(MATCH), vec![0x08, 0x01]);
         assert_eq!(int_of(&protocol_version_match_status(MATCH), 1), Some(1));
+    }
+
+    #[test]
+    fn the_media_channel_is_announced_as_the_pcm_it_is() {
+        let body = media_init(44_100, 2);
+        assert_eq!(int_of(&body, 1), Some(44_100));
+        assert_eq!(int_of(&body, 2), Some(2));
+        assert_eq!(int_of(&body, 3), Some(16));
+        // Field by field, and nothing else: a body the car's parser cannot read
+        // makes the message disappear rather than fail.
+        assert_eq!(body, vec![0x08, 0xc4, 0xd8, 0x02, 0x10, 0x02, 0x18, 0x10]);
     }
 
     #[test]

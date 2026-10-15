@@ -1107,9 +1107,19 @@ impl Session {
                         .filter(|v| *v > 0)
                         .map(|v| v as u64)
                         .unwrap_or(0);
+                    // How many frames of the codec the phone packs into each
+                    // packet. Nothing here takes a packet apart, so it is
+                    // reported rather than acted on: it is the one number that
+                    // says whether the frames arriving at the media channel are
+                    // the single frames its decoder expects.
+                    let frames_per_packet = table
+                        .get("framesPerPacket")
+                        .and_then(|v| v.as_signed_integer())
+                        .unwrap_or(0) as u32;
                     tracing::info!(
                         "[airplay] audio stream type {stream_type} {audio_type:?} \
-                         (format 0x{fmt:x} -> {codec:?}), latency {latency} ms"
+                         (format 0x{fmt:x} -> {codec:?}), {frames_per_packet} frames per \
+                         packet, latency {latency} ms"
                     );
                     {
                         *self.codec.lock().await = codec;
@@ -1127,10 +1137,6 @@ impl Session {
                         && matches!(audio_type.as_str(), "telephony" | "speechrecognition")
                         && (1..=65535).contains(&mic_port)
                     {
-                        let frames_per_packet = table
-                            .get("framesPerPacket")
-                            .and_then(|v| v.as_signed_integer())
-                            .unwrap_or(0) as u32;
                         self.open_mic(stream_id, mic_port as u16, codec, frames_per_packet, keys)
                             .await;
                     }
@@ -1302,7 +1308,7 @@ impl Session {
         clock: Arc<Mutex<AudioClock>>,
         id: u64,
     ) {
-        let rx = AudioReceiver::new(key, stream_type, codec, sink.clone());
+        let mut rx = AudioReceiver::new(key, stream_type, codec, sink.clone());
         let mut buf = [0u8; 2048];
         let mut packets: u64 = 0;
         // Sound that stutters is either packets that never arrived or ones that
