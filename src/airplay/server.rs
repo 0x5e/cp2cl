@@ -718,24 +718,21 @@ impl Session {
         let fps = screen.fps;
         // The physical size is the other half of what the phone draws at: it
         // turns millimetres back into a dpi, and a wrong one is a picture at the
-        // wrong scale. No CarLife message carries one, so `CP2CL_WIDTH_MM` is
-        // what says it.
-        let (width_mm, height_mm) = (self.cfg.width_mm, self.cfg.height_mm);
+        // wrong scale. No CarLife message carries a size, so `CP2CL_PPI` says how
+        // dense the panel is and the size follows from it and the canvas above.
+        let ppi = self.cfg.ppi;
         let plist = info::build(&info::Static {
             bt_mac: self.cfg.bt_mac.clone(),
             name: self.cfg.name.clone(),
             width,
             height,
             fps,
-            width_mm,
-            height_mm,
+            ppi,
         })
         .map_err(|e| e.to_string())?;
         // H.264 is the only family on offer: CarLife carries an elementary
         // stream and its head units decode `video/avc`.
-        tracing::info!(
-            "[airplay] answered GET /info ({width}x{height}@{fps}, {width_mm}x{height_mm}mm, H.264)"
-        );
+        tracing::info!("[airplay] answered GET /info ({width}x{height}@{fps} at {ppi} ppi, H.264)");
         Ok(Response::new(200).plist(plist))
     }
 

@@ -42,8 +42,9 @@ pub struct Static {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
-    pub width_mm: u32,
-    pub height_mm: u32,
+    /// The display's density, in pixels per inch. The physical size the phone is
+    /// told follows from it and the canvas above.
+    pub ppi: u32,
 }
 
 pub fn build(static_: &Static) -> Result<Vec<u8>, plist::Error> {
@@ -205,15 +206,20 @@ fn audio_formats(rate: u32) -> Value {
     )
 }
 
+/// Pixels to millimetres at a density, in integer arithmetic: 25.4 millimetres to
+/// the inch. A density of zero would be a division by zero, so it is read as one
+/// pixel per inch — a physical size that large is what tells the phone to draw
+/// at 1×, which is what asking for it means.
+fn millimetres(pixels: u32, ppi: u32) -> u32 {
+    (pixels as u64 * 254 / (ppi.max(1) as u64 * 10)) as u32
+}
+
 fn display_entry(s: &Static) -> Value {
-    // Fall back to a sane density when the caller says nothing: 200mm across is
-    // roughly a car screen, and it keeps the height ratio honest.
-    let width_mm = if s.width_mm > 0 { s.width_mm } else { 200 };
-    let height_mm = if s.height_mm > 0 {
-        s.height_mm
-    } else {
-        ((width_mm as u64 * s.height as u64) / s.width.max(1) as u64).max(1) as u32
-    };
+    // How finely the phone draws is a dpi, and a dpi is a pixel count over a
+    // physical size. The pixels are the car's, and the density is the operator's:
+    // the size that goes to the phone is what the two of them make.
+    let width_mm = millimetres(s.width, s.ppi);
+    let height_mm = millimetres(s.height, s.ppi);
 
     let mut d = Dictionary::new();
     d.insert("uuid".into(), Value::String(MAIN_UUID.into()));

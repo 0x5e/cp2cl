@@ -74,16 +74,16 @@ fn read_hostname(path: &Path) -> String {
 pub struct Config {
     /// Directory holding identity.pk8 + certificate.p7b (the MFi credentials).
     pub auth_dir: Option<PathBuf>,
-    /// Screen size in millimetres, which is how CarPlay decides its dpi — and
-    /// therefore how finely it draws. This is the whole difference between a
-    /// sharp picture and a blurry one: MacPlay reports the window's real share
-    /// of the panel and gets ~254 dpi, while inventing a large value drops it to
-    /// ~162 and the phone quietly renders at 1×.
+    /// The panel's density, in pixels per inch, which is what decides how finely
+    /// the phone draws: it is told a physical size and turns that back into a
+    /// dpi. Inflating it is the whole difference between a sharp picture and a
+    /// blurry one — MacPlay reports the window's real share of the panel and gets
+    /// ~254 dpi, while inventing a large size drops it to ~162 and the phone
+    /// quietly renders at 1×.
     ///
-    /// No CarLife message carries a physical size, so this one is always the
-    /// operator's.
-    pub width_mm: u32,
-    pub height_mm: u32,
+    /// The size in millimetres is derived from this and the canvas the car asks
+    /// for, because no CarLife message carries one. See `info.rs`.
+    pub ppi: u32,
     /// This machine's own Bluetooth address, which is also the identifier
     /// `/info` reports — see `bt_address`.
     pub bt_mac: String,
@@ -117,9 +117,7 @@ impl Config {
         let bt_adapter = env_or("CP2CL_BT_ADAPTER", "hci0");
         Self {
             auth_dir: Self::resolve_auth_dir(),
-            width_mm: env_num("CP2CL_WIDTH_MM", 0),
-            // Left to `info.rs` to derive from the aspect ratio when zero.
-            height_mm: env_num("CP2CL_HEIGHT_MM", 0),
+            ppi: env_num("CP2CL_PPI", 120),
             bt_mac: bt_address(&bt_adapter),
             name: hostname(),
             // Wired stays the default: it needs nothing the operator has to

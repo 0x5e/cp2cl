@@ -183,7 +183,7 @@ Nothing sets it at the moment, so the car's own pixels are asked for as they are
 | Variable | Default | Meaning |
 |---|---|---|
 | `CP2CL_AUTH_DIR` | `./authentication` | MFi credentials |
-| `CP2CL_WIDTH_MM` / `CP2CL_HEIGHT_MM` | derived | physical size, which is how CarPlay decides its dpi and therefore how finely it draws. No CarLife message carries a physical size, so this is the operator's; the height is derived from the width and the aspect ratio when only the width is given |
+| `CP2CL_PPI` | `120` | the panel's density, in pixels per inch. The phone is told a physical size and turns it back into a dpi, so this is what decides how finely it draws; the size itself is derived from this and the canvas the car asks to be rendered at, because no CarLife message carries one |
 | `CP2CL_LOG` | `info` | log level: `error`, `warn`, `info`, `debug`, `trace` |
 | `CP2CL_WIRELESS` | off | take CarPlay over Bluetooth and Wi-Fi instead of USB |
 | `CP2CL_WIFI_IFACE` | `wlan0` | the interface the access point runs on. Its IPv6 link-local address is what the phone connects back to, and it is what picks the configuration below |
