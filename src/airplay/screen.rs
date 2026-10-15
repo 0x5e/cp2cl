@@ -18,11 +18,11 @@
 //! The plaintext is a run of length-prefixed NAL units (four byte big-endian
 //! length, no start codes). A decoder wants annex-B, so we convert. The codec
 //! description goes out both ways at once: as annex-B parameter sets, and as the
-//! raw avcC / hvcC record, which is what a browser needs to configure its
-//! decoder before the first frame arrives.
+//! raw avcC record, which is what a browser needs to configure its decoder
+//! before the first frame arrives.
 
 use super::crypto::{open, SymKey};
-use crate::sink::{MediaSink, StreamEvent, VideoCodec};
+use crate::sink::{MediaSink, StreamEvent};
 use std::sync::Arc;
 
 pub const HEADER_LEN: usize = 128;
@@ -35,23 +35,22 @@ pub struct VideoReceiver {
     /// carried pictures at all: everything else about a frame is per-frame.
     frames: u64,
     sink: Arc<dyn MediaSink>,
-    codec: VideoCodec,
     /// Bytes in front of each NAL unit; whatever the avcC record said.
     nal_length_size: usize,
 }
 
 impl VideoReceiver {
     pub fn new(key: SymKey, sink: Arc<dyn MediaSink>) -> Self {
-        // We only ever advertise H.264, so assume it from the start. Waiting for
-        // the config message before handling frames meant a config we could not
-        // parse silently discarded *every* frame — a black picture with no error
-        // anywhere. Frames normally carry their own SPS/PPS anyway.
+        // The stream is H.264 from the first frame: that is the only family
+        // `/info` offers, and waiting for the config message before handling
+        // frames meant a config we could not parse silently discarded *every*
+        // frame — a black picture with no error anywhere. Frames normally carry
+        // their own SPS/PPS anyway.
         Self {
             key,
             counter: 0,
             frames: 0,
             sink,
-            codec: VideoCodec::H264,
             // Only a guess until the config arrives; four is the usual value.
             nal_length_size: 4,
         }
@@ -71,22 +70,25 @@ impl VideoReceiver {
                 match parse_video_config(body) {
                     Some(config) => {
                         tracing::info!(
-                            "[video] config: {:?}, {} parameter set(s), {}-byte NAL lengths",
-                            config.codec,
+                            "[video] config: {} parameter set(s), {}-byte NAL lengths",
                             config.parameter_sets.len(),
                             config.nal_length_size
                         );
-                        self.codec = config.codec;
                         self.nal_length_size = config.nal_length_size;
                         self.sink.push(StreamEvent::VideoConfig {
-                            codec: config.codec,
                             codec_data: config.codec_data,
                             parameter_sets: config.parameter_sets,
                         });
                     }
                     None => {
+                        // The only config this side can use is H.264's avcC, which
+                        // is also the only one `/info` asks for. Anything else
+                        // means every frame after it would be read as something it
+                        // is not, so name what arrived rather than leave a black
+                        // picture with nothing printed.
                         tracing::warn!(
-                            "[video] config not understood ({}B): {}",
+                            "[video] config not understood ({}B): {} — only an H.264 \
+                             avcC record can be read",
                             body.len(),
                             hex::encode(&body[..body.len().min(32)])
                         );
@@ -104,12 +106,11 @@ impl VideoReceiver {
                         // Only advance on success — see the module note.
                         self.counter += 1;
                         let nal = self.nal_length_size;
-                        let Some(annex_b) = length_prefixed_to_annex_b(&plain, self.codec, nal)
-                        else {
+                        let Some(annex_b) = length_prefixed_to_annex_b(&plain, nal) else {
                             return;
                         };
                         if !annex_b.is_empty() {
-                            let keyframe = is_key_frame(&annex_b, self.codec);
+                            let keyframe = is_key_frame(&annex_b);
                             // The frame count is only printed when the stream
                             // closes, which for a stream that never delivers
                             // anything is a line nobody waits for. This one says
@@ -117,9 +118,8 @@ impl VideoReceiver {
                             // is a separate question.
                             if self.frames == 0 {
                                 tracing::info!(
-                                    "[video] first frame: {:?}, keyframe={keyframe}, \
-                                     {} bytes, {}-byte NAL lengths",
-                                    self.codec,
+                                    "[video] first frame: keyframe={keyframe}, {} bytes, \
+                                     {}-byte NAL lengths",
                                     annex_b.len(),
                                     self.nal_length_size
                                 );
@@ -140,8 +140,7 @@ impl VideoReceiver {
 
 /// The codec description, in both shapes a consumer might want.
 struct VideoConfig {
-    codec: VideoCodec,
-    /// The raw avcC / hvcC record, exactly as it arrived after its fourcc.
+    /// The raw avcC record, exactly as it arrived after its fourcc.
     codec_data: Vec<u8>,
     /// The parameter sets inside it, converted to annex-B.
     parameter_sets: Vec<Vec<u8>>,
@@ -151,38 +150,24 @@ struct VideoConfig {
     nal_length_size: usize,
 }
 
-/// Locates the avcC / hvcC record inside the config blob and pulls SPS/PPS out
-/// of it. Ported from LIVI's `configToCodecData` plus the avcC layout. The
-/// record is passed on from after its fourcc to the end of the blob, the same
-/// slice MacPlay and PlayPort hand their decoders.
+/// Locates the avcC record inside the config blob and pulls SPS/PPS out of it.
+/// Ported from LIVI's `configToCodecData` plus the avcC layout. The record is
+/// passed on from after its fourcc to the end of the blob, the same slice
+/// MacPlay and PlayPort hand their decoders.
 fn parse_video_config(body: &[u8]) -> Option<VideoConfig> {
     let finish = |avcc: &[u8]| -> Option<VideoConfig> {
         let params = avcc_to_annex_b(avcc)?;
         // avcC byte 4: 0xFC | (lengthSizeMinusOne), so +1 for the real width.
         let nal_length_size = (avcc[4] & 0x03) as usize + 1;
         Some(VideoConfig {
-            codec: VideoCodec::H264,
             codec_data: avcc.to_vec(),
             parameter_sets: params,
             nal_length_size,
         })
     };
     for i in 4..body.len().saturating_sub(4) {
-        let tag = &body[i..i + 4];
-        if tag == b"avcC" {
+        if &body[i..i + 4] == b"avcC" {
             return finish(&body[i + 4..]);
-        }
-        if tag == b"hvcC" {
-            let hvcc = &body[i + 4..];
-            // Returning no parameter sets here broke HEVC outright: the decoder
-            // needs VPS/SPS/PPS before the first slice, and without them it
-            // reports "PPS id out of range" and skips every NAL.
-            return Some(VideoConfig {
-                codec: VideoCodec::H265,
-                codec_data: hvcc.to_vec(),
-                parameter_sets: hvcc_to_annex_b(hvcc).unwrap_or_default(),
-                nal_length_size: (hvcc[21] & 0x03) as usize + 1,
-            });
         }
     }
     // Fall back: a bare avcC with no fourcc in front.
@@ -229,44 +214,6 @@ fn avcc_to_annex_b(avcc: &[u8]) -> Option<Vec<Vec<u8>>> {
     Some(out)
 }
 
-/// Pulls VPS / SPS / PPS out of an hvcC record as annex-B chunks.
-///
-/// After a 22-byte header comes `numOfArrays`, then for each array a byte of
-/// `(array_completeness << 7) | nal_unit_type`, a u16 count, and that many
-/// u16-length-prefixed NALs. Only the parameter set types are wanted — 32 VPS,
-/// 33 SPS, 34 PPS; the rest travel with the frames themselves.
-fn hvcc_to_annex_b(hvcc: &[u8]) -> Option<Vec<Vec<u8>>> {
-    if hvcc.len() < 23 {
-        return None;
-    }
-    let arrays = hvcc[22] as usize;
-    let mut out = Vec::new();
-    let mut i = 23;
-    for _ in 0..arrays {
-        if i + 3 > hvcc.len() {
-            return None;
-        }
-        let nal_type = hvcc[i] & 0x3f;
-        let count = u16::from_be_bytes([hvcc[i + 1], hvcc[i + 2]]) as usize;
-        i += 3;
-        for _ in 0..count {
-            if i + 2 > hvcc.len() {
-                return None;
-            }
-            let len = u16::from_be_bytes([hvcc[i], hvcc[i + 1]]) as usize;
-            i += 2;
-            if i + len > hvcc.len() {
-                return None;
-            }
-            if matches!(nal_type, 32 | 33 | 34) {
-                out.push(with_start_code(&hvcc[i..i + len]));
-            }
-            i += len;
-        }
-    }
-    Some(out)
-}
-
 fn with_start_code(nal: &[u8]) -> Vec<u8> {
     let mut out = vec![0x00, 0x00, 0x00, 0x01];
     out.extend_from_slice(nal);
@@ -277,7 +224,7 @@ fn with_start_code(nal: &[u8]) -> Vec<u8> {
 ///
 /// `nal_len` is how many bytes the length prefix takes. It comes from the avcC
 /// record, not from a guess: getting it wrong shifts every NAL boundary.
-fn length_prefixed_to_annex_b(payload: &[u8], codec: VideoCodec, nal_len: usize) -> Option<Vec<u8>> {
+fn length_prefixed_to_annex_b(payload: &[u8], nal_len: usize) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(payload.len() + 16);
     let mut i = 0;
     let mut wrote = false;
@@ -299,20 +246,13 @@ fn length_prefixed_to_annex_b(payload: &[u8], codec: VideoCodec, nal_len: usize)
     if !wrote {
         return None;
     }
-    // Per frame, so it says nothing that the frame count does not — and at
-    // debug level it buried the input and audio lines, which are the ones that
-    // level is for. Trace keeps it reachable without that.
-    if codec == VideoCodec::H265 {
-        tracing::trace!("h265 frame converted");
-    }
     Some(out)
 }
 
-/// True when an annex-B access unit opens on an H.264 IDR or an H.265 IRAP
-/// picture. Only the leading NALs are inspected: a keyframe says so at the
-/// front, and a long frame should not be walked to prove it. Ported from
-/// PlayPort's `Wire.isKeyFrame`.
-fn is_key_frame(annex_b: &[u8], codec: VideoCodec) -> bool {
+/// True when an annex-B access unit opens on an H.264 IDR picture. Only the
+/// leading NALs are inspected: a keyframe says so at the front, and a long frame
+/// should not be walked to prove it. Ported from PlayPort's `Wire.isKeyFrame`.
+fn is_key_frame(annex_b: &[u8]) -> bool {
     let mut index = 0;
     let mut inspected = 0;
     while index + 4 <= annex_b.len() && inspected < 8 {
@@ -326,11 +266,7 @@ fn is_key_frame(annex_b: &[u8], codec: VideoCodec) -> bool {
             return false;
         }
         let header = annex_b[nal_start];
-        let key = match codec {
-            VideoCodec::H264 => (header & 0x1f) == 5,
-            VideoCodec::H265 => (16..=21).contains(&((header >> 1) & 0x3f)),
-        };
-        if key {
+        if (header & 0x1f) == 5 {
             return true;
         }
         inspected += 1;

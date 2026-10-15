@@ -45,7 +45,6 @@ pub struct Static {
     pub fps: u32,
     pub width_mm: u32,
     pub height_mm: u32,
-    pub hevc: bool,
 }
 
 pub fn build(static_: &Static) -> Result<Vec<u8>, plist::Error> {
@@ -79,9 +78,6 @@ pub fn build(static_: &Static) -> Result<Vec<u8>, plist::Error> {
         Value::Array(vec![display_entry(static_)]),
     );
     d.insert("hidDevices".into(), hid_devices(static_));
-    if static_.hevc {
-        d.insert("hevcInfo".into(), Dictionary::new().into());
-    }
     to_binary(&Value::Dictionary(d))
 }
 

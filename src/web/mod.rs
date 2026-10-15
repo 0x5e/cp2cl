@@ -14,7 +14,7 @@
 //! phone will take until it says.
 //!
 //! The browser is the decoder: it uses WebCodecs, so it has to be handed the
-//! codec description (the raw avcC / hvcC record) rather than an elementary
+//! codec description (the raw avcC record) rather than an elementary
 //! stream, and WebCodecs only exists in a secure context, which is why this is
 //! HTTPS even on a LAN address.
 
@@ -39,7 +39,7 @@ use crate::airplay::event::EventSink;
 use crate::airplay::{MicConfig, MicSink, ScreenParams, SharedScreen};
 use crate::commands::{Command, TouchContact, TOUCH_SLOTS};
 use crate::config::Config;
-use crate::sink::{AudioCodec, MediaSink, StreamEvent, VideoCodec};
+use crate::sink::{AudioCodec, MediaSink, StreamEvent};
 
 /// The one screen stream this program declares. `/info` names it and nothing
 /// else does, so the browser's stream type is a constant.
@@ -58,27 +58,17 @@ const SCREEN_ACTIVE: u8 = 5;
 const AUDIO_STOPPED: u8 = 6;
 
 const VIDEO_CODEC_H264: u8 = 1;
-const VIDEO_CODEC_H265: u8 = 2;
 const AUDIO_CODEC_AAC_LC: u8 = 1;
 const AUDIO_CODEC_OPUS: u8 = 2;
 const AUDIO_CODEC_LPCM: u8 = 3;
 
 const FLAG_KEYFRAME: u8 = 1;
 
-fn video_config_frame(
-    stream: u8,
-    codec: VideoCodec,
-    width: u32,
-    height: u32,
-    data: &[u8],
-) -> Vec<u8> {
+fn video_config_frame(stream: u8, width: u32, height: u32, data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(11 + data.len());
     out.push(VIDEO_CONFIG);
     out.push(stream);
-    out.push(match codec {
-        VideoCodec::H264 => VIDEO_CODEC_H264,
-        VideoCodec::H265 => VIDEO_CODEC_H265,
-    });
+    out.push(VIDEO_CODEC_H264);
     out.extend_from_slice(&width.to_le_bytes());
     out.extend_from_slice(&height.to_le_bytes());
     out.extend_from_slice(data);
@@ -214,13 +204,13 @@ pub struct Hub {
     /// What the phone is being asked to render. Written by the display panel and
     /// read by `/info`, which is why one slot serves both.
     display: SharedScreen,
-    /// The answer until something writes that slot: the size and codec the
-    /// environment asked for.
+    /// The answer until something writes that slot: the size the environment
+    /// asked for.
     default_display: ScreenParams,
     clients: Mutex<HashMap<u64, Client>>,
     next_client: AtomicU64,
     /// Replayed to a viewer that joins after the streams have started.
-    video_configs: Mutex<HashMap<u8, (VideoCodec, Vec<u8>)>>,
+    video_configs: Mutex<HashMap<u8, Vec<u8>>>,
     audio_configs: Mutex<HashMap<u8, Vec<u8>>>,
     /// Whether a CarPlay session is up, as far as the browser is told. Driven by
     /// the screen stream opening and closing, which is the only signal this side
@@ -267,7 +257,6 @@ impl Hub {
                 width_mm: cfg.width_mm,
                 height_mm: cfg.height_mm,
                 ui_scale: 100,
-                hevc: cfg.hevc,
             },
             clients: Mutex::new(HashMap::new()),
             next_client: AtomicU64::new(1),
@@ -401,10 +390,10 @@ impl Hub {
         let mic = mic_message(self.mic.current().as_ref());
         self.to_client_json(id, &mic);
         let canvas = self.canvas();
-        for (stream, (codec, data)) in self.video_configs.lock().unwrap().iter() {
+        for (stream, data) in self.video_configs.lock().unwrap().iter() {
             self.to_client(
                 id,
-                video_config_frame(*stream, *codec, canvas.width, canvas.height, data),
+                video_config_frame(*stream, canvas.width, canvas.height, data),
             );
         }
         for frame in self.audio_configs.lock().unwrap().values() {
@@ -558,19 +547,16 @@ impl Hub {
 impl MediaSink for Hub {
     fn push(&self, event: StreamEvent) {
         match event {
-            StreamEvent::VideoConfig {
-                codec, codec_data, ..
-            } => {
+            StreamEvent::VideoConfig { codec_data, .. } => {
                 self.video_configs
                     .lock()
                     .unwrap()
-                    .insert(SCREEN_STREAM, (codec, codec_data.clone()));
+                    .insert(SCREEN_STREAM, codec_data.clone());
                 // The canvas, not the panel size: the browser configures its
                 // decoder with these, and a mismatch is a decode error.
                 let canvas = self.canvas();
                 self.broadcast_binary(video_config_frame(
                     SCREEN_STREAM,
-                    codec,
                     canvas.width,
                     canvas.height,
                     &codec_data,
@@ -686,7 +672,9 @@ async fn api_status(State(state): State<Arc<ServerState>>) -> Response {
             "height": shown.height,
             "fps": shown.fps,
             "uiScale": shown.ui_scale(),
-            "hevc": shown.hevc,
+            // The panel offers a codec picker; this is what we actually ask the
+            // phone for, and CarLife carries H.264 only.
+            "hevc": false,
             "orientation": orientation(shown.width, shown.height),
         },
     }))
@@ -736,7 +724,7 @@ async fn api_display_get(State(state): State<Arc<ServerState>>) -> Response {
         "height": shown.height,
         "fps": shown.fps,
         "uiScale": shown.ui_scale(),
-        "hevc": shown.hevc,
+        "hevc": false,
         "orientation": orientation(shown.width, shown.height),
         "presets": presets_json(),
     }))
@@ -750,8 +738,6 @@ struct DisplayRequest {
     fps: u32,
     #[serde(rename = "uiScale", default = "default_ui_scale")]
     ui_scale: u32,
-    #[serde(default)]
-    hevc: bool,
 }
 
 fn default_ui_scale() -> u32 {
@@ -795,7 +781,6 @@ async fn api_display_post(
         height: request.height,
         fps: request.fps,
         ui_scale: request.ui_scale,
-        hevc: request.hevc,
         // Not part of the request: the panel has no say in the panel's physical
         // size, and it decodes every audio coding there is.
         ..state.hub.default_display
@@ -805,13 +790,12 @@ async fn api_display_post(
     }
     let (width, height) = params.canvas();
     tracing::info!(
-        "[web] display set to {}x{} @{}fps (uiScale {} -> canvas {width}x{height}, {}); \
+        "[web] display set to {}x{} @{}fps (uiScale {} -> canvas {width}x{height}, H.264); \
          restarting the session",
         params.width,
         params.height,
         params.fps,
         params.ui_scale(),
-        if params.hevc { "HEVC" } else { "H.264" },
     );
     state.hub.restart_session();
     axum::Json(serde_json::json!({ "ok": true })).into_response()

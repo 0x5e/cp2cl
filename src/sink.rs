@@ -12,14 +12,6 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 
-/// Which family a video stream is in, which decides both how its parameter sets
-/// are read out of the config record and how the browser names the decoder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VideoCodec {
-    H264,
-    H265,
-}
-
 /// What the audio pipeline agreed to deliver, which decides how the frames are
 /// framed for whoever decodes them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,12 +99,11 @@ pub enum StreamEvent {
     /// A video stream's codec description, sent once before any frame.
     ///
     /// The same record in both shapes a consumer might want. `codec_data` is the
-    /// raw avcC / hvcC record, which is what WebCodecs wants as its decoder
+    /// raw avcC record, which is what WebCodecs wants as its decoder
     /// `description` and is told to the browser out of band; `parameter_sets`
     /// are the SPS/PPS the record holds, already converted to annex-B, which is
     /// what a consumer reading an elementary stream has to put in it.
     VideoConfig {
-        codec: VideoCodec,
         codec_data: Vec<u8>,
         parameter_sets: Vec<Vec<u8>>,
     },

@@ -4,49 +4,22 @@ CarPlay to CarLife bridge service (cp2cl), running on a Linux device.
 
 ## Background
 
-The head unit this is built for is Mercedes-Benz's **MBUX NG6**. It takes three
-phone-projection protocols over the cable, and it does not treat them alike:
-
-| Protocol | Display |
-|---|---|
-| CarPlay | a window, not the full panel |
-| CarLife | the full panel |
-| Android Auto | a window, not the full panel |
-
-Only CarLife draws full-bleed, so CarLife is the target: the bridge takes the
-CarPlay session an iPhone offers and hands it to the head unit over the one
-protocol it will render full screen.
+This project is mainly for **Benz MBUX NG6**. It support Carplay, Android Audo,
+and CarLife, only CarLife is fullscreen, Carplay and Android Auto are limited
+to half screen.
 
 ## How it works
 
 ```
-                        USB                                       USB
+                 USB / WiFi                                      USB
   iPhone  --------------------------->  Bridge device  ------------------------->  CarLife head unit
- (CarPlay: the phone is                  (this program)         (CarLife: the head unit
-  a USB device)                                                 is the USB host)
-                                                |
-                                                |  HTTPS + WebSocket
-                                                +------------------------------->  browser client
+                                        (this program)
 ```
-
-The CarPlay half and the browser client exist and work. The CarLife half — this
-device presenting itself to a head unit as a phone — is written as far as its
-protocol: the USB interface, the AOA control requests, and the session a head
-unit drives. Which of the two reads the streams is a choice, not both at once;
-with the car as the reader the video channel carries CarPlay's frames, and the
-audio channels stay empty because what the car takes and what the phone sends are
-different codecs.
 
 ## Features
 
+- No video/audio transcoding on bridge, only transfer.
 - Support both wired and wireless CarPlay.
-- Video is passed through untouched.
-- No hard-coded audio/video encoding formats — what the phone offers is
-  negotiated with it directly, and the far end's request is answered with what
-  this device can actually do. Where the two ends do not agree, the audio is
-  decoded rather than re-encoded: wireless CarPlay hands media over as AAC-LC and
-  CarLife's media channel takes PCM. That decoder is not written.
-- Present the device to a CarLife head unit as a phone, so the car can be driven at all.
 
 ## Requirements
 
@@ -183,7 +156,7 @@ backend is written to it rather than the other way round:
   microphone audio.
 * **`GET /api/status` and `GET /api/display`.** Who we are, whether a session is
   up, and what the display panel should show.
-* **`POST /api/display`.** A new size, frame rate, UI scale and codec — see the
+* **`POST /api/display`.** A new size, frame rate and UI scale — see the
   display panel below.
 
 ### The display panel
@@ -231,17 +204,17 @@ hardware; wireless has not.**
 
 Asking for **more pixels and expecting a sharper picture does not work**: the
 phone keeps the bitrate, so twice the pixels means half the bits each and the
-picture gets *softer*. What measurably helps is the codec — H.265 at the same
-bitrate holds visibly more detail than H.264, which is why it is the default.
+picture gets *softer*.
+
+The codec is not a choice here. CarLife carries an elementary stream and its
+head units decode `video/avc`, so `/info` offers H.264 and nothing else — a
+phone told H.265 is available would send pictures the car cannot read.
 
 `uiScale` is PlayPort's UI-size control, and it works by asking the phone for a
 larger canvas (`100/percent` of the size) and letting the browser fit it back to
 the same surface — so a bigger canvas draws proportionally *smaller* CarPlay
 controls. Touch is mapped through the canvas, not the panel size, for the same
 reason.
-
-The codec choice is real, and matters: it is what the browser has to be able to
-decode. `CP2CL_WEB_HEVC` sets the default, and the panel overrides it per session.
 
 ## Environment
 
@@ -253,7 +226,6 @@ decode. `CP2CL_WEB_HEVC` sets the default, and the panel overrides it per sessio
 | `CP2CL_WEB_TOKEN` | `0` | the token the page has to carry; fixed, so the URL is stable and short enough to type. Give it a real value before the port is reachable from anywhere but this LAN |
 | `CP2CL_WEB_WIDTH` / `CP2CL_WEB_HEIGHT` | `1280` / `720` | the web sink's screen: what the phone renders, until the display panel says otherwise. A CarLife head unit names its own width and height instead |
 | `CP2CL_WEB_FPS` | `60` | the web sink's max frame rate |
-| `CP2CL_WEB_HEVC` | on | ask for H.265. At the bitrate the phone sends it is visibly sharper than H.264; set `0` to fall back. The web sink's codec |
 | `CP2CL_WIDTH_MM` / `CP2CL_HEIGHT_MM` | derived | physical size; drives UI scale. No CarLife message carries a physical size, so this is the operator's either way |
 | `CP2CL_DEVICE_ID` / `CP2CL_BT_MAC` | `00:11:22:33:44:55` | identifiers in `/info` |
 | `CP2CL_LOG` | `info` | log level: `error`, `warn`, `info`, `debug`, `trace` |
@@ -343,9 +315,7 @@ so everything up to the picture can be exercised without one:
 ```bash
 # On the board, in the foreground. Ctrl-C ends the run and takes the device off
 # the bus with it.
-CP2CL_SINK=cl \
-CP2CL_WIRELESS=1 CP2CL_WIFI_SSID=<the network> CP2CL_WIFI_PASS=<its passphrase> \
-  ./cp2cl
+CP2CL_SINK=web CP2CL_WIRELESS=1 ./cp2cl
 ```
 
 The video channel then carries the phone's frames, which needs both a phone and a
@@ -727,7 +697,7 @@ this a derivative work, so cp2cl inherits that.
 | `src/airplay/mod.rs` | RTSP server: pairing, SETUP, `/info`, streams |
 | `src/airplay/pairing.rs` | SRP-6a pair-setup, X25519/Ed25519 pair-verify, every key HKDF derives |
 | `src/airplay/crypto.rs` | HKDF-SHA512, ChaCha20-Poly1305, the two nonce shapes |
-| `src/airplay/screen.rs` | video: sealed TCP frames → annex-B H.264/H.265 |
+| `src/airplay/screen.rs` | video: sealed TCP frames → annex-B H.264 |
 | `src/airplay/audio.rs` | audio: sealed UDP datagrams → PCM/AAC/Opus |
 | `src/airplay/event.rs` | input: HID reports and session commands, over the event channel |
 | `src/airplay/mic.rs` | the microphone uplink, sealed and sent back to the phone |

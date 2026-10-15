@@ -104,8 +104,6 @@ pub struct Config {
     /// operator's in both modes.
     pub width_mm: u32,
     pub height_mm: u32,
-    /// Advertise HEVC. Video then arrives as hvcC / H.265 NALs.
-    pub hevc: bool,
     /// Advertised as deviceID / bluetoothIDs. The phone only wants something
     /// stable and shaped like a MAC; it never resolves these.
     pub device_id: String,
@@ -198,12 +196,6 @@ impl Config {
             width_mm,
             // Left to `info.rs` to derive from the aspect ratio when zero.
             height_mm: env_num("CP2CL_HEIGHT_MM", 0),
-            // HEVC by default: at the bitrate the phone sends, H.265 is visibly
-            // sharper than H.264. MacPlay reports `codec=h265` for the same
-            // session, which is where the difference in clarity comes from.
-            hevc: std::env::var("CP2CL_WEB_HEVC")
-                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-                .unwrap_or(true),
             device_id: env_or("CP2CL_DEVICE_ID", "00:11:22:33:44:55"),
             bt_mac: env_or("CP2CL_BT_MAC", "00:11:22:33:44:55"),
             name: env_or("CP2CL_NAME", "cp2cl"),

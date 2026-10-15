@@ -46,7 +46,7 @@ iPhone ──无线 CarPlay(AirPlay)──► cp2cl ──USB(AOA)──► MBUX
 
 | 现有能力                                 | 位置                                                               | 这次怎么用                                        |
 | ------------------------------------ | ---------------------------------------------------------------- | -------------------------------------------- |
-| AirPlay 会话几何参数（宽/高/帧率/ui_scale/hevc） | `src/airplay/server.rs:206` `ScreenParams`、`:263` `SharedScreen` | 由 CarLife 的 `VIDEO_ENCODER_INIT` 决定，写进去再重启会话 |
+| AirPlay 会话几何参数（宽/高/帧率/ui_scale） | `src/airplay/server.rs:206` `ScreenParams`、`:263` `SharedScreen` | 由 CarLife 的 `VIDEO_ENCODER_INIT` 决定，写进去再重启会话 |
 | 会话重启                                 | `src/web/mod.rs:430` `Hub::restart_session()`（`:816` 由显示面板调用）    | CarLife 侧发起几何变更时走同一条路                        |
 | `/info` 的音频宣示                        | `src/airplay/info.rs:178` `audio_formats()`（条目在 `:187-197`）      | 音频走 AAC-LC，`102/media` 那条留着（§4.2）             |
 | 视频帧（**已是 annex-B**）                  | `src/airplay/screen.rs` → `StreamEvent::VideoFrame`              | 直接塞进 CarLife 视频通道（§4.1）                      |
@@ -309,8 +309,7 @@ MD 收到 `GO_TO_FOREGROUND` 后 5 秒没切前台要回 `0x0001004C`。**都是
 AirPlay 侧交出来的是 **annex-B** 访问单元（`src/airplay/screen.rs` 已在内部转好），CarLife 视频通道吃的是  
 「编码后视频数据」并配 12 字节头。所以只要能满足下面三条，就是**逐帧搬运**：
 
-1. **编码家族一致**：CarPlay 侧关掉 HEVC（`CP2CL_WEB_HEVC=0`，或者由 CarLife 会话决定 `ScreenParams.hevc=false`），  
-   两端都 H.264。
+1. **编码家族一致**：`/info` 只宣示 H.264（CarLife 这边没有可协商的编解码字段），两端都 H.264。
 2. **profile 兼容**：指南只保证 baseline L3.1。CarPlay 侧实际多为 Main/High，可能带 B 帧。**先直通试，  
    车机不接受再想办法**（§8 风险 3）。
 3. **单帧 ≤ 600 KB**：1280×720 / 30 fps 的 IDR 一般在 100–300 KB，安全；1080p 大关键帧可能越界。  

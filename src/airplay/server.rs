@@ -217,10 +217,6 @@ pub struct ScreenParams {
     /// browser fits the result back to its own surface, so a larger canvas
     /// draws proportionally *smaller* CarPlay controls. 100 leaves it alone.
     pub ui_scale: u32,
-    /// Whether to advertise HEVC. Part of the negotiated display rather than the
-    /// environment because it has to match what the far end can decode: a browser
-    /// that will only take H.264 would show nothing.
-    pub hevc: bool,
 }
 
 /// The canvas scales the browser's display panel offers. Anything else is the
@@ -698,13 +694,6 @@ impl Session {
         }
     }
 
-    /// Whether HEVC is being advertised. The environment sets the default; a
-    /// browser that picked H.264 writes the negotiated display and overrides
-    /// it.
-    fn hevc(&self) -> bool {
-        self.negotiated().map(|s| s.hevc).unwrap_or(self.cfg.hevc)
-    }
-
     /// What the phone has been asked to render, if anything has asked.
     fn negotiated(&self) -> Option<ScreenParams> {
         self.screen.lock().ok().and_then(|g| *g)
@@ -738,12 +727,12 @@ impl Session {
             fps,
             width_mm,
             height_mm,
-            hevc: self.hevc(),
         })
         .map_err(|e| e.to_string())?;
+        // H.264 is the only family on offer: CarLife carries an elementary
+        // stream and its head units decode `video/avc`.
         tracing::info!(
-            "[airplay] answered GET /info ({width}x{height}@{fps}, {width_mm}x{height_mm}mm, {})",
-            if self.hevc() { "HEVC" } else { "H.264" }
+            "[airplay] answered GET /info ({width}x{height}@{fps}, {width_mm}x{height_mm}mm, H.264)"
         );
         Ok(Response::new(200).plist(plist))
     }
@@ -1033,19 +1022,13 @@ impl Session {
         );
         // `viewAreas` is advertised unconditionally by LIVI; omitting it changes
         // what the phone asks for downstream.
-        let features: Vec<Value> = if self.hevc() {
-            vec![
-                Value::String("hevc".into()),
+        body.insert(
+            "enabledFeatures".into(),
+            Value::Array(vec![
                 Value::String("iAPChannel".into()),
                 Value::String("viewAreas".into()),
-            ]
-        } else {
-            vec![
-                Value::String("iAPChannel".into()),
-                Value::String("viewAreas".into()),
-            ]
-        };
-        body.insert("enabledFeatures".into(), Value::Array(features));
+            ]),
+        );
 
         let plist = to_binary(&Value::Dictionary(body)).map_err(|e| e.to_string())?;
         tracing::info!("[airplay] session SETUP answered (event {event_port})");
@@ -1553,7 +1536,6 @@ mod tests {
             width_mm: 0,
             height_mm: 0,
             ui_scale,
-            hevc: false,
         }
     }
 
