@@ -93,10 +93,9 @@ pub(crate) async fn run_session(
         // interface appears part-way through the way a Mac's does.
         av_iface_late: None,
         available_current_ma: 500,
-        // The router's BSSID when we know it. Without it the accessory's device
-        // identifier is this machine's Wi-Fi MAC, and the phone then has
-        // nothing stable to recognise.
-        ap_mac: cfg.ap_mac.clone(),
+        // Left to whoever knows the network: the accessory's identifier is then
+        // the MAC of the interface named above, read off that interface.
+        ap_mac: None,
         ap_on_air: None,
         // Nothing here watches the cable: a phone seen over Bluetooth is taken
         // as a wireless one, and if it is plugged in as well the wired watcher

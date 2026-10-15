@@ -15,7 +15,7 @@ use livi_runtime::mfi_async::SharedCoprocessor;
 use tokio::sync::broadcast;
 
 use super::{parse_mac, ready, run_session, short};
-use crate::config::Config;
+use crate::config::{bt_address, Config};
 use crate::session::Ended;
 
 /// Keeps serving phones until the program stops. Nothing pushes "a phone just
@@ -64,14 +64,6 @@ pub async fn watch(
     );
 
     while let Some(IncomingConn { fd, peer_mac }) = incoming.recv().await {
-        if let Some(target) = &cfg.target_bt {
-            if !same_mac(target, &peer_mac) {
-                // Closing the descriptor is the refusal: BlueZ has no other
-                // way to decline a connection it already accepted.
-                drop(fd);
-                continue;
-            }
-        }
         let peer = short(&peer_mac);
         tracing::info!("[cp-wifi] {peer} opened a channel");
         let link = LinkConfig {
@@ -103,17 +95,10 @@ pub async fn watch(
 }
 
 /// This machine's Bluetooth address, which the phone checks against the one it
-/// paired with. sysfs knows it; the configured value is the fallback.
+/// paired with. Read at the start of every session rather than taken from the
+/// configuration at startup: a controller registers itself with the kernel
+/// whenever it is brought up, and a session that begins after that is a session
+/// that can have the real address.
 fn local_mac(cfg: &Config) -> [u8; 6] {
-    let path = format!("/sys/class/bluetooth/{}/address", cfg.bt_adapter);
-    match std::fs::read_to_string(&path) {
-        Ok(text) => parse_mac(text.trim()),
-        Err(_) => parse_mac(&cfg.bt_mac),
-    }
-}
-
-/// BlueZ separates with colons; people paste addresses with dashes.
-fn same_mac(a: &str, b: &str) -> bool {
-    let norm = |s: &str| s.replace('-', ":").to_lowercase();
-    norm(a) == norm(b)
+    parse_mac(&bt_address(&cfg.bt_adapter))
 }

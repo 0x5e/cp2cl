@@ -184,22 +184,21 @@ Nothing sets it at the moment, so the car's own pixels are asked for as they are
 |---|---|---|
 | `CP2CL_AUTH_DIR` | `./authentication` | MFi credentials |
 | `CP2CL_WIDTH_MM` / `CP2CL_HEIGHT_MM` | derived | physical size, which is how CarPlay decides its dpi and therefore how finely it draws. No CarLife message carries a physical size, so this is the operator's; the height is derived from the width and the aspect ratio when only the width is given |
-| `CP2CL_DEVICE_ID` / `CP2CL_BT_MAC` | `00:11:22:33:44:55` | identifiers in `/info` |
 | `CP2CL_LOG` | `info` | log level: `error`, `warn`, `info`, `debug`, `trace` |
 | `CP2CL_WIRELESS` | off | take CarPlay over Bluetooth and Wi-Fi instead of USB |
 | `CP2CL_WIFI_IFACE` | `wlan0` | the interface the access point runs on. Its IPv6 link-local address is what the phone connects back to, and it is what picks the configuration below |
-| `CP2CL_AP_MAC` | this machine's Wi-Fi MAC | the router's BSSID, sent as the accessory identifier |
-| `CP2CL_TARGET_BT` | any | only accept this phone's Bluetooth address |
 | `CP2CL_BT_ADAPTER` | `hci0` | which Bluetooth adapter |
-| `CP2CL_INPUT` | `cp` | what the CarLife video channel sends: `cp` is the CarPlay session, `file` is the file below, sent an access unit per tick and started over at the end |
-| `CP2CL_INPUT_FILE` | — | that file: an annex-B stream. A name that cannot be read falls back to heartbeats |
+| `CP2CL_INPUT_FILE` | — | the CarLife video channel's source when it is set: an annex-B stream, sent an access unit per tick and started over at the end. Unset means the source is the CarPlay session. A name that cannot be read falls back to heartbeats |
 
-On the board every one of these is an environment variable of the process, because
-there is nothing else to read them from: the program has no configuration file, and
-is started by hand — see [Running it on the board](#running-it-on-the-board). The
-USB device is not a setting either: it is composed by the program, and what it is
-made of is in `src/carlife/desc.rs` — see [The accessory
-interface](#the-accessory-interface).
+On the board every one of these is an environment variable of the process: the
+program is started by hand and has no settings file of its own — see [Running it
+on the board](#running-it-on-the-board). What the accessory is called and where it
+is reachable are not settings: both come off the machine, the name being its
+hostname and its address being read from the Bluetooth adapter, and the network
+the phone comes back over is read from the access point's own configuration — see
+[Wireless CarPlay](#wireless-carplay). The USB device is not one either: it is
+composed by the program, and what it is made of is in `src/carlife/desc.rs` — see
+[The accessory interface](#the-accessory-interface).
 
 ## Wireless CarPlay
 
@@ -233,7 +232,6 @@ controller has to advertise itself as in-car audio/video, or the phone does not
 treat the machine as a car. And a channel that opens but never carries anything
 usually means the phone's service records are stale.
 
-`CP2CL_TARGET_BT` narrows it to one phone when several are paired, and
 `CP2CL_LOG=debug` brings up the per-event detail.
 
 ## CarLife
@@ -274,7 +272,7 @@ car session. To drive the channel with no CarPlay in the picture at all, point i
 at a file instead:
 
 ```bash
-CP2CL_INPUT=file CP2CL_INPUT_FILE=/root/moving.h264 ./cp2cl
+CP2CL_INPUT_FILE=/root/moving.h264 ./cp2cl
 ```
 
 Any annex-B stream will do. Its access units go out one per tick, at the rate the

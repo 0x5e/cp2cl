@@ -37,7 +37,6 @@ const PRIMARY_INPUT_TOUCH: i64 = 1;
 const STREAM_TYPE_MAIN_SCREEN: i64 = 110;
 
 pub struct Static {
-    pub device_id: String,
     pub bt_mac: String,
     pub name: String,
     pub width: u32,
@@ -54,7 +53,9 @@ pub fn build(static_: &Static) -> Result<Vec<u8>, plist::Error> {
     d.insert("statusFlags".into(), Value::Integer(4.into()));
     d.insert("model".into(), Value::String("cp2cl".into()));
     d.insert("manufacturer".into(), Value::String("cp2cl".into()));
-    d.insert("deviceID".into(), Value::String(static_.device_id.clone()));
+    // One address under two keys: this machine's own Bluetooth address is the
+    // only identifier the accessory has.
+    d.insert("deviceID".into(), Value::String(static_.bt_mac.clone()));
     d.insert(
         "bluetoothIDs".into(),
         Value::Array(vec![Value::String(static_.bt_mac.clone())]),

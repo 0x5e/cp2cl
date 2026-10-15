@@ -30,7 +30,7 @@ use tokio::sync::Mutex;
 use crate::airplay::clock::SyncedClock;
 use crate::airplay::pairing::Pairings;
 use crate::airplay::{AudioClock, EventSink, MicSink, ScreenParams, SharedScreen};
-use crate::config::{Config, Input};
+use crate::config::Config;
 use crate::sink::{AudioCodec, ClOutlet, MediaSink};
 
 #[tokio::main]
@@ -166,9 +166,12 @@ async fn main() -> Result<()> {
             let _ = nudge.send(());
         }
     };
-    let frames = match cfg.input {
-        Input::Cp => carlife::session::Frames::Live(outlet),
-        Input::File => carlife::session::Frames::from_file(),
+    // A file the operator names is the whole source then, and nothing the phone
+    // sends reaches the car's decoder — which is how the channel and that
+    // decoder are exercised without one.
+    let frames = match &cfg.input_file {
+        Some(path) => carlife::session::Frames::from_file(path),
+        None => carlife::session::Frames::Live(outlet),
     };
 
     // The car names its screen over the CarLife session, and the name is what the

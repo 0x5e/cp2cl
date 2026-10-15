@@ -722,7 +722,6 @@ impl Session {
         // what says it.
         let (width_mm, height_mm) = (self.cfg.width_mm, self.cfg.height_mm);
         let plist = info::build(&info::Static {
-            device_id: self.cfg.device_id.clone(),
             bt_mac: self.cfg.bt_mac.clone(),
             name: self.cfg.name.clone(),
             width,

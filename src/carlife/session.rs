@@ -18,6 +18,7 @@
 //! * **Input is not acted on.** Touch and panel keys arrive on the sixth channel
 //!   and are reported, but there is no CarPlay side attached to send them to yet.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -65,8 +66,9 @@ const TOUCH_HARD_KEY: u32 = 0x0006_8008;
 /// reference does the same whenever its own interface is not in the foreground.
 const HEARTBEAT: Duration = Duration::from_secs(1);
 
-/// Where the video channel's pictures come from. `CP2CL_INPUT` picks between the
-/// two that have a source; the third is what a caller with neither passes.
+/// Where the video channel's pictures come from. A file the operator names is
+/// the whole source when there is one; otherwise the source is the CarPlay
+/// session, and `None` is what a run with neither falls back to.
 pub enum Frames {
     /// Nothing but heartbeats: the session is up and the car is kept waiting.
     None,
@@ -87,45 +89,42 @@ pub enum Frames {
 }
 
 impl Frames {
-    /// The access units of the file `CP2CL_INPUT_FILE` names, in file order.
+    /// The access units of `path`, in file order.
     ///
     /// A file that cannot be read is worth a warning and not a failure: the
     /// session is still useful without it, and saying so beats refusing to start.
-    pub fn from_file() -> Self {
-        let Some(path) = std::env::var("CP2CL_INPUT_FILE")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-        else {
-            tracing::warn!(
-                "[cl] CP2CL_INPUT=file, but CP2CL_INPUT_FILE names no file; \
-                 sending heartbeats only"
-            );
-            return Self::None;
-        };
-        match std::fs::read(&path) {
+    pub fn from_file(path: &Path) -> Self {
+        match std::fs::read(path) {
             Ok(bytes) if !bytes.is_empty() => {
                 let units = access_units(&bytes);
                 if units.is_empty() {
                     tracing::warn!(
-                        "[cl] {path} holds no access unit; sending heartbeats only"
+                        "[cl] {} holds no access unit; sending heartbeats only",
+                        path.display()
                     );
                     return Self::None;
                 }
                 tracing::info!(
-                    "[cl] the video channel will play {path} \
+                    "[cl] the video channel will play {} \
                      ({} bytes in {} access units)",
+                    path.display(),
                     bytes.len(),
                     units.len()
                 );
                 Self::Cycle(units)
             }
             Ok(_) => {
-                tracing::warn!("[cl] {path} is empty; sending heartbeats only");
+                tracing::warn!(
+                    "[cl] {} is empty; sending heartbeats only",
+                    path.display()
+                );
                 Self::None
             }
             Err(e) => {
-                tracing::warn!("[cl] {path} could not be read ({e}); sending heartbeats only");
+                tracing::warn!(
+                    "[cl] {} could not be read ({e}); sending heartbeats only",
+                    path.display()
+                );
                 Self::None
             }
         }

@@ -62,7 +62,7 @@ iPhone ──无线 CarPlay(AirPlay)──► cp2cl ──USB(AOA)──► MBUX
 | 设备形态与 AOA 请求字节      | `src/carlife/desc.rs`           | 已实现：描述符与 strings blob、51/52/53 的识别、身份字符串；9 条单测，纯字节、跨平台 |
 | AOA 控制请求的应答          | `src/carlife/gadget.rs`         | 已实现：ep0 事件循环、51/52/53 应答、触发重枚举、把两个 bulk 端点交给会话（只在 Linux 编） |
 | CarLife MD 协议栈    | `src/carlife/{frame,proto,session}.rs` | 已实现：帧编解码、protobuf、握手状态机、心跳      |
-| 桥接：视频             | `src/sink.rs` `ClOutlet`         | 已实现：`VideoFrame` 直通视频通道，参数集在下一帧前带出；`CP2CL_INPUT=file` 则改为重复一个文件 |
+| 桥接：视频             | `src/sink.rs` `ClOutlet`         | 已实现：`VideoFrame` 直通视频通道，参数集在下一帧前带出；`CP2CL_INPUT_FILE` 则改为重复一个文件 |
 | 桥接：音频             | 待定                              | 未实现：Media 通道要 PCM，拿到的却是 AAC-LC，落在 `ClSink` 里被丢弃（§4.2） |
 
 ---
@@ -506,8 +506,8 @@ Mac 是 host、Duo2 是 device，拓扑与「车机 ↔ 我们的设备」完全
 - 鉴权**什么都不回**，程序里没有第二条路（§3.5）。
 
 **验收（无需车）**：Mac 上 `dist/carlife-link` + `dist/carlifed`，加
-`CP2CL_INPUT=file CP2CL_INPUT_FILE=<单帧 annex-B>`，车机侧出画即通过。若要连手机一起验，  
-把 `CP2CL_INPUT` 留默认（`cp`）即可。单帧可用：
+`CP2CL_INPUT_FILE=<单帧 annex-B>`，车机侧出画即通过。若要连手机一起验，  
+不设 `CP2CL_INPUT_FILE` 即可。单帧可用：
 
 ```sh
 ffmpeg -f lavfi -i testsrc=size=1280x720:rate=30 -frames:v 1 -c:v libx264 \
@@ -560,7 +560,7 @@ ffmpeg -f lavfi -i testsrc=size=1280x720:rate=30 -frames:v 1 -c:v libx264 \
 | D11 | 不在协议栈里做「请求关键帧」                                                           | CarLife 没这条消息                                         |
 | D12 | **消费者是总开关**：`cl` 时 CarLife 会话起 → CarPlay 侧才开；断 → 主动拆                       | 手机不该在车机没来时在后台把 CarPlay 会话建起来（§4.5）                     |
 | D13 | 设备由**程序自组**（configfs 组装、ffs 挂载、描述符、绑 UDC 全在进程内）                             | 换身份必须解绑/重绑 UDC，只有拥有设备的一方做得到（§2.5）；代价是重启服务会把设备摘下来再放回去      |
-| D14 | 视频通道来源由 `CP2CL_INPUT` 选（`cp`/`file`）                                       | `file` 让通道与车机解码器能脱离手机单独验（§4.5）                          |
+| D14 | 视频通道来源由 `CP2CL_INPUT_FILE` 定：设了就是那个文件，没设就是 CarPlay 会话                  | 让通道与车机解码器能脱离手机单独验（§4.5），不必再多一个开关                       |
 
 ---
 

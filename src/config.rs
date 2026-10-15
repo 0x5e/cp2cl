@@ -2,6 +2,9 @@
 //!
 //! Nothing here is required: the defaults build a working wired session and hand
 //! it to whatever head unit turns up. See README for the full table.
+//!
+//! One value is not a setting at all: the Bluetooth address is a property of the
+//! controller, so it is read off the adapter — see `bt_address`.
 
 use std::path::{Path, PathBuf};
 
@@ -29,27 +32,19 @@ fn env_num<T: std::str::FromStr>(key: &str, default: T) -> T {
     env(key).and_then(|s| s.parse().ok()).unwrap_or(default)
 }
 
-/// Where the CarLife video channel's pictures come from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Input {
-    /// The CarPlay session. The default.
-    Cp,
-    /// One access unit, read from the file `CP2CL_INPUT_FILE` names and sent
-    /// over and over. Nothing to do with a phone: it is how the channel and the
-    /// car's decoder are exercised without one.
-    File,
-}
+/// What a machine with no controller to ask reports. Every caller wants
+/// something stable and shaped like a MAC, and this is all that can be said.
+const NO_ADDRESS: &str = "00:11:22:33:44:55";
 
-impl Input {
-    fn parse(text: &str) -> Option<Self> {
-        if text.eq_ignore_ascii_case("cp") {
-            Some(Self::Cp)
-        } else if text.eq_ignore_ascii_case("file") {
-            Some(Self::File)
-        } else {
-            None
-        }
-    }
+/// A Bluetooth controller's own address, which is the only place one is written
+/// down — the phone checks it against the one it paired with, so a made-up value
+/// is rejected where it matters.
+pub(crate) fn bt_address(adapter: &str) -> String {
+    std::fs::read_to_string(format!("/sys/class/bluetooth/{adapter}/address"))
+        .map(|s| s.trim().to_uppercase())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| NO_ADDRESS.to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -66,9 +61,8 @@ pub struct Config {
     /// operator's.
     pub width_mm: u32,
     pub height_mm: u32,
-    /// Advertised as deviceID / bluetoothIDs. The phone only wants something
-    /// stable and shaped like a MAC; it never resolves these.
-    pub device_id: String,
+    /// This machine's own Bluetooth address, which is also the identifier
+    /// `/info` reports — see `bt_address`.
     pub bt_mac: String,
     /// Accessory name shown on the phone.
     pub name: String,
@@ -85,46 +79,33 @@ pub struct Config {
     /// phone is told to connect back to, and which hostapd configuration in
     /// `/etc/hostapd` is the one being read.
     pub wifi_iface: String,
-    /// The router's BSSID. Sent as the accessory's device identifier; without
-    /// it the phone falls back to this machine's Wi-Fi MAC.
-    pub ap_mac: Option<String>,
-    /// Where the CarLife video channel's pictures come from: `Input::Cp` unless
-    /// `CP2CL_INPUT` says otherwise.
-    pub input: Input,
-    /// Only talk to this Bluetooth MAC. Several iPhones paired with the same
-    /// machine otherwise race for the session.
-    pub target_bt: Option<String>,
+    /// The CarLife video channel takes its pictures from this file instead of
+    /// from the CarPlay session, when the operator names one. Nothing to do with
+    /// a phone: it is how the channel and the car's decoder are exercised
+    /// without one.
+    pub input_file: Option<PathBuf>,
     /// Linux only: the Bluetooth adapter, as BlueZ names it.
     pub bt_adapter: String,
 }
 
 impl Config {
     pub fn from_env() -> Self {
-        let input = match env("CP2CL_INPUT") {
-            Some(text) => Input::parse(&text).unwrap_or_else(|| {
-                tracing::warn!("[cp2cl] CP2CL_INPUT={text} is neither `cp` nor `file`; using cp");
-                Input::Cp
-            }),
-            None => Input::Cp,
-        };
+        let bt_adapter = env_or("CP2CL_BT_ADAPTER", "hci0");
         Self {
             auth_dir: Self::resolve_auth_dir(),
             width_mm: env_num("CP2CL_WIDTH_MM", 0),
             // Left to `info.rs` to derive from the aspect ratio when zero.
             height_mm: env_num("CP2CL_HEIGHT_MM", 0),
-            device_id: env_or("CP2CL_DEVICE_ID", "00:11:22:33:44:55"),
-            bt_mac: env_or("CP2CL_BT_MAC", "00:11:22:33:44:55"),
-            name: env_or("CP2CL_NAME", "cp2cl"),
+            bt_mac: bt_address(&bt_adapter),
+            name: hostname(),
             // Wired stays the default: it needs nothing the operator has to
             // look up first.
             wireless: std::env::var("CP2CL_WIRELESS")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
             wifi_iface: env_or("CP2CL_WIFI_IFACE", "wlan0"),
-            ap_mac: env("CP2CL_AP_MAC"),
-            input,
-            target_bt: env("CP2CL_TARGET_BT"),
-            bt_adapter: env_or("CP2CL_BT_ADAPTER", "hci0"),
+            input_file: env("CP2CL_INPUT_FILE").map(PathBuf::from),
+            bt_adapter,
         }
     }
 
@@ -160,9 +141,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_input_source_is_named_as_one_of_the_two_that_exist() {
-        assert_eq!(Input::parse("cp"), Some(Input::Cp));
-        assert_eq!(Input::parse("File"), Some(Input::File));
-        assert_eq!(Input::parse("still"), None);
+    fn a_machine_with_no_controller_still_has_a_mac_shaped_address_to_report() {
+        assert_eq!(bt_address("no-such-adapter"), NO_ADDRESS);
+    }
+
+    #[test]
+    fn a_machine_that_cannot_say_what_it_is_called_still_goes_by_a_name() {
+        assert_eq!(read_hostname(Path::new("no-such-file")), DEFAULT_NAME);
     }
 }
