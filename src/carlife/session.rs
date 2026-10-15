@@ -66,6 +66,16 @@ const TOUCH_HARD_KEY: u32 = 0x0006_8008;
 /// reference does the same whenever its own interface is not in the foreground.
 const HEARTBEAT: Duration = Duration::from_secs(1);
 
+/// The frame rates the video channel agrees to.
+///
+/// The car names one and the phone is then asked to render at it, so the range is
+/// not ours to narrow: there is nothing to scale and nothing to re-time, and a
+/// car that asks for 60 and is answered with 30 gets half the picture rate its
+/// own panel was built around. Sixty is the top of what a CarPlay encoder
+/// produces and three is the bottom of what the reference counts as a rate.
+const MIN_FPS: i32 = 3;
+const MAX_FPS: i32 = 60;
+
 /// Where the video channel's pictures come from. A file the operator names is
 /// the whole source when there is one; otherwise the source is the CarPlay
 /// session, and `None` is what a run with neither falls back to.
@@ -470,7 +480,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                         fallback.height as i32
                     },
                     frame_rate: match asked.frame_rate {
-                        3..=30 => asked.frame_rate,
+                        MIN_FPS..=MAX_FPS => asked.frame_rate,
                         _ => fallback.fps as i32,
                     },
                 };
@@ -510,7 +520,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             HU_VIDEO_ENCODER_FRAME_RATE_CHANGE => {
                 let asked = proto::decode_frame_rate(&message.body).unwrap_or(0);
                 let accepted = match asked {
-                    3..=30 => asked,
+                    MIN_FPS..=MAX_FPS => asked,
                     _ => self.agreed.map(|agreed| agreed.frame_rate).unwrap_or(30),
                 };
                 tracing::info!("[cl] the car asked for {asked} fps; agreeing to {accepted}");
@@ -801,6 +811,33 @@ mod tests {
         car.await.unwrap();
 
         assert_eq!(*screens.lock().unwrap(), vec![(1920, 480, 24)]);
+    }
+
+    /// A rate above 30 is the car's to ask for. Nothing here scales or re-times
+    /// anything, so agreeing to less than was asked hands the car a picture at
+    /// half the rate its own panel was built around. `Car::handshake` is what
+    /// holds this: it compares the answer with the request field by field.
+    #[tokio::test]
+    async fn a_frame_rate_above_thirty_is_agreed_to_rather_than_cut_down() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.handshake(proto::VideoEncoderInfo {
+                width: 1280,
+                height: 720,
+                frame_rate: 60,
+            })
+            .await;
+        });
+
+        run(device, &Frames::None, &cfg, &mut screen, &mut carplay)
+            .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
     }
 
     #[tokio::test]
