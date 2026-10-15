@@ -220,11 +220,6 @@ async fn main() -> Result<()> {
     });
 
     if cfg.wireless {
-        tracing::info!(
-            "[cp2cl] wireless: the phone will be told to join {:?} and reach us on \
-             {} port {airplay_port}",
-            cfg.ssid, cfg.wifi_iface
-        );
         wireless::watch(cfg, auth, airplay_port, restart, gate).await;
     } else {
         session::watch(cfg, auth, airplay_port, restart, gate).await;

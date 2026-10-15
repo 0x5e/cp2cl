@@ -187,10 +187,7 @@ Nothing sets it at the moment, so the car's own pixels are asked for as they are
 | `CP2CL_DEVICE_ID` / `CP2CL_BT_MAC` | `00:11:22:33:44:55` | identifiers in `/info` |
 | `CP2CL_LOG` | `info` | log level: `error`, `warn`, `info`, `debug`, `trace` |
 | `CP2CL_WIRELESS` | off | take CarPlay over Bluetooth and Wi-Fi instead of USB |
-| `CP2CL_WIFI_PASS` | — | the passphrase of the network the phone is told to join. Required once wireless is on: it is the one value no reading can supply |
-| `CP2CL_WIFI_SSID` | — | the same network, for when no access point is on air. An interface that is beaconing answers this itself |
-| `CP2CL_WIFI_IFACE` | `wlan0` | the interface facing that network; its IPv6 link-local address is what the phone connects back to, and it is the one asked about an access point |
-| `CP2CL_WIFI_CHANNEL` | `36` | channel reported to the phone, for when no access point is on air |
+| `CP2CL_WIFI_IFACE` | `wlan0` | the interface the access point runs on. Its IPv6 link-local address is what the phone connects back to, and it is what picks the configuration below |
 | `CP2CL_AP_MAC` | this machine's Wi-Fi MAC | the router's BSSID, sent as the accessory identifier |
 | `CP2CL_TARGET_BT` | any | only accept this phone's Bluetooth address |
 | `CP2CL_BT_ADAPTER` | `hci0` | which Bluetooth adapter |
@@ -217,12 +214,15 @@ What it needs:
 
 * the phone and this machine paired in the OS, on the same Wi-Fi — one that lets
   devices reach each other, so not a guest network with client isolation
-* `CP2CL_WIFI_PASS` for that network — the passphrase, which no reading can
-  supply. WPA2 personal only: the message has nowhere to put an 802.1X username,
-  so enterprise networks are refused up front rather than failing at the phone
-* `CP2CL_WIFI_SSID` and `CP2CL_WIFI_CHANNEL` only when nothing is beaconing:
-  the interface is asked what it is on air with, and that answer is what the
-  phone is told
+* an access point on the interface `CP2CL_WIFI_IFACE` names.
+  `CarPlayStartSession` has to say which network the phone should join and where
+  we are on it, and all of that is read from `/etc/hostapd`: whichever
+  configuration in there is an access point on that interface — the one hostapd
+  itself was started with, so what the phone is told is what the interface is on
+  air with. A missing `ssid`, `wpa_passphrase` or `channel` in it, or no
+  configuration naming that interface at all, is reported at startup
+* WPA2 personal only: the message has nowhere to put an 802.1X username, so
+  enterprise networks are refused up front rather than failing at the phone
 
 `livi_runtime::bt` registers the iAP and CarPlay profiles with BlueZ and hands us
 the phone's RFCOMM socket. None of that is ours — it is LIVI's code called
@@ -433,12 +433,16 @@ board/install.sh
 | `cp2cl-ap.service` | hostapd on `wlan0`, and the address that interface carries: `192.168.4.1/24` |
 | `cp2cl-ap-dhcp.service` | dnsmasq for the access point: leases in `192.168.4.2`–`100`, the lowest free address first, and no router or DNS server advertised |
 
-`hostapd.conf` is the one file the operator tunes — the SSID and passphrase are
-this board's — and `install.sh` writes it only when it is not there yet, so a
-second run does not undo an edit. Everything else in `board/` is ours and is
-replaced on every run. There are no unit files for the program here: it is started
-by hand, and its settings are the environment it is started with — see [Running it
-on the board](#running-it-on-the-board).
+`hostapd.conf` is the one file the operator tunes — the interface, the SSID and
+the passphrase are this board's — and `install.sh` writes it only when it is not
+there yet, so a second run does not undo an edit. Changing it is also how the
+network the phone is told to join is changed, and where on it we are: wireless
+CarPlay reads its own configuration out of `/etc/hostapd`, taking the file that
+names the interface `CP2CL_WIFI_IFACE` defaults to, so the two cannot drift apart
+— see [Wireless CarPlay](#wireless-carplay). Everything else in `board/` is ours
+and is replaced on every run. There are no unit files for the program here: it is
+started by hand, and its settings are the environment it is started with — see
+[Running it on the board](#running-it-on-the-board).
 
 **The board is reached on its access point.** `192.168.4.1`, and nothing else: the
 program has no port of its own to log into, and everything it has to say goes to
@@ -494,8 +498,10 @@ option is suppressed for a second reason: `--port=0` means nothing answers DNS h
 subnet and then serves nothing, saying so only in the journal. The two are one line
 apart in different files, so change them together.
 
-**On a board that is not the Duo2.** `hostapd.conf` names this board's SSID and
-passphrase; nothing else here is board-specific. The controller is the first one
+**On a board that is not the Duo2.** `hostapd.conf` names this board's interface,
+SSID and passphrase; nothing else here is board-specific. The interface it names
+is the one wireless CarPlay looks for, so `CP2CL_WIFI_IFACE` has to name it too
+when it is not `wlan0`. The controller is the first one
 under `/sys/class/udc`, so `musb-hdrc.4.auto` is not assumed, and neither is `usb0`
 or any other interface name. What is assumed is the kernel, named under [The
 accessory interface](#the-accessory-interface), and hostapd and dnsmasq for the

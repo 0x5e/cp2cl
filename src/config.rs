@@ -78,17 +78,12 @@ pub struct Config {
     /// The phone is paired in the OS first — this program does not pair — and
     /// then finds us by the iAP service we publish. Everything after that is the
     /// same iAP2 conversation, except that `CarPlayStartSession` has to name a
-    /// Wi-Fi network the phone can join, which is why the fields below exist.
+    /// Wi-Fi network the phone can join: the configuration in `/etc/hostapd`
+    /// that names `wifi_iface` says which one, which is read in `crate::wireless`.
     pub wireless: bool,
-    /// The network both ends are on. Wireless CarPlay does not make one: the
-    /// phone is told to join this, so it has to be a network it can reach.
-    pub ssid: String,
-    pub passphrase: String,
-    /// 1..196. Reported to the phone so it can find the network faster; a wrong
-    /// value is not fatal, the phone scans anyway.
-    pub wifi_channel: u8,
-    /// The interface facing that network. Its IPv6 link-local address is what
-    /// the phone is told to connect back to.
+    /// The interface the access point runs on: whose link-local address the
+    /// phone is told to connect back to, and which hostapd configuration in
+    /// `/etc/hostapd` is the one being read.
     pub wifi_iface: String,
     /// The router's BSSID. Sent as the accessory's device identifier; without
     /// it the phone falls back to this machine's Wi-Fi MAC.
@@ -125,9 +120,6 @@ impl Config {
             wireless: std::env::var("CP2CL_WIRELESS")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
-            ssid: env_or("CP2CL_WIFI_SSID", ""),
-            passphrase: env_or("CP2CL_WIFI_PASS", ""),
-            wifi_channel: env_num("CP2CL_WIFI_CHANNEL", 36),
             wifi_iface: env_or("CP2CL_WIFI_IFACE", "wlan0"),
             ap_mac: env("CP2CL_AP_MAC"),
             input,
