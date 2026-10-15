@@ -266,7 +266,7 @@ decode. `CP2CL_WEB_HEVC` sets the default, and the panel overrides it per sessio
 | `CP2CL_TARGET_BT` | any | only accept this phone's Bluetooth address |
 | `CP2CL_BT_ADAPTER` | `hci0` | Linux: which Bluetooth adapter |
 | `CP2CL_SINK` | `web` | who reads the streams: `web` is the browser client, `cl` is a CarLife head unit over the micro-USB port, and there is no browser client in that mode. See [CarLife](#carlife) |
-| `CP2CL_INPUT` | `cp` | what the CarLife video channel sends: `cp` is the CarPlay session, `file` is the file below, sent over and over |
+| `CP2CL_INPUT` | `cp` | what the CarLife video channel sends: `cp` is the CarPlay session, `file` is the file below, sent an access unit per tick and started over at the end |
 | `CP2CL_INPUT_FILE` | — | that file: an annex-B stream. A name that cannot be read falls back to heartbeats |
 
 On the board every one of these is an environment variable of the process, because
@@ -353,20 +353,43 @@ car session. To drive the channel with no CarPlay in the picture at all, point i
 at a file instead:
 
 ```bash
-CP2CL_SINK=cl CP2CL_INPUT=file CP2CL_INPUT_FILE=/root/idr.h264 ./cp2cl
+CP2CL_SINK=cl CP2CL_INPUT=file CP2CL_INPUT_FILE=/root/moving.h264 ./cp2cl
 ```
 
-Any annex-B stream will do:
+Any annex-B stream will do. Its access units go out one per tick, at the rate the
+car agreed to, and the file starts over at the end — so a file with a stream in it
+makes the picture move:
+
+```bash
+ffmpeg -f lavfi -i testsrc2=size=1280x720:rate=60 -t 30 \
+  -c:v libx264 -profile:v baseline -pix_fmt yuv420p -preset veryfast \
+  -g 60 -f h264 moving.h264
+```
+
+That is thirty seconds of 1280x720 at 60 fps: 1800 access units, an IDR with its
+parameter sets every second, no B-frames and nothing to reorder, which is the shape
+a CarPlay stream arrives in. `testsrc2` draws a frame counter into the picture, so
+a picture that is moving is a number that is counting. The profile is what a head
+unit's decoder is surest of, and `-pix_fmt yuv420p` is not optional with it —
+baseline has no 4:4:4, and libx264 refuses the combination. The level is left to
+libx264, which picks 3.2 for this size and rate; naming a lower one is a refusal
+rather than a smaller stream.
+
+A file holding a single access unit is the other case worth having, and it is what
+the instructions below use: one picture, sent again and again, which is nothing a
+person would watch but is enough to prove the channel and the car's decoder end to
+end. Any annex-B stream works, including one frame of one:
 
 ```bash
 ffmpeg -f lavfi -i testsrc=size=1280x720:rate=30 -frames:v 1 -c:v libx264 \
   -profile:v baseline -x264-params keyint=1 -f h264 idr.h264
 ```
 
-That one access unit is then sent over and over, which is not a picture a person
-would watch but is enough to prove the channel and the car's decoder end to end.
-With no file to read, the video channel carries heartbeats only, which still shows
-the session coming up and the encoder negotiation happening.
+The frame rate lives in the raw stream's SPS and nowhere else, so `ffplay` falls
+back on a guess when it is handed the file on its own. `ffplay -framerate 60
+moving.h264` is what plays it at the speed the car sees it. With no file to read,
+the video channel carries heartbeats only, which still shows the session coming up
+and the encoder negotiation happening.
 
 What to watch for, in the order it happens. The first line that does not appear
 is where it stopped:
