@@ -4,6 +4,16 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## v0.8.0 alpha — 待发布
+
+### 新增
+
+- 状态页：80 端口提供单页，分「CarLife 连接」与「CarPlay 连接」两段，每 2 秒轮询 `GET /api/status` 重绘；页面与 WeUI 样式表内置进二进制，不依赖外部文件、CDN 或环境变量（`7512259`）。
+
+### 变更
+
+- axum 重新引入，只开 `http1` 与 `tokio` 两个 feature，仅服务于状态页（`7512259`）。
+
 ## v0.7.0 alpha — 2026-10-16
 
 ### 新增
