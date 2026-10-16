@@ -214,6 +214,14 @@ pub fn decode_video_encoder_info(body: &[u8]) -> VideoEncoderInfo {
     }
 }
 
+/// `MSG_CMD_MD_AUTHEN_RESPONSE` — the answer to the car's authentication
+/// challenge, which is `carlife::auth`'s business to produce.
+pub fn authen_response(encrypt_value: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    put_str(&mut out, 1, encrypt_value);
+    out
+}
+
 /// `MSG_CMD_MD_AUTHEN_RESULT`.
 pub fn authen_result(authenticated: bool) -> Vec<u8> {
     let mut out = Vec::new();
@@ -271,8 +279,8 @@ pub fn decode_authen_result(body: &[u8]) -> Option<bool> {
 }
 
 /// `MSG_CMD_HU_STATISTIC_INFO`: who the car thinks it is talking to. Nothing
-/// here acts on it beyond reporting it, but it is the one message that says
-/// whether the car has accepted the channel number we are supposed to carry.
+/// here acts on it beyond reporting it and answering the car with a verdict on
+/// the channel it carries — see `carlife::auth`.
 #[derive(Debug, Default, Clone)]
 pub struct StatisticInfo<'a> {
     pub cuid: &'a str,
@@ -423,6 +431,12 @@ mod tests {
     fn the_authentication_request_is_read_as_the_string_it_is() {
         let body = [0x0a, 0x03, b'A', b'_', b'B'];
         assert_eq!(decode_authen_request(&body), Some("A_B"));
+    }
+
+    #[test]
+    fn the_authentication_answer_goes_out_as_the_string_field_it_is() {
+        let body = authen_response("QUJD");
+        assert_eq!(body, vec![0x0a, 0x04, b'Q', b'U', b'J', b'D']);
     }
 
     #[test]

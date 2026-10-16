@@ -9,15 +9,14 @@
 //!
 //! The order of the messages, the ids and the field numbers all come from the
 //! car's own library and the official guide; see the plan for the table and the
-//! citations. Two things are deliberately incomplete:
+//! citations. One thing is deliberately incomplete:
 //!
-//! * **Authentication is not answered.** The car's challenge can only be met
-//!   with a private key that lives on the phone this device is pretending to be,
-//!   so there is nothing honest to reply with. What arrives is reported and left
-//!   alone. A car that insists is where this ends.
 //! * **Touch and panel keys go one way.** They arrive on the sixth channel and
 //!   are turned into the commands the CarPlay side already knows how to send;
 //!   nothing comes back the other way.
+//!
+//! The car's authentication challenge is answered, and the car is judged in turn,
+//! by `auth`; what that needs and what happens without it is documented there.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -28,7 +27,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use super::{frame, proto};
+use super::{auth, frame, proto};
 use crate::airplay::{EventSink, ScreenParams};
 use crate::commands::{Command, TouchContact, PHONE_DROP, PHONE_HOOK_SWITCH, PHONE_MUTE};
 use crate::config::Config;
@@ -55,6 +54,7 @@ const MATCH_STATUS: u32 = 0x0001_0002;
 const MD_INFO: u32 = 0x0001_0004;
 const VIDEO_ENCODER_INIT_DONE: u32 = 0x0001_0008;
 const VIDEO_ENCODER_FRAME_RATE_CHANGE_DONE: u32 = 0x0001_000D;
+const MD_AUTHEN_RESPONSE: u32 = 0x0001_0049;
 const MD_AUTHEN_RESULT: u32 = 0x0001_004B;
 const GO_TO_FOREGROUND_RESPONSE: u32 = 0x0001_004C;
 const FEATURE_CONFIG_REQUEST: u32 = 0x0001_0051;
@@ -323,6 +323,10 @@ where
         agreed: None,
         started_at: None,
         media_format: None,
+        // Read here rather than once for the program: a car plugged out and back
+        // in is a new session, and a key that has gone missing since is worth
+        // saying so each time the car asks for an answer.
+        auth: auth::Signer::load(cfg.auth_dir.as_deref()),
         next_tick: Instant::now(),
         up: false,
         last_touch: None,
@@ -481,6 +485,10 @@ struct Session<'a, W> {
     /// it has been told. A stream that opens with the same one is not worth a
     /// second message: nothing about it has changed.
     media_format: Option<(u32, u16)>,
+    /// The key the car's challenge is answered with, when the operator has put
+    /// one where credentials are looked for. `None` is a session that cannot
+    /// answer it, which is said out loud when the car asks.
+    auth: Option<auth::Signer>,
     next_tick: Instant,
     up: bool,
     /// Where the finger was the last time the car said. A release has to name it
@@ -545,6 +553,12 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     info.connect_success_count,
                     info.connect_time
                 );
+                // The other half of the authentication: the car's channel number
+                // is what the phone judges it by, and the judgement is what this
+                // message answers with. A verdict either way is sent — the car is
+                // told what a phone makes of it rather than left waiting for an
+                // answer it may take as acceptance.
+                self.judge(info.channel).await?;
                 // The car will not configure anything until it is asked, and it
                 // has a two-minute limit on sending the statistics above.
                 self.send(FEATURE_CONFIG_REQUEST, &[]).await?;
@@ -556,17 +570,20 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             }
             HU_AUTHEN_REQUEST => {
                 let challenge = proto::decode_authen_request(&message.body).unwrap_or_default();
-                tracing::warn!("[cl] the car asked us to authenticate with {challenge:?}");
-                tracing::warn!(
-                    "[cl] it is not answered — the key that would answer it belongs to the \
-                     phone, not to us. If the car insists, this is where it disconnects"
-                );
+                self.answer(challenge).await?;
             }
             HU_AUTHEN_RESULT => {
+                // The car's own verdict on us, which it sends whether or not it
+                // liked the answer. Nothing is owed back: the phone's verdict is
+                // about the car and was sent with the statistics above.
                 let passed = proto::decode_authen_result(&message.body).unwrap_or(false);
-                tracing::info!("[cl] the car's own verdict on us: {passed}");
-                let body = proto::authen_result(passed);
-                self.send(MD_AUTHEN_RESULT, &body).await?;
+                if passed {
+                    tracing::info!("[cl] the car accepted us");
+                } else {
+                    tracing::warn!(
+                        "[cl] the car did not accept us; the guide has it disconnecting here"
+                    );
+                }
             }
             HU_VIDEO_ENCODER_INIT => {
                 let asked = proto::decode_video_encoder_info(&message.body);
@@ -656,6 +673,52 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             other => tracing::debug!("[cl] {other:#010x} arrived and is not acted on"),
         }
         Ok(())
+    }
+
+    /// The car's authentication challenge, answered with the phone's key.
+    ///
+    /// A challenge that cannot be answered is not answered at all: the app sends
+    /// nothing when it cannot put one through its key, and a car given an answer
+    /// it cannot check is no better off than one given none — except that it was
+    /// lied to. The car does not get to hear about the failure either way; it
+    /// works it out for itself, and says so with `HU_AUTHEN_RESULT`.
+    async fn answer(&mut self, challenge: &str) -> Result<()> {
+        let Some(key) = self.auth.as_ref() else {
+            tracing::warn!(
+                "[cl] the car asked us to authenticate and there is no key to answer it with; \
+                 put the phone's key in ./authentication or set CP2CL_AUTH_DIR"
+            );
+            return Ok(());
+        };
+        let Some(value) = key.answer(challenge) else {
+            return Ok(());
+        };
+        tracing::info!(
+            "[cl] the car's challenge {challenge:?} is answered; {} characters went out",
+            value.len()
+        );
+        let body = proto::authen_response(&value);
+        self.send(MD_AUTHEN_RESPONSE, &body).await
+    }
+
+    /// The car's channel number, judged, and the car told what a phone makes of
+    /// it. See `auth::channel_is_legal` for what the judgement is.
+    ///
+    /// An answer is sent either way. A phone that does not accept a car is
+    /// expected to disconnect from it, and this device does not: the car is the
+    /// only way the phone's screen reaches a panel, and a channel number that is
+    /// not one the app serves is a reason to say so rather than to take the
+    /// picture away. The car is free to act on the verdict, which is the same
+    /// thing a real phone would be telling it.
+    async fn judge(&mut self, channel: &str) -> Result<()> {
+        let legal = auth::channel_is_legal(channel);
+        if legal {
+            tracing::info!("[cl] the car's channel {channel:?} is one a phone serves");
+        } else {
+            tracing::warn!("[cl] the car's channel {channel:?} is not one a phone serves");
+        }
+        let body = proto::authen_result(legal);
+        self.send(MD_AUTHEN_RESULT, &body).await
     }
 
     /// A chunk on any channel but the command channel.
@@ -874,6 +937,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
 mod tests {
     use super::*;
     use crate::sink::{AudioCodec, MediaSink, StreamEvent};
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use tokio::io::DuplexStream;
 
@@ -919,7 +983,8 @@ mod tests {
             self.send(HU_INFO, &[]).await;
             self.expect(MD_INFO).await;
 
-            self.send(HU_STATISTIC_INFO, &[]).await;
+            self.send(HU_STATISTIC_INFO, &statistics("20062100")).await;
+            self.expect(MD_AUTHEN_RESULT).await;
             self.expect(FEATURE_CONFIG_REQUEST).await;
 
             self.send(HU_VIDEO_ENCODER_INIT, &proto::video_encoder_info(asked))
@@ -948,6 +1013,118 @@ mod tests {
             height: 720,
             frame_rate: 30,
         }
+    }
+
+    /// The car's statistics, which is where the channel number it is judged by
+    /// arrives.
+    fn statistics(channel: &str) -> Vec<u8> {
+        let mut body = Vec::new();
+        proto::put_str(&mut body, 2, "7.0.0");
+        proto::put_str(&mut body, 4, channel);
+        body
+    }
+
+    /// What a phone makes of a car that names this channel.
+    async fn verdict(channel: String) -> bool {
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_STATISTIC_INFO, &statistics(&channel)).await;
+            let answer = car.expect(MD_AUTHEN_RESULT).await;
+            proto::decode_authen_result(&answer.body).expect("a boolean")
+        });
+
+        run(
+            device,
+            &Frames::None,
+            &Config::from_env(),
+            &mut |_, _, _| {},
+            EventSink::new(),
+            &mut carplay,
+        )
+        .await
+        .expect("the session ends cleanly");
+        car.await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_cars_channel_number_is_what_it_is_judged_by() {
+        // A number out of the app's own table of 64.
+        assert!(verdict("20062100".into()).await);
+        // And one that is not in it at all, which the app serves all the same:
+        // the rule is a shape, not a list.
+        assert!(verdict("21350001".into()).await);
+        // The two the app refuses outright.
+        assert!(!verdict("20000000".into()).await);
+        assert!(!verdict("20000001".into()).await);
+        // Anything that is not eight digits starting with a two.
+        assert!(!verdict(String::new()).await);
+        assert!(!verdict("10011100".into()).await);
+    }
+
+    /// A key of this test's own on disk, which is all `run` asks for. Not the
+    /// real one: what is under test is the road the challenge travels.
+    fn a_key_on_disk() -> (PathBuf, rsa::RsaPrivateKey) {
+        use rsa::pkcs8::EncodePrivateKey;
+        let key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 1024).expect("a key");
+        let pem = key
+            .to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)
+            .expect("the key writes as PEM");
+        let dir = std::env::temp_dir().join("cp2cl-session-auth-test");
+        std::fs::create_dir_all(&dir).expect("a directory to hold it");
+        std::fs::write(dir.join(auth::KEY_FILE), pem.as_bytes()).expect("the key is written");
+        (dir, key)
+    }
+
+    /// The car's challenge is answered with the key the operator put in, and the
+    /// answer is one the car's own check takes.
+    #[tokio::test]
+    async fn the_cars_challenge_is_answered_with_the_key_that_was_put_in() {
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine as _;
+
+        let (dir, key) = a_key_on_disk();
+        let cfg = Config {
+            auth_dir: Some(dir),
+            ..Config::from_env()
+        };
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let challenge = "9f2c1a_4.6.0";
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            let mut body = Vec::new();
+            proto::put_str(&mut body, 1, challenge);
+            car.send(HU_AUTHEN_REQUEST, &body).await;
+
+            let answer = car.expect(MD_AUTHEN_RESPONSE).await;
+            // The car reads one string field out of it, which is where the
+            // answer is.
+            let Some(proto::Field::Bytes { number: 1, value }) =
+                proto::Fields::new(&answer.body).next_field()
+            else {
+                panic!("the answer is not the string field it should be");
+            };
+            let sealed = BASE64.decode(value).expect("Base64");
+            assert_eq!(sealed.len(), 128, "one block of the key the car was given");
+            // What the car does with it: the public half, and a comparison with
+            // the challenge it sent.
+            key.to_public_key()
+                .verify(
+                    rsa::pkcs1v15::Pkcs1v15Sign::new_unprefixed(),
+                    challenge.as_bytes(),
+                    &sealed,
+                )
+                .expect("the car's check passes");
+        });
+
+        run(device, &Frames::None, &cfg, &mut |_, _, _| {}, EventSink::new(), &mut carplay)
+            .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
     }
 
     #[tokio::test]
@@ -1212,9 +1389,16 @@ mod tests {
         car.await.unwrap();
     }
 
+    /// A challenge with no key behind it is left alone rather than answered with
+    /// something the car would only reject. The key is named here rather than
+    /// looked for, so that the test says the same thing whether or not the
+    /// machine it runs on has one.
     #[tokio::test]
-    async fn the_challenge_is_left_unanswered_by_default() {
-        let cfg = Config::from_env();
+    async fn a_challenge_with_no_key_behind_it_is_left_alone() {
+        let cfg = Config {
+            auth_dir: None,
+            ..Config::from_env()
+        };
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
 

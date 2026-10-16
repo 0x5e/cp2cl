@@ -33,6 +33,12 @@ futures-util = "0.3"
 # default feature set leaves out. See PLAN-CL.md §4.2.
 symphonia = { version = "0.5", default-features = false, features = ["aac"] }
 
+# The car's authentication challenge is answered with the phone's own RSA key, so
+# the primitive has to come from somewhere: it is not written here. Pure Rust
+# like the rest, so the board needs nothing new on its toolchain either. See
+# src/carlife/auth.rs.
+rsa = "0.9"
+
 # CarPlay airplay net audio/video is sealed with ChaCha20-Poly1305 and its keys
 # come from an X25519 + Ed25519 handshake (see src/airplay/pairing.rs).
 x25519-dalek = { version = "2", features = ["static_secrets", "getrandom"] }

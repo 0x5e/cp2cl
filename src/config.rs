@@ -72,7 +72,9 @@ fn read_hostname(path: &Path) -> String {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Directory holding identity.pk8 + certificate.p7b (the MFi credentials).
+    /// Where the credentials are read from, by fixed name: the MFi pair, and the
+    /// phone's CarLife key. Which files those are is not a setting — see
+    /// `carlife::auth`.
     pub auth_dir: Option<PathBuf>,
     /// The panel's density, in pixels per inch, which is what decides how finely
     /// the phone draws: it is told a physical size and turns that back into a

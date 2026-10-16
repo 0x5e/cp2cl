@@ -46,7 +46,7 @@ git submodule update --init --recursive
 
 cargo build --release
 
-export CP2CL_AUTH_DIR=./authentication         # identity.pk8 + certificate.p7b
+export CP2CL_AUTH_DIR=./authentication         # MFi credentials, and the CarLife key
 ./target/release/cp2cl
 ```
 
@@ -182,7 +182,7 @@ Nothing sets it at the moment, so the car's own pixels are asked for as they are
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CP2CL_AUTH_DIR` | `./authentication` | MFi credentials |
+| `CP2CL_AUTH_DIR` | `./authentication` | MFi and CarLife credentials (identity.pk8, certificate.p7b, carlife_md_rsa_private.pem) |
 | `CP2CL_PPI` | `120` | the panel's density, in pixels per inch |
 | `CP2CL_LOG` | `info` | log level: `error`, `warn`, `info`, `debug`, `trace` |
 | `CP2CL_WIRELESS` | off | take CarPlay over Wi-Fi instead of USB |
@@ -249,13 +249,13 @@ picture goes to the car. `CP2CL_LOG` is where a run is read.
 
 What is there: the USB interface the car enumerates, the AOA control requests,
 the session a head unit drives — the version handshake, device information,
-feature configuration, the video encoder's negotiation, and the heartbeat that
-keeps the channel alive — the video channel, carrying CarPlay's frames from the
-moment the car starts the encoder, the media channel, carrying the phone's sound
-with the AAC-LC taken off it on the way, and the car's own touch and panel keys,
-which reach the phone as the events a phone understands. What is not: the two
-voice channels, which are the car's own and stay empty, and the phone's
-microphone, which nothing feeds.
+authentication in both directions, feature configuration, the video encoder's
+negotiation, and the heartbeat that keeps the channel alive — the video channel,
+carrying CarPlay's frames from the moment the car starts the encoder, the media
+channel, carrying the phone's sound with the AAC-LC taken off it on the way, and
+the car's own touch and panel keys, which reach the phone as the events a phone
+understands. What is not: the two voice channels, which are the car's own and
+stay empty, and the phone's microphone, which nothing feeds.
 
 ### Trying it without a car
 
@@ -343,8 +343,8 @@ bridge says so too, and its two lines bracket the one above:
 ```
 
 If the car goes quiet and nothing from `[cl]` follows, the last line printed says
-what it was waiting on. A stop at `the car asked us to authenticate` is the next
-section's subject.
+what it was waiting on. A stop at `the car asked us to authenticate and there is
+no key` is the next section's subject.
 
 ### The accessory interface
 
@@ -548,13 +548,14 @@ up, whether the device was composed, and what a head unit asked. See
 
 ### Authentication
 
-The car may ask this device to prove it is a phone, by presenting a challenge
-that only an actual phone can encrypt. That key lives on the phone this device is
-pretending to be, so it is not obtainable, and the request is reported and left
-unanswered — there is nothing honest to reply with. An invented certificate or a
-guessed constant would be a lie the car might act on, which is worse than the car
-refusing us. What the car makes of the silence is the car's decision, and finding
-out is what the hardware is for.
+The car may ask this device to prove it is a phone, with a challenge only an
+actual phone can answer. That answer is made with the CarLife app's own private
+RSA key, which the car checks against Baidu's published half, so
+`authentication/carlife_md_rsa_private.pem` is where the key goes; without it the
+challenge is reported and left unanswered rather than guessed at. The other
+direction is ours to decide: the car names a channel number along with its
+statistics, and is told whether a phone would serve it. `src/carlife/auth.rs`
+holds both halves, and a head unit has accepted the answer to its challenge.
 
 ## Input
 
@@ -629,6 +630,7 @@ this a derivative work, so cp2cl inherits that.
 | `src/carlife/desc.rs` | the accessory interface as bytes, and the three AOA requests |
 | `src/carlife/usb.rs` | Linux only — the gadget, the FunctionFS instance, and the two forms the device takes |
 | `src/carlife/gadget.rs` | Linux only — `ep0`: the requests arriving on it, and the answers |
+| `src/carlife/auth.rs` | the two halves of authentication: the car's challenge answered, and its channel judged |
 | `src/carlife/session.rs` | the session a head unit drives: handshake, heartbeats, pictures, sound, touch |
 | `src/carlife/frame.rs` | the USB framing — the outer chunk header and the per-channel message head |
 | `src/carlife/proto.rs` | as much protobuf as these messages need, written by hand |
@@ -678,20 +680,7 @@ this a derivative work, so cp2cl inherits that.
 * The CarLife video and media channels carry the phone's picture and its sound,
   and the car's touch and panel keys reach the phone. The two voice channels are
   the car's own and stay empty, so navigation speech and the voice assistant are
-  silent. None of it has been through a head unit yet.
-* Whether a head unit accepts a device that is not a phone is not known — the
-  authentication challenge cannot be answered, and no hardware has been tried on
-  yet. See `PLAN-CL.md` §3.5.
-* None of the USB side here has run on a board: the gadget the program composes,
-  the switch to the accessory form, and what a head unit makes of it are written
-  from the protocol and the reference implementations, and are unverified against
-  hardware. The parts that could be checked without one are checked — see the
-  tests in `src/carlife/desc.rs`.
-* Whether the board can decode the phone's sound in real time is not measured.
-  The car's media channel takes PCM and a phone on wireless CarPlay hands media
-  over as AAC-LC, so it is decoded on the way across (`src/aac.rs`). That is the
-  one place in the program that has to keep up with the phone's encoder rather
-  than with the wire, and on a Cortex-A7 it is the number to watch.
+  silent.
 * `up`/`down` overshoot. The knob's absolute Y axis is a *position* to the phone
   rather than a step, so a full throw scrolls several rows. Wired it is reliable,
   wireless it is intermittent. The knob's wheel axis cannot stand in for it: that
