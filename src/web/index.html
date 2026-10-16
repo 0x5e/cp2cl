@@ -44,109 +44,85 @@ function num(v) {
   return v === null || v === undefined ? null : Number(v).toLocaleString("zh-CN");
 }
 function size(s) {
-  return s ? s.width + " × " + s.height + " · " + s.fps + " fps" : null;
+  return s ? s.width + " × " + s.height + " @ " + s.fps + " fps" : null;
 }
 function pair(a, b) {
   return a === null || a === undefined ? null : (b === null || b === undefined ? String(a) : a + " / " + b);
 }
 
+/* 渠道号 → 厂商名映射（来自逆向报告 CARLIFE_AUTH.md §2.4）。
+   找不到映射时只显示渠道号本身。 */
+const CHANNEL_MAP = {
+  "20012100": "DUAL_AUDIO_TRACK",
+  "20022100": "HYUNDAI", "20022101": "LFSONATA", "20022102": "CFMISTRA",
+  "20022103": "MDAVANTE", "20022104": "LMIX35", "20022105": "GCIX25",
+  "20022106": "GRANDSANTEFE",
+  "20032100": "KIA", "20032101": "KX5", "20032102": "K3",
+  "20041100": "AUDI", "20042100": "AUDI_DUAL_AUDIO",
+  "20051100": "SHANGHAIGM",
+  "20062100": "DAIMLER",
+  "20071100": "PANASONIC",
+  "20081100": "VOLKSWAGEN",
+  "20092100": "CHANGAN", "20092101": "CS15", "20092102": "V716",
+  "20092103": "CS3516", "20092104": "YIDONG16", "20092105": "RUICHENG16",
+  "20101100": "HARMAN",
+  "20111100": "DELPHI",
+  "20122100": "HUAYANG_MTK3360", "20122101": "HUAYANG_MTK8317",
+  "20131100": "ALPINE",
+  "20141100": "PIONEER",
+  "20152100": "ROADROVER_MSTAR786", "20152101": "ROADROVER_QUANZHI",
+  "20152102": "ROADROVER_MTK8317", "20152200": "ROADROVER_MSTAR786_2",
+  "20162100": "FEIGE_G6", "20162101": "FEIGE_G8", "20162102": "FEIGE_G9",
+  "20171100": "WISTEON",
+  "20181100": "上汽通用_CADILLAC", "20182100": "CADILLAC_DUAL_AUDIO",
+  "20191100": "上汽通用_BUICK", "20192100": "BUICK_DUAL_AUDIO",
+  "20201100": "上汽通用_CHEVROLET", "20202100": "CHEVROLET_DUAL_AUDIO",
+  "20211100": "BYD",
+  "20222101": "YUANFENG", "20222102": "YUANFENG_CSRA", "20222103": "CHEVROLET_K216",
+  "20282119": "YIQIFENGTIAN_COROLLA_DA", "20282120": "COROLLA_GSHV",
+  "20282126": "IZOA_PANASONIC",
+  "20302100": "KAIYUE",
+  "20312173": "GELLYAUTO_GEOMETRY",
+  "20452100": "GUANGFENG_LEVIN", "20452101": "HIGHLANDER",
+  "20452102": "AVN", "20452106": "LEVIN_PHV",
+  "20482100": "YUANFENG_ELH_PCBA", "20482101": "YUANFENG_ONLINE",
+  "20542100": "YUANFENG_YILI",
+  "21070001": "TOYOTA_RAV4",
+};
+
+function channelLabel(raw) {
+  if (!raw) return null;
+  const name = CHANNEL_MAP[raw.trim()];
+  return name ? raw + " (" + name + ")" : raw;
+}
+
 /* 一行：标签、取值、状态（ok / warn / bad，决定右侧颜色）。 */
 const CARLIFE_ROWS = [
-  ["USB 枚举状态", d => bool(d.usb.enumerated, "已枚举", "未枚举"),
-    d => d.usb.enumerated === true ? "ok" : d.usb.enumerated === false ? "warn" : null],
-  ["设备形态", d => bool(d.accessory, "配件形态", "手机形态")],
-  ["USB 厂商 / 产品", d => pair(d.usb.manufacturer, d.usb.product)],
-  ["USB 序列号", d => d.usb.serial],
-  ["USB 标识", d => d.usb.vid === null || d.usb.vid === undefined
-    ? null : d.usb.vid.toString(16).padStart(4, "0") + ":" + d.usb.pid.toString(16).padStart(4, "0")],
-  ["USB 控制器", d => d.usb.controller],
-  ["AOA 协议版本", d => d.aoa_version],
-  ["车机厂商标识", d => d.asked[0]],
-  ["车机型号标识", d => d.asked[1]],
-  ["车机描述标识", d => d.asked[2]],
-  ["车机版本标识", d => d.asked[3]],
-  ["车机 URI 标识", d => d.asked[4]],
-  ["车机序列号标识", d => d.asked[5]],
+  ["厂商 / 型号", d => pair(d.asked[0], d.asked[1])],
+  ["描述", d => d.asked[2]],
+  ["序列号", d => d.asked[5]],
   ["CarLife 协议版本", d => d.protocol ? d.protocol.major + "." + d.protocol.minor : null],
   ["会话状态", d => bool(d.session_up, "已建立", "未建立"), d => d.session_up ? "ok" : null],
-  ["车机 cuid", d => d.statistic && d.statistic.cuid],
-  ["车机应用版本", d => d.statistic && d.statistic.version_name],
-  ["车机版本号", d => d.statistic && num(d.statistic.version_code)],
-  ["渠道号", d => d.statistic && d.statistic.channel],
-  ["渠道号判定", d => bool(d.channel_legal, "合法", "不合法"),
-    d => d.channel_legal === true ? "ok" : d.channel_legal === false ? "bad" : null],
-  ["累计连接次数", d => d.statistic && num(d.statistic.connect_count)],
-  ["累计连接成功次数", d => d.statistic && num(d.statistic.connect_success_count)],
-  ["连接耗时", d => d.statistic && d.statistic.connect_time],
-  ["认证挑战值", d => d.challenge],
-  ["挑战应答状态", d => bool(d.challenge_answered, "已应答", "未应答"),
-    d => d.challenge_answered === true ? "ok" : d.challenge_answered === false ? "bad" : null],
-  ["车机认证结果", d => bool(d.accepted, "已接受", "未接受"),
-    d => d.accepted === true ? "ok" : d.accepted === false ? "bad" : null],
-  ["车机请求分辨率", d => size(d.requested)],
-  ["商定分辨率", d => size(d.agreed)],
-  ["视频编码器状态", d => bool(d.encoding, "运行中", "已停止"),
-    d => d.encoding ? "ok" : null],
-  ["帧率协商", d => d.frame_rate === null || d.frame_rate === undefined ? null : d.frame_rate + " fps"],
-  ["音频通道格式", d => d.media
-    ? d.media.rate + " Hz · " + d.media.channels + " 声道 · " + d.media.bits + " bit" : null],
-  ["车机错误报文", d => d.error_bytes === null || d.error_bytes === undefined
-    ? null : d.error_bytes + " 字节"],
+  ["CUID", d => d.statistic && d.statistic.cuid],
+  ["渠道号", d => d.statistic && channelLabel(d.statistic.channel)],
+  ["分辨率", d => size(d.agreed)],
 ];
 
-const CARLIFE_BLOCKS = [
-  ["功能配置", d => d.features.length
-    ? d.features.map(f => f.key + " = " + f.value) : null],
-];
+const CARLIFE_BLOCKS = [];
 
 const CARPLAY_ROWS = [
-  ["接入方式", d => bool(d.wireless, "蓝牙无线", "USB 有线")],
-  ["设备序列号", d => d.phone],
-  ["配件名称", d => d.name],
-  ["蓝牙地址", d => d.bt_mac],
-  ["设备识别", d => bool(d.identified, "已识别", "未识别"), d => d.identified ? "ok" : null],
-  ["MFi 认证", d => bool(d.authenticated, "已通过", "未通过"),
-    d => d.authenticated ? "ok" : null],
-  ["订阅状态", d => bool(d.subscribed, "已发送", "未发送"), d => d.subscribed ? "ok" : null],
-  ["会话失败原因", d => d.failed, () => "bad"],
-  ["回连地址", d => d.advertised],
-  ["AirPlay 监听端口", d => d.airplay_port],
-  ["媒体接口", d => d.av_iface],
-  ["无线网络", d => d.access_point && d.access_point.ssid],
-  ["无线信道", d => d.access_point && d.access_point.channel],
-  ["无线接口", d => d.access_point && d.access_point.iface],
-  ["AirPlay 客户端", d => d.airplay.peer],
-  ["配对校验", d => bool(d.airplay.verified, "已完成", "未完成"),
-    d => d.airplay.verified ? "ok" : null],
-  ["控制通道加密", d => bool(d.airplay.encrypted, "已加密", "未加密"),
-    d => d.airplay.encrypted ? "ok" : null],
-  ["事件通道端口", d => d.airplay.event_port],
-  ["时间同步端口", d => d.airplay.timing_port],
-  ["时钟偏差", d => d.airplay.clock_offset_us === null ? null : d.airplay.clock_offset_us + " µs"],
-  ["时钟往返时延", d => d.airplay.clock_rtt_us === null ? null : d.airplay.clock_rtt_us + " µs"],
-  ["渲染分辨率", d => d.screen ? size(d.screen) : null],
-  ["渲染画布", d => d.screen ? d.screen.canvas_width + " × " + d.screen.canvas_height : null],
-  ["屏幕密度", d => d.screen ? d.screen.ppi + " ppi" : null],
-  ["物理尺寸", d => d.screen ? d.screen.width_mm + " × " + d.screen.height_mm + " mm" : null],
+  ["接入方式", d => bool(d.wireless, "WiFi", "USB")],
+  ["分辨率", d => d.screen ? size(d.screen) : null],
+  ["物理尺寸", d => d.screen
+    ? d.screen.width_mm + " × " + d.screen.height_mm + " mm"
+    : null],
   ["视频编码格式", () => "H.264"],
-  ["视频流状态", d => bool(d.video.active, "已连接", "未连接"), d => d.video.active ? "ok" : null],
-  ["视频消息数", d => num(d.video.messages)],
-  ["视频帧数", d => num(d.video.frames)],
-];
-
-const CARPLAY_BLOCKS = [
-  ["音频流", d => d.audio.length ? d.audio.map(a =>
-    a.stream_type + " · " + (a.name || NONE) + " · " + a.codec + " " +
-    (a.rate / 1000) + " kHz " + a.channels + " 声道 · " +
-    a.frames_per_packet + " 帧/包 · 抖动 " + a.latency_ms + " ms") : null],
-  ["音频质量", d => d.audio.length ? d.audio.map(a =>
-    a.stream_type + "：收 " + num(a.packets) + " 包，丢 " + num(a.missing) +
-    "，乱序 " + num(a.out_of_order) + "，重复 " + num(a.duplicates) +
-    "，最大间隔 " + a.worst_gap_ms + " ms") : null],
-  ["麦克风上行", d => d.mic
-    ? [d.mic.peer + " · " + d.mic.codec + " " + (d.mic.rate / 1000) + " kHz " + d.mic.channels + " 声道"]
+  ["音频编码格式", d => d.audio.length
+    ? d.audio.map(a => a.codec).join(" / ")
     : null],
 ];
+
+const CARPLAY_BLOCKS = [];
 
 /* 一个单元格：标签在左，取值在右；取值多行时改为上下排布。 */
 function cell(label, value, tone, block) {
