@@ -4,6 +4,13 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## v0.8.0 alpha — 待发布
+
+### 新增
+
+- 桥接手机的正在播放到车机面板：`NowPlayingUpdate` → `MSG_CMD_MEDIA_INFO`；`playlistNum`、`songId`、`mode` 留空，无对应源。
+- 桥接手机的路线引导到车机简易诱导条：`RouteGuidanceUpdate` / `RouteGuidanceManeuverUpdate` → `MSG_CMD_NAVI_NEXT_TURN_INFO` + `MSG_CMD_MODULE_STATUS`；`totalDistance`、`time` 留空，无对应源；`turn_kind` 仅映射语义一致的类型。
+
 ## v0.7.0 alpha — 2026-10-16
 
 ### 新增
