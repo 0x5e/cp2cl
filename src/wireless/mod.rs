@@ -54,7 +54,7 @@ pub(crate) async fn run_session(
     bt_mac: [u8; 6],
     peer: &str,
     restart: &broadcast::Sender<()>,
-    playing: &ClSink,
+    panel: &ClSink,
 ) -> Ended {
     // Subscribed before anything goes out, so a display change made while the
     // identification is still running is waiting for us rather than lost.
@@ -137,7 +137,7 @@ pub(crate) async fn run_session(
         Some(ap.ssid.as_str()),
         rx,
         &mut changed,
-        playing,
+        panel,
     )
     .await;
 

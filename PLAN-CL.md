@@ -64,6 +64,8 @@ iPhone ──无线 CarPlay(AirPlay)──► cp2cl ──USB(AOA)──► MBUX
 | CarLife MD 协议栈    | `src/carlife/{frame,proto,session}.rs` | 已实现：帧编解码、protobuf、握手状态机、心跳      |
 | 桥接：视频             | `src/sink.rs` `ClOutlet`         | 已实现：`VideoFrame` 直通视频通道，参数集在下一帧前带出；`CP2CL_INPUT_FILE` 则改为重复一个文件 |
 | 桥接：音频             | `src/aac.rs` + `src/sink.rs` `Media` | 已实现：AAC-LC 在 `airplay::audio` 里解成 PCM，经第二条队列进 Media 通道；`MSG_MEDIA_INIT` 在第一批采样之前发（§4.2）。**CPU 余量与两个取值未在真机确认** |
+| 桥接：媒体信息           | `src/playing.rs` + `src/carlife/session.rs` | 已实现：`NowPlayingUpdate` → `MSG_CMD_MEDIA_INFO`，六个字段；`playlistNum`/`songId`/`mode` 留空（§4.6） |
+| 桥接：导航信息           | `src/navigation.rs` + `src/carlife/session.rs` | 已实现：`RouteGuidanceUpdate` / `RouteGuidanceManeuverUpdate` → `MSG_CMD_NAVI_NEXT_TURN_INFO` + `MSG_CMD_MODULE_STATUS`；`totalDistance`/`time` 留空，`turn_kind` 仅映射语义一致的类型（§4.7） |
 
 ---
 
@@ -462,6 +464,34 @@ CarPlay 侧对应的是 iAP2 的 `NowPlayingUpdate`（`0x5001`），在 `bringup
 
 `MSG_CMD_MEDIA_PROGRESS_BAR`（`0x00010036`，播放进度）没有发：手机那边有 `elapsed_ms`，但这条消息不在本次范围内。
 
+### 4.7 导航信息
+
+车机简易诱导条对应 `MSG_CMD_NAVI_NEXT_TURN_INFO`（`0x00010030`，指南 §13.1），刷新时机是「有新的诱导信息时」；
+导航模块状态对应 `MSG_CMD_MODULE_STATUS`（`0x00010026`，指南 §10.2）。
+CarPlay 侧对应的是 iAP2 的 `RouteGuidanceUpdate`（`0x5201`）和 `RouteGuidanceManeuverUpdate`（`0x5202`），
+前者随其余订阅一起订上，在 `bringup::subscriptions` 里作为普通 incoming 消息到达。
+
+两侧形状不同：手机把整条路线拆成两份——一份说「路线整体状态 + 当前是哪几步」（`0x5201`），
+另一份按索引逐个描述每一步的转向类型与进入道路名（`0x5202`）；
+车机则只要「下一步是什么、多远、在哪个路口」。
+`src/navigation.rs` 是两者对齐的地方——`Guidance::from_iap2` 读一条更新，`merge` 把「只说了变动」的更新折进已知内容，
+`carlife::session` 在折出来的结果变化时才发一条 `NAVI_NEXT_TURN_INFO`，并在路线起停时发 `MODULE_STATUS`。
+
+`CarlifeNaviNextTurnInfo` 六个字段，这里写四个（`action` / `nextTurn` / `roadName` / `remaindistance`）。剩下两个留空：
+
+- `totalDistance`：iAP2 对「到下一步」只有一个距离（`distance_to_maneuver`），没有「总距离 vs 剩余距离」的区分；
+- `time`：iAP2 有到目的地的 `time_remaining`，但没有到下一步的秒数；把到目的地的时间填进「到下一步」的字段会误导司机。
+
+`turn_kind` 仅映射语义一致的类型。手机有 54 种 `EManeuverType`，车机有 58 种 `TurnKind`；
+ ramps（匝道上下）、motorway changes（换高速）、arrivals（到达）在车机列表里没有对应箭头，
+ 宁可留空也不近似成「左转」或「直行」。环岛出口 1–19 全部映射为 `RING`（`0x0E`），因为车机没有细分到第几个出口。
+
+诱导条只在车机订阅后才发（`MSG_CMD_CARLIFE_DATA_SUBSCRIBE_START`，`0x00018045`）。
+未订阅前只发 `MODULE_STATUS`——那是手机自身状态，不是订阅数据。
+车机停止订阅（`0x00018046`）时把诱导条收起来（`ACTION_HIDE=3`），但导航模块状态不受影响。
+
+`MSG_CMD_NAVI_ASSITANTGUIDE_INFO`（`0x00010047`，电子眼/限速相机）不在本次范围内：iAP2 没有对应消息。
+
 ---
 
 ## 5. 实验装置与验证
@@ -499,13 +529,16 @@ Mac 是 host、Duo2 是 device，拓扑与「车机 ↔ 我们的设备」完全
 
 - **帧编解码**（`frame.rs`，10 条）：头长与长度字段、带/不带时间戳的往返、`reserved` 非零不影响、方向位含例外、  
   逐字节分片仍能拼整、一次 write 两个块分别读出、截断报错、未知通道拒绝、空管道当结束。
-- **protobuf**（`proto.rs`，15 条）：逐条消息的字节级断言（含 `1280` 在线上是 `08 80 0A` 这类 varint 细节）、  
+- **protobuf**（`proto.rs`，18 条）：逐条消息的字节级断言（含 `1280` 在线上是 `08 80 0A` 这类 varint 细节）、  
   未设字段不写 0、负 int32 十字节符号扩展、截断体之前仍可读、`MSG_MEDIA_INIT` 三个字段的字节序、  
-  鉴权应答是单个字符串字段。
-- **状态机**（`session.rs`，15 条）：自带一个 `tokio::io::duplex` 假车机，喂完整握手序列并断言发出的消息与顺序；  
+  鉴权应答是单个字符串字段；**新增**导航相关的 `MODULE_STATUS` 列表体、`NAVI_NEXT_TURN_INFO` 字段选择性写入、订阅应答双向编解码。
+- **状态机**（`session.rs`，19 条）：自带一个 `tokio::io::duplex` 假车机，喂完整握手序列并断言发出的消息与顺序；  
   含触摸/按键上行的映射、fps 上限、两条**否定式**断言（未 `START` 前视频通道静默、没有密钥时鉴权请求不回），  
   以及 Media 通道（格式先于采样、同格式不重发、电话流不进来、`AudioStopped` 转 `MSG_MEDIA_STOP`）、  
-  渠道号四种取值下的 `MSG_CMD_MD_AUTHEN_RESULT`、以及**用临时生成的密钥应答一次挑战并用公钥验回**。
+  渠道号四种取值下的 `MSG_CMD_MD_AUTHEN_RESULT`、用临时生成的密钥应答一次挑战并用公钥验回，  
+  **以及导航通道**（订阅前只发模块状态、订阅后发出完整诱导、车机停止订阅时收起诱导条、无法映射的转向类型留空）。
+- **导航**（`navigation.rs`，7 条）：LIVI 捕获帧的完整往返（状态、距离、转向列表、单步描述）、  
+  `distance_to_maneuver` 与 `distance_remaining` 的区分、`START_ROUTE` 占位步被跳过、`turn_kind` 映射表断言。
 - **鉴权**（`auth.rs`，6 条）：块形状（`00 01 FF…FF 00` 后跟明文）与公钥验回、版本规则的两个方向、
   不是版本的挑战原样回、渠道号的合法与非法取值、两种 PEM 形状都能读；
   另有 1 条**只在 `authentication/` 里真有密钥时断言**的测试：用它应答并用随密钥一起来的公钥验回 ——  
@@ -641,6 +674,7 @@ ffmpeg -f lavfi -i testsrc=size=1280x720:rate=30 -frames:v 1 -c:v libx264 \
 | D14 | 视频通道来源由 `CP2CL_INPUT_FILE` 定：设了就是那个文件，没设就是 CarPlay 会话                  | 让通道与车机解码器能脱离手机单独验（§4.5），不必再多一个开关                       |
 | D15 | 17.1 用 **`rsa` crate 的 unprefixed PKCS#1 v1.5** 应答，密钥是凭据目录里的一个固定文件名      | 手机端的 cipher 名是 Java 的 `RSA/ECB/PKCS1Padding`，其输出就是没有摘要前缀的那种块（§3.5）；RSA 不自己写；文件名写死不给配置面；`rsa` 本来就在依赖树里，直接依赖只多 80 KB |
 | D16 | 媒体信息**只发有值可填的字段**，`playlistNum`/`songId`/`mode` 留空不写 0                    | 留空与 0 对车机解析器是同一种空值，但 `mode=0` 是「单曲循环」的实义；前两个没订、第三个 iAP2 没有（§4.6） |
+| D17 | 导航信息**只发有值可填的字段**，`totalDistance`/`time` 留空；`turn_kind` 仅映射语义一致的类型，不近似 | `totalDistance` 与 `time` 没有对应源，填进去会误导； ramps / motorway changes / arrivals 在车机列表里没有对应箭头，近似反而降低可信度（§4.7） |
 
 ---
 

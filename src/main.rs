@@ -15,6 +15,7 @@ mod airplay;
 mod carlife;
 mod commands;
 mod config;
+mod navigation;
 mod playing;
 mod session;
 mod sink;
@@ -96,14 +97,10 @@ async fn main() -> Result<()> {
     // only in which channel the consumer converts them to. There are two of them
     // because there are two streams that can be told apart this early — the
     // screen and the sound — and the CarLife sink is one object because both of
-    // them are the same car on the same connection. What the phone is playing
-    // goes through the same object, which is why it is kept whole rather than
-    // erased into the two traits above.
-    let (video_sink, audio_sink, playing): (
-        Arc<dyn MediaSink>,
-        Arc<dyn MediaSink>,
-        Arc<ClSink>,
-    ) = {
+    // them are the same car on the same connection. What the phone is playing,
+    // and where it is going, go through the same object, which is why it is kept
+    // whole rather than erased into the two traits above.
+    let (video_sink, audio_sink, panel): (Arc<dyn MediaSink>, Arc<dyn MediaSink>, Arc<ClSink>) = {
         let sink = outlet.sink();
         (sink.clone(), sink.clone(), sink)
     };
@@ -236,9 +233,9 @@ async fn main() -> Result<()> {
     });
 
     if cfg.wireless {
-        wireless::watch(cfg, auth, airplay_port, restart, gate, playing).await;
+        wireless::watch(cfg, auth, airplay_port, restart, gate, panel).await;
     } else {
-        session::watch(cfg, auth, airplay_port, restart, gate, playing).await;
+        session::watch(cfg, auth, airplay_port, restart, gate, panel).await;
     }
     Ok(())
 }

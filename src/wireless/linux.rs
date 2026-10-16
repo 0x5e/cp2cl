@@ -28,7 +28,7 @@ pub async fn watch(
     airplay_port: u32,
     restart: broadcast::Sender<()>,
     mut gate: tokio::sync::watch::Receiver<bool>,
-    playing: Arc<ClSink>,
+    panel: Arc<ClSink>,
 ) {
     if let Err(e) = ready(&cfg) {
         tracing::error!("[cp-wifi] {e}");
@@ -78,7 +78,7 @@ pub async fn watch(
         let (channel, artwork) = spawn_link(fd, link, false);
         // The cover art is a file transfer of its own on the same link, and it
         // goes to the car's panel the same way the song it belongs to does.
-        let carrying = tokio::spawn(carry_artwork(artwork, playing.clone()));
+        let carrying = tokio::spawn(carry_artwork(artwork, panel.clone()));
         // Ending the session drops the descriptor, which is the only way a
         // BlueZ channel ever closes; the profile's `AutoConnect` is what brings
         // the phone back.
@@ -90,7 +90,7 @@ pub async fn watch(
             local_mac(&cfg),
             &peer,
             &restart,
-            &playing,
+            &panel,
         )
         .await;
         carrying.abort();

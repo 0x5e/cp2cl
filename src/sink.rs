@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 
+use crate::navigation::Guidance;
 use crate::playing::Playing;
 
 /// What the audio pipeline agreed to deliver, which decides how the frames are
@@ -193,10 +194,10 @@ const CL_BACKLOG: usize = 8;
 /// nobody to go to and are dropped, which is what the sink says once rather
 /// than per frame.
 ///
-/// There is a third queue beside them for what the phone is playing — see
-/// `playing` — because a session takes it and gives it back on exactly these
-/// terms, and nothing about that changes for it being a record rather than a
-/// stream.
+/// There are two more queues beside them for what the phone is playing and for
+/// where it is going — see `playing` and `guidance` — because a session takes
+/// those and gives them back on exactly these terms, and nothing about that
+/// changes for them being records rather than streams.
 pub struct ClOutlet {
     video_tx: mpsc::Sender<Vec<u8>>,
     video_rx: Mutex<Option<mpsc::Receiver<Vec<u8>>>>,
@@ -204,6 +205,8 @@ pub struct ClOutlet {
     media_rx: Mutex<Option<mpsc::Receiver<Media>>>,
     playing_tx: mpsc::Sender<Playing>,
     playing_rx: Mutex<Option<mpsc::Receiver<Playing>>>,
+    guidance_tx: mpsc::Sender<Guidance>,
+    guidance_rx: Mutex<Option<mpsc::Receiver<Guidance>>>,
 }
 
 impl ClOutlet {
@@ -211,6 +214,7 @@ impl ClOutlet {
         let (video_tx, video_rx) = mpsc::channel(CL_BACKLOG);
         let (media_tx, media_rx) = mpsc::channel(CL_BACKLOG);
         let (playing_tx, playing_rx) = mpsc::channel(CL_BACKLOG);
+        let (guidance_tx, guidance_rx) = mpsc::channel(CL_BACKLOG);
         Self {
             video_tx,
             video_rx: Mutex::new(Some(video_rx)),
@@ -218,6 +222,8 @@ impl ClOutlet {
             media_rx: Mutex::new(Some(media_rx)),
             playing_tx,
             playing_rx: Mutex::new(Some(playing_rx)),
+            guidance_tx,
+            guidance_rx: Mutex::new(Some(guidance_rx)),
         }
     }
 
@@ -225,13 +231,14 @@ impl ClOutlet {
     ///
     /// One object takes all of them: a video event and an audio event differ in
     /// which channel they end up on and in nothing else, and both channels are
-    /// the same connection to the same car. What the phone is playing goes
-    /// through the same object for the same reason.
+    /// the same connection to the same car. What the phone is playing, and where
+    /// it is going, go through the same object for the same reason.
     pub fn sink(&self) -> Arc<ClSink> {
         Arc::new(ClSink {
             video: self.video_tx.clone(),
             media: self.media_tx.clone(),
             playing: self.playing_tx.clone(),
+            guidance: self.guidance_tx.clone(),
             pending: Mutex::new(Vec::new()),
             media_stream: AtomicU8::new(NO_STREAM),
             no_video_reader: AtomicBool::new(false),
@@ -239,6 +246,7 @@ impl ClOutlet {
             no_media_reader: AtomicBool::new(false),
             media_behind: AtomicBool::new(false),
             playing_dropped: AtomicBool::new(false),
+            guidance_dropped: AtomicBool::new(false),
         })
     }
 
@@ -277,6 +285,18 @@ impl ClOutlet {
             *guard = Some(rx);
         }
     }
+
+    /// Where the phone is going. Taken and given back on the same terms as the
+    /// three above.
+    pub fn take_guidance(&self) -> Option<mpsc::Receiver<Guidance>> {
+        self.guidance_rx.lock().ok()?.take()
+    }
+
+    pub fn return_guidance(&self, rx: mpsc::Receiver<Guidance>) {
+        if let Ok(mut guard) = self.guidance_rx.lock() {
+            *guard = Some(rx);
+        }
+    }
 }
 
 /// No audio stream is feeding the media channel. No stream type is numbered
@@ -288,6 +308,7 @@ pub struct ClSink {
     video: mpsc::Sender<Vec<u8>>,
     media: mpsc::Sender<Media>,
     playing: mpsc::Sender<Playing>,
+    guidance: mpsc::Sender<Guidance>,
     /// Parameter sets from the newest codec description, put in front of the
     /// next frame. Held outside the queue deliberately: the queue can be full,
     /// and a dropped SPS/PPS costs everything that follows it.
@@ -305,6 +326,8 @@ pub struct ClSink {
     media_behind: AtomicBool,
     /// And once for what the phone is playing, which is dropped in its own way.
     playing_dropped: AtomicBool,
+    /// And once for where it is going, which is dropped the same way.
+    guidance_dropped: AtomicBool,
 }
 
 impl ClSink {
@@ -375,6 +398,23 @@ impl ClSink {
             tracing::warn!(
                 "[cl] the phone is playing to nobody: no CarLife session is reading it, \
                  and what it says is dropped"
+            );
+        }
+    }
+
+    /// Where the phone is going, on its way to the car's turn-by-turn strip.
+    ///
+    /// Dropped on exactly the terms of the one above, and for the same reason: a
+    /// description of a route is a record rather than a flow, so a car that is
+    /// not reading is not behind — the phone describes the route again as it
+    /// goes, and the newest description is the one worth having.
+    pub fn guidance(&self, item: Guidance) {
+        if self.guidance.try_send(item).is_err()
+            && !self.guidance_dropped.swap(true, Ordering::Relaxed)
+        {
+            tracing::warn!(
+                "[cl] the phone is navigating to nobody: no CarLife session is reading \
+                 it, and what it says is dropped"
             );
         }
     }

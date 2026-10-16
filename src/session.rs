@@ -39,6 +39,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::config::Config;
+use crate::navigation::Guidance;
 use crate::playing::{Playing, Track};
 use crate::sink::ClSink;
 use crate::wireless::{parse_mac, short};
@@ -57,6 +58,14 @@ const RESTART_PAUSE: Duration = Duration::from_millis(750);
 /// is subscribed to with everything else at the start of a session — see LIVI's
 /// `bringup::subscriptions` — and arrives as one more incoming message.
 const NOW_PLAYING: u16 = 0x5001;
+
+/// iAP2's two route-guidance messages, which the car's turn-by-turn strip is
+/// drawn from: the route as a whole — its state, the distance to the next turn,
+/// and which of its turns is the current one — and one turn of it at a time, by
+/// index. Subscribed to with everything else at the start of a session, like
+/// `NOW_PLAYING` above, and reconciled on the other side; see `crate::navigation`.
+const ROUTE_GUIDANCE: u16 = 0x5201;
+const ROUTE_GUIDANCE_MANEUVER: u16 = 0x5202;
 
 /// Why a bringup ended, which is what says whether to start another.
 pub(crate) enum Ended {
@@ -134,16 +143,17 @@ async fn carkit(mux: &Arc<iap2_usbmux::MuxDevice>) -> anyhow::Result<Box<dyn ide
 /// the phone has no CarPlay to start, and starting one would only produce an
 /// AirPlay connection the receiver is not accepting yet.
 ///
-/// `playing` is where what the phone is playing goes. It is the CarLife side's
-/// own sink, so a song reaches the car's panel by the road every other thing the
-/// phone produces does.
+/// `panel` is where what the phone has to say about itself goes — the song it is
+/// playing, the route it is guiding along. It is the CarLife side's own sink, so
+/// all of it reaches the car by the road every other thing the phone produces
+/// does.
 pub async fn watch(
     cfg: Arc<Config>,
     auth: SharedCoprocessor,
     airplay_port: u32,
     restart: broadcast::Sender<()>,
     mut gate: tokio::sync::watch::Receiver<bool>,
-    playing: Arc<ClSink>,
+    panel: Arc<ClSink>,
 ) {
     let mut busy: Option<String> = None;
     loop {
@@ -164,7 +174,7 @@ pub async fn watch(
         if busy.is_none() {
             if let Some(phone) = phones.into_iter().next() {
                 tracing::info!("[cp] {} found over usb", short(&phone.id));
-                match attach(&cfg, auth.clone(), &phone, airplay_port, &restart, &playing).await {
+                match attach(&cfg, auth.clone(), &phone, airplay_port, &restart, &panel).await {
                     Ok(_) => busy = Some(phone.id.clone()),
                     Err(e) => tracing::warn!("[cp] {} could not attach: {e}", short(&phone.id)),
                 }
@@ -190,7 +200,7 @@ async fn attach(
     phone: &Phone,
     airplay_port: u32,
     restart: &broadcast::Sender<()>,
-    playing: &Arc<ClSink>,
+    panel: &Arc<ClSink>,
 ) -> anyhow::Result<Ended> {
     // Subscribed before anything opens, so a display change made while the
     // carkit is coming up is still waiting for us rather than lost.
@@ -240,7 +250,7 @@ async fn attach(
         // The cover art is a file transfer of its own on the same link, so it is
         // carried across as it lands rather than waited for: the update that
         // names the song says only that art is coming.
-        let carrying = tokio::spawn(carry_artwork(artwork, playing.clone()));
+        let carrying = tokio::spawn(carry_artwork(artwork, panel.clone()));
 
         let cp = CpConfig {
             wifi_iface: String::new(),
@@ -280,7 +290,7 @@ async fn attach(
         });
 
         let ended =
-            run_bringup("[cp]", &short(&phone.id), airplay_port, None, rx, &mut changed, playing)
+            run_bringup("[cp]", &short(&phone.id), airplay_port, None, rx, &mut changed, panel)
                 .await;
 
         // Neither half of the link may outlive this round. Aborting the session
@@ -317,8 +327,8 @@ async fn attach(
 /// `changed` fires when what the phone should render has changed, which the
 /// caller turns into a new session.
 ///
-/// `playing` is where what the phone says it is playing goes: the bringup hands
-/// on every incoming message, and this is the one this side acts on rather than
+/// `panel` is where what the phone says about itself goes: the bringup hands on
+/// every incoming message, and these are the ones this side acts on rather than
 /// leaves alone.
 pub(crate) async fn run_bringup(
     prefix: &str,
@@ -327,7 +337,7 @@ pub(crate) async fn run_bringup(
     ssid: Option<&str>,
     mut rx: mpsc::Receiver<BringupEvent>,
     changed: &mut broadcast::Receiver<()>,
-    playing: &ClSink,
+    panel: &ClSink,
 ) -> Ended {
     loop {
         let event = tokio::select! {
@@ -375,7 +385,19 @@ pub(crate) async fn run_bringup(
                 frame,
             }) => {
                 if let Some(track) = Track::from_iap2(&frame) {
-                    playing.playing(Playing::Track(track));
+                    panel.playing(Playing::Track(track));
+                }
+            }
+            // And where it is going. The two messages are sent one at a time and
+            // each describes part of the route, so neither is worth anything on
+            // its own: they are handed on as they arrive and put back together
+            // by whoever draws the strip. See `crate::navigation`.
+            Some(BringupEvent::Incoming {
+                msg_id: ROUTE_GUIDANCE | ROUTE_GUIDANCE_MANEUVER,
+                frame,
+            }) => {
+                if let Some(update) = Guidance::from_iap2(&frame) {
+                    panel.guidance(update);
                 }
             }
             Some(_) => {}
@@ -393,9 +415,9 @@ pub(crate) async fn run_bringup(
 /// they can be: the file says nothing about which song it belongs to, so the
 /// CarLife side takes it as belonging to the newest one, and holds it until a
 /// song turns up to attach it to.
-pub(crate) async fn carry_artwork(mut artwork: ArtworkRx, playing: Arc<ClSink>) {
+pub(crate) async fn carry_artwork(mut artwork: ArtworkRx, panel: Arc<ClSink>) {
     while let Some(image) = artwork.recv().await {
-        playing.playing(Playing::Artwork(image));
+        panel.playing(Playing::Artwork(image));
     }
 }
 

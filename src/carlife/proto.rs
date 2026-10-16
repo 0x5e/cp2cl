@@ -150,7 +150,7 @@ pub fn put_str(out: &mut Vec<u8>, number: u32, value: &str) {
 
 /// A length-delimited field of bytes that are not text — which is the same
 /// thing on the wire, and a different thing to read.
-fn put_bytes(out: &mut Vec<u8>, number: u32, value: &[u8]) {
+pub fn put_bytes(out: &mut Vec<u8>, number: u32, value: &[u8]) {
     tag(out, number, 2);
     put_varint(out, value.len() as u64);
     out.extend_from_slice(value);
@@ -294,6 +294,98 @@ pub fn media_info(track: &Track, album_art: Option<&[u8]>) -> Vec<u8> {
     out
 }
 
+/// `MSG_CMD_MODULE_STATUS` — the state of one of this device's own modules,
+/// which the car hears when it changes and not per message.
+///
+/// The body is `CarlifeModuleStatusList`: a count and that many
+/// `CarlifeModuleStatus`, which is two required ints — which module, and what
+/// state it is in. One entry is written, because one module's state is all this
+/// device has to report. The guide's `ModuleId` numbers the phone's modules and
+/// `NaviState` the states navigation is in (guide §10.2, table in the
+/// command-channel list).
+pub fn module_status(module_id: i32, status_id: i32) -> Vec<u8> {
+    let mut entry = Vec::new();
+    put_int(&mut entry, 1, module_id);
+    put_int(&mut entry, 2, status_id);
+
+    let mut out = Vec::new();
+    put_int(&mut out, 1, 1);
+    put_bytes(&mut out, 2, &entry);
+    out
+}
+
+/// `CARLIFE_NAVI_MODULE_ID`: the navigation module, the one module this device
+/// has a state of its own for.
+pub const NAVI_MODULE: i32 = 2;
+
+/// `NaviState`. `IDLE` is a navigation that is not running and `START` one that
+/// is. The third, `STOP`, is a navigation the phone has ended — which the phone
+/// this side bridges has no way to say, so it is never sent.
+pub const NAVI_IDLE: i32 = 0;
+pub const NAVI_START: i32 = 1;
+
+/// `ActionType`: what a turn message does to the car's strip.
+pub const ACTION_SHOW: i32 = 1;
+pub const ACTION_UPDATE: i32 = 2;
+pub const ACTION_HIDE: i32 = 3;
+
+/// What the car's turn-by-turn strip is to show.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NextTurn {
+    /// The car's own `TurnKind`, once `crate::navigation::turn_kind` has put
+    /// the phone's `EManeuverType` into the car's vocabulary.
+    pub kind: Option<i32>,
+    /// The road the turn leads onto.
+    pub road: Option<String>,
+    /// Metres to the turn.
+    pub remain_m: Option<i32>,
+}
+
+/// `MSG_CMD_NAVI_NEXT_TURN_INFO` — the turn the car's strip is to show, or the
+/// word to take it down. The guide calls this one the simple guidance and has
+/// it refreshed whenever the next turn changes (guide §13.1).
+///
+/// `CarlifeNaviNextTurnInfo` is six fields and the guide calls every one of them
+/// required. Three are written here. `totalDistance` (field 4) and `time`
+/// (field 6) are not, because the phone has nothing behind them, and `naviTurn`
+/// (field 2) is only written when the two vocabularies have a word in common —
+/// see `crate::navigation` for both. The car's own parser reads a body that
+/// stops early and hands its callbacks the defaults, so an absent field is the
+/// same empty value, said honestly.
+pub fn navi_next_turn_info(action: i32, turn: &NextTurn) -> Vec<u8> {
+    let mut out = Vec::new();
+    put_int(&mut out, 1, action);
+    if let Some(kind) = turn.kind {
+        put_int(&mut out, 2, kind);
+    }
+    if let Some(road) = turn.road.as_deref() {
+        put_str(&mut out, 3, road);
+    }
+    if let Some(metres) = turn.remain_m {
+        put_int(&mut out, 5, metres);
+    }
+    out
+}
+
+/// `MSG_CMD_CARLIFE_DATA_SUBSCRIBE_DONE` — this device's answer to the car's
+/// question about the data it can subscribe to.
+///
+/// `CarlifeSubscribeMobileCarLifeInfoList` is a count and that many
+/// `{moduleID, supportFlag}` entries, and the answer carries one entry per
+/// module the car asked about. `frequency` is left out: the car sets the rate
+/// for the data it subscribes to, and nothing here produces a rate of its own.
+pub fn data_subscribe_done(modules: &[(i32, bool)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    put_int(&mut out, 1, modules.len() as i32);
+    for (module, supported) in modules {
+        let mut entry = Vec::new();
+        put_int(&mut entry, 1, *module);
+        put_bool(&mut entry, 2, *supported);
+        put_bytes(&mut out, 2, &entry);
+    }
+    out
+}
+
 // --------------------------------------------------------- what comes down ---
 
 pub fn decode_protocol_version(body: &[u8]) -> (i32, i32) {
@@ -382,6 +474,31 @@ pub fn decode_feature_configs(body: &[u8]) -> Vec<(String, i32)> {
     }
     out
 }
+
+/// `MSG_CMD_CARLIFE_DATA_SUBSCRIBE`: the module IDs the car is asking about, in
+/// the order it asked. Its body is a count and that many `{moduleID}` entries.
+///
+/// The three messages that carry this list — the question, the start and the
+/// stop — are the same body, so one reader serves all three.
+pub fn decode_data_subscribe(body: &[u8]) -> Vec<i32> {
+    let mut out = Vec::new();
+    let mut fields = Fields::new(body);
+    while let Some(field) = fields.next_field() {
+        let Field::Bytes { number: 2, value } = field else {
+            continue;
+        };
+        if let Some(module) = int_of(value, 1) {
+            out.push(module as i32);
+        }
+    }
+    out
+}
+
+/// `CARLIFE_DATA_TURNBYTURN`: the turn-by-turn strip, which is the one of the
+/// two subscribed kinds of data this device produces. The other is the assistant
+/// guide — speed cameras and the like — which has nothing behind it on the
+/// CarPlay side; see `crate::navigation`.
+pub const DATA_TURN_BY_TURN: i32 = 0;
 
 /// `MSG_CMD_VIDEO_ENCODER_FRAME_RATE_CHANGE`.
 pub fn decode_frame_rate(body: &[u8]) -> Option<i32> {
@@ -629,5 +746,88 @@ mod tests {
         // that no longer fits in one byte's worth of value.
         assert_eq!(body[6], 0x2a);
         assert_eq!(body[7], 0xc8);
+    }
+
+    #[test]
+    fn the_strip_is_told_the_turn_field_by_field() {
+        let turn = NextTurn {
+            kind: Some(0x07),
+            road: Some("Elbchaussee".into()),
+            remain_m: Some(350),
+        };
+        let body = navi_next_turn_info(ACTION_SHOW, &turn);
+
+        assert_eq!(int_of(&body, 1), Some(1));
+        assert_eq!(int_of(&body, 2), Some(0x07));
+        assert_eq!(str_of(&body, 3), Some("Elbchaussee"));
+        assert_eq!(int_of(&body, 5), Some(350));
+
+        // The two the phone has nothing behind are absent rather than zero, and
+        // so is a kind the two vocabularies have no word in common for.
+        assert_eq!(int_of(&body, 4), None);
+        assert_eq!(int_of(&body, 6), None);
+        let wordless = navi_next_turn_info(
+            ACTION_UPDATE,
+            &NextTurn {
+                kind: None,
+                ..turn.clone()
+            },
+        );
+        assert_eq!(int_of(&wordless, 2), None);
+        assert_eq!(str_of(&wordless, 3), Some("Elbchaussee"));
+    }
+
+    /// Taking the strip down is the one field that says so: there is no turn to
+    /// describe and nothing about the last one is still true.
+    #[test]
+    fn taking_the_strip_down_is_the_action_on_its_own() {
+        let body = navi_next_turn_info(ACTION_HIDE, &NextTurn::default());
+        assert_eq!(body, vec![0x08, 0x03]);
+        assert_eq!(int_of(&body, 1), Some(3));
+    }
+
+    /// The car reads this one as a *list* of module statuses, so a bare pair of
+    /// ints would be read as a count and nothing else — the message would arrive
+    /// and mean nothing.
+    #[test]
+    fn the_module_state_goes_out_as_the_list_the_car_reads_it_as() {
+        let body = module_status(NAVI_MODULE, NAVI_START);
+
+        let mut fields = Fields::new(&body);
+        assert_eq!(
+            fields.next_field(),
+            Some(Field::Varint {
+                number: 1,
+                value: 1
+            }),
+            "a count of one entry"
+        );
+        let Some(Field::Bytes { number: 2, value }) = fields.next_field() else {
+            panic!("the entry is a nested message, not a scalar");
+        };
+        assert_eq!(int_of(value, 1), Some(i64::from(NAVI_MODULE)));
+        assert_eq!(int_of(value, 2), Some(i64::from(NAVI_START)));
+        assert_eq!(fields.next_field(), None, "and nothing after it");
+    }
+
+    /// The car's question about the subscribed data and this side's answer are
+    /// the same list read the same way, from opposite directions.
+    #[test]
+    fn the_subscribed_data_is_the_list_of_modules_both_ways() {
+        let mut asked = Vec::new();
+        put_int(&mut asked, 1, 2);
+        for module in [0, 1] {
+            let mut entry = Vec::new();
+            put_int(&mut entry, 1, module);
+            put_bytes(&mut asked, 2, &entry);
+        }
+        assert_eq!(decode_data_subscribe(&asked), vec![0, 1]);
+
+        let answer = data_subscribe_done(&[(0, true), (1, false)]);
+        assert_eq!(decode_data_subscribe(&answer), vec![0, 1]);
+        // The count is what the car reads the entries with, so it has to be
+        // there and has to be right.
+        assert_eq!(int_of(&answer, 1), Some(2));
+        assert_eq!(int_of(&answer, 2), None, "the entries are not ints");
     }
 }
