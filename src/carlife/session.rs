@@ -1077,13 +1077,13 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         }
         let song = self.track.song.as_deref().unwrap_or_default();
         let artist = self.track.artist.as_deref().unwrap_or_default();
+        let album = self.track.album.as_deref().unwrap_or_default();
+        let source = self.track.source.as_deref().unwrap_or_default();
         tracing::info!(
-            "[cl] the car's panel is told {song:?} by {artist:?}{}",
-            if self.art.is_some() {
-                ", cover included"
-            } else {
-                ""
-            }
+            "[cl] media info: song={song:?} artist={artist:?} album={album:?} \
+             duration={} source={source:?} cover={}",
+            self.track.duration_s.unwrap_or(0),
+            self.art.is_some()
         );
         let body = proto::media_info(&self.track, self.art.as_deref());
         self.send(MEDIA_INFO, &body).await
@@ -1120,10 +1120,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             };
             if self.navi != Some(state) {
                 self.navi = Some(state);
-                tracing::info!(
-                    "[cl] the car is told the navigation module is {}",
-                    if running { "running" } else { "idle" }
-                );
+                tracing::info!("[cl] navi state: running={running}");
                 let body = proto::module_status(proto::NAVI_MODULE, state);
                 self.send(MODULE_STATUS, &body).await?;
             }
@@ -1141,11 +1138,6 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             (Some(shown), Some(turn)) if shown == turn => return Ok(()),
             (Some(_), Some(_)) => proto::ACTION_UPDATE,
         };
-        let what = match action {
-            proto::ACTION_SHOW => "put up",
-            proto::ACTION_UPDATE => "updated",
-            _ => "taken down",
-        };
         self.shown = match action {
             proto::ACTION_HIDE => None,
             _ => wanted,
@@ -1153,7 +1145,21 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
 
         let nothing = proto::NextTurn::default();
         let turn = self.shown.as_ref().unwrap_or(&nothing);
-        tracing::info!("[cl] the car's strip is {what}: {turn:?}");
+        let action_name = match action {
+            proto::ACTION_SHOW => "show",
+            proto::ACTION_UPDATE => "update",
+            _ => "hide",
+        };
+        if action == proto::ACTION_HIDE {
+            tracing::info!("[cl] navi turn: action={action_name}");
+        } else {
+            tracing::info!(
+                "[cl] navi turn: action={action_name} kind={:?} road={:?} remain_m={:?}",
+                turn.kind.map(|k| format!("0x{k:02X}")),
+                turn.road,
+                turn.remain_m
+            );
+        }
         let body = proto::navi_next_turn_info(action, turn);
         self.send(NAVI_NEXT_TURN_INFO, &body).await
     }
