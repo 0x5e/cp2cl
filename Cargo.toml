@@ -75,3 +75,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Read back so a paired phone is not asked to pair again.
 serde_json = "1"
 
+# The status page's router and listener. The only features asked for are the two
+# that serve it: what used the rest of axum was a WebSocket, and that went with
+# the browser client it was written for. See `src/web/mod.rs`.
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+

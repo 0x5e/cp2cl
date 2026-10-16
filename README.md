@@ -20,6 +20,8 @@ to half screen.
 
 - No video transcoding on bridge, only transfer.
 - Support both wired and wireless CarPlay.
+- A status page showing both halves at once — what the head unit is doing and what
+  the phone is doing.
 
 ## Requirements
 
@@ -244,8 +246,9 @@ before a car is talking, which is why a head unit is what starts the whole thing
 see [Trying it without a car](#trying-it-without-a-car) for the one that stands in
 for it on a desk.
 
-That also means there is nothing to watch here: no page, no panel, and the
-picture goes to the car. `CP2CL_LOG` is where a run is read.
+That also means the car is the only thing that starts a session — but it is not
+the only thing that can watch one. [The status page](#the-status-page) shows both
+halves as they stand, and `CP2CL_LOG` is where a run is read in full.
 
 What is there: the USB interface the car enumerates, the AOA control requests,
 the session a head unit drives — the version handshake, device information,
@@ -557,6 +560,51 @@ direction is ours to decide: the car names a channel number along with its
 statistics, and is told whether a phone would serve it. `src/carlife/auth.rs`
 holds both halves, and a head unit has accepted the answer to its challenge.
 
+## The status page
+
+A single page is served on port 80, so it is the board's own address and nothing
+else: `http://<board>/` from anything on the same network. It is the one place
+both halves are visible at once, and they are two halves of one negotiation seen
+from opposite ends: **CarLife连接** is what the head unit is doing,
+**CarPlay连接** is what the phone is doing, and neither end can see the other's
+side.
+
+The port is not a setting, and neither is the page: it is one HTML file with no
+build step, compiled into the binary along with its stylesheet. There is nothing
+to install beside the program and nothing to fetch — which matters here, because
+the board's access point deliberately announces no gateway, so there is no route
+for a CDN to be reached over — see [Wireless CarPlay](#wireless-carplay).
+`src/web/index.html` is the page, `src/web/mod.rs` the router, and
+`src/web/status.rs` the snapshot behind it.
+
+Port 80 is below 1024, so it takes root to bind; the board runs the program as
+root and this is one more thing that needs nothing configured. Where it is
+refused — a machine running it as someone else — the page is what is lost: the
+program says so and carries on, because the streams are the bridge and the page
+is not.
+
+The page asks for nothing over the network of its own: it polls `GET /api/status`
+every two seconds and redraws from what comes back. That endpoint is the whole
+API, and it answers with the same snapshot the page shows:
+
+```json
+{ "carlife": { ... }, "carplay": { ... } }
+```
+
+A field is either a value or `null`, and `null` means the thing it describes has
+not happened yet — a car that has not asked for its six identifiers has six
+`null`s, not six empty strings. Nothing on the page is derived; every value is one
+the program observed, and the ones belonging to a connection are cleared when that
+connection ends, so a page left open shows the present rather than the last
+session.
+
+What is worth reading there is the two ends side by side. The car's
+`VIDEO_ENCODER_INIT` and the phone's `/info` are the same negotiation, and the
+page puts the requested and agreed resolution, the frame rate and the encoder's
+state within a screen of each other. The same is true of the two USB forms the
+device takes, of authentication in both directions, and of the airplay session —
+ports, pairing, encryption, clock offset — against the streams it carries.
+
 ## Input
 
 The car is where input comes from: its touch and panel keys arrive on the CarLife
@@ -644,6 +692,10 @@ this a derivative work, so cp2cl inherits that.
 | `src/airplay/mic.rs` | the microphone uplink, sealed and sent back to the phone |
 | `src/sink.rs` | what a stream *is* — codec and description as well as bytes — and the two channels the car drains |
 | `src/commands.rs` | the vocabulary of input |
+| `src/web/status.rs` | the snapshot both halves report into, and the JSON behind `/api/status` |
+| `src/web/mod.rs` | the status page's router and listener |
+| `src/web/index.html` | the page itself — one file, two sections, polling |
+| `src/web/vendor/weui.min.css` | its stylesheet, vendored so the page needs no network |
 | `docker/` | the image that cross-compiles for the board, and the CMake toolchain it needs |
 | `board/` | the firmware half: the access point and its unit, laid out as the filesystem they land on |
 

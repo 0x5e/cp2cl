@@ -28,6 +28,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::config::Config;
 use crate::session::{run_bringup, Ended};
+use crate::web::Status;
 
 mod linux;
 
@@ -47,6 +48,7 @@ pub(crate) async fn run_session(
     bt_mac: [u8; 6],
     peer: &str,
     restart: &broadcast::Sender<()>,
+    status: &Status,
 ) -> Ended {
     // Subscribed before anything goes out, so a display change made while the
     // identification is still running is waiting for us rather than lost.
@@ -69,6 +71,17 @@ pub(crate) async fn run_session(
         cfg.wifi_iface,
         path.display()
     );
+    // The passphrase is deliberately left out: it is a secret, and a page is not
+    // a place to keep one. What is here is what the interface is on air with.
+    // Spelled out rather than imported: this module has an `AccessPoint` of its
+    // own, which is the parsed configuration rather than the reported one.
+    status.with(|s| {
+        s.carplay.access_point = Some(crate::web::AccessPoint {
+            ssid: ap.ssid.clone(),
+            channel: ap.channel,
+            iface: cfg.wifi_iface.clone(),
+        });
+    });
 
     let identity = Identity {
         name: cfg.name.clone(),
@@ -129,6 +142,7 @@ pub(crate) async fn run_session(
         Some(ap.ssid.as_str()),
         rx,
         &mut changed,
+        status,
     )
     .await;
 

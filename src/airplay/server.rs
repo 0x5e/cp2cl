@@ -29,6 +29,17 @@ use super::rtsp::{self, Request, Response, OCTET_CONTENT_TYPE, PAIRING_CONTENT_T
 use super::screen::{self, VideoReceiver};
 use crate::config::Config;
 use crate::sink::{AudioCodec, MediaSink, StreamEvent};
+use crate::web::{Audio, Mic, Screen, Status};
+
+/// What a coding is called on the page. `AudioCodec`'s own `Debug` is a struct
+/// dump, which is not a thing to put in front of someone.
+fn codec_name(codec: AudioCodec) -> &'static str {
+    match codec {
+        AudioCodec::Pcm { .. } => "PCM",
+        AudioCodec::AacLc { .. } => "AAC-LC",
+        AudioCodec::Opus { .. } => "Opus",
+    }
+}
 
 /// Every /auth-setup request starts with this byte.
 const MFISAP_VERSION: u8 = 0x01;
@@ -308,6 +319,9 @@ pub struct Shared {
     /// The one stream that runs both ways. Opened when the phone asks for
     /// bidirectional audio, and where audio captured at this end goes.
     pub mic: Arc<MicSink>,
+    /// Where the status page reads this half from. Reported to and never read
+    /// back: see `crate::web::status`.
+    pub status: Arc<Status>,
 }
 
 /// Accepts connections and runs each one to completion.
@@ -337,7 +351,9 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                         return;
                     }
                 };
+                let status = shared.status.clone();
                 tracing::info!("[airplay] {peer} connected");
+                status.with(|s| s.carplay.airplay.peer = Some(peer.to_string()));
                 let cfg = shared.cfg.clone();
                 let screen = shared.screen.clone();
                 let restart = shared.restart.subscribe();
@@ -383,10 +399,16 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                         write_ctr: 0,
                         cseq: 0,
                         feedback_log: String::new(),
+                        status,
                     };
                     if let Err(e) = session.run(socket).await {
                         tracing::info!("[airplay] {peer} ended: {e}");
                     }
+                    // The connection is gone, and so is everything about it: a
+                    // page still naming the last client's address, ports and
+                    // stream counters would be describing a connection that no
+                    // longer exists.
+                    session.status.airplay_closed();
                 });
             }
             changed = gate.changed() => {
@@ -552,6 +574,9 @@ struct Session {
     /// The last `/feedback` summary printed, so the line only appears when the
     /// set of streams changes rather than once a second.
     feedback_log: String,
+    /// Where the status page reads this connection from. Reported to and never
+    /// read back: see `crate::web::status`.
+    status: Arc<Status>,
 }
 
 /// Why a session stopped waiting for the phone to say something.
@@ -640,6 +665,7 @@ impl Session {
                     if let Some(keys) = self.keys {
                         self.cipher_read = SymKey::from_bytes(&keys.control_read()).ok();
                         self.cipher_write = SymKey::from_bytes(&keys.control_write()).ok();
+                        self.status.with(|s| s.carplay.airplay.encrypted = true);
                         tracing::info!("[airplay] control channel is now encrypted");
                     }
                 }
@@ -760,6 +786,21 @@ impl Session {
         // wrong scale. No CarLife message carries a size, so `CP2CL_PPI` says how
         // dense the panel is and the size follows from it and the canvas above.
         let ppi = self.cfg.ppi;
+        // Reported before the answer goes out: this is the only place the two
+        // halves meet — what the car said its screen is, and what the phone is
+        // therefore asked to draw — and the page is where that is worth seeing.
+        self.status.with(|s| {
+            s.carplay.screen = Some(Screen {
+                width: screen.width,
+                height: screen.height,
+                fps,
+                ppi,
+                canvas_width: width,
+                canvas_height: height,
+                width_mm: info::millimetres(width, ppi),
+                height_mm: info::millimetres(height, ppi),
+            });
+        });
         let plist = info::build(&info::Static {
             bt_mac: self.cfg.bt_mac.clone(),
             name: self.cfg.name.clone(),
@@ -921,6 +962,7 @@ impl Session {
         if let Some(keys) = verify.keys() {
             self.keys = Some(keys);
             self.event_sink.set_key(keys.events_write()).await;
+            self.status.with(|s| s.carplay.airplay.verified = true);
             tracing::info!("[airplay] pair-verify complete; shared secret ready");
         }
         Ok(Response::new(200)
@@ -1031,11 +1073,13 @@ impl Session {
         let read_key = SymKey::from_bytes(&keys.events_read()).map_err(|e| e.to_string())?;
         let sink = self.event_sink.clone();
         let responder = sink.clone();
+        let event_status = self.status.clone();
         tokio::spawn(async move {
             let Ok((socket, peer)) = listener.accept().await else {
                 return;
             };
             tracing::info!("[airplay] event channel from {peer}");
+            event_status.with(|s| s.carplay.airplay.event_port = Some(event_port));
             // Input is latency-sensitive and always written in pairs. With Nagle
             // on, a Wi-Fi link holds the second report until the first is acked
             // and then flushes whatever piled up as one segment, which the phone
@@ -1069,6 +1113,10 @@ impl Session {
         );
 
         let plist = to_binary(&Value::Dictionary(body)).map_err(|e| e.to_string())?;
+        self.status.with(|s| {
+            s.carplay.airplay.event_port = Some(event_port);
+            s.carplay.airplay.timing_port = Some(timing_port);
+        });
         tracing::info!("[airplay] session SETUP answered (event {event_port})");
         Ok(Response::new(200).plist(plist))
     }
@@ -1102,12 +1150,14 @@ impl Session {
                         .map_err(|e| e.to_string())?;
                     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
                     let sink = self.video_sink.clone();
+                    let status = self.status.clone();
                     let task = tokio::spawn(async move {
                         let Ok((socket, _)) = listener.accept().await else {
                             return;
                         };
                         tracing::info!("[airplay] video stream attached");
-                        Self::pump_video(socket, key, sink).await;
+                        status.with(|s| s.carplay.video.active = true);
+                        Self::pump_video(socket, key, sink, status).await;
                     });
                     self.open_pump(110, task, None);
                     self.streams.insert(stream_id as u64, port);
@@ -1167,6 +1217,24 @@ impl Session {
                     {
                         *self.codec.lock().await = codec;
                     }
+                    // One entry per stream type: the phone re-opens its audio
+                    // stream on every track change, so a type already listed is
+                    // replaced rather than added to.
+                    self.status.with(|s| {
+                        s.carplay
+                            .audio
+                            .retain(|a| a.stream_type != stream_type as u8);
+                        s.carplay.audio.push(Audio {
+                            stream_type: stream_type as u8,
+                            name: audio_type.clone(),
+                            codec: codec_name(codec).to_string(),
+                            rate: codec.rate(),
+                            channels: codec.channels(),
+                            frames_per_packet,
+                            latency_ms: latency,
+                            ..Audio::default()
+                        });
+                    });
                     // MainAudio is bidirectional, and this is how the phone says
                     // so: a send port in its own SETUP, alongside an audio type
                     // that has someone talking at the other end. It is the only
@@ -1195,9 +1263,20 @@ impl Session {
                         .open(stream_type, stream_id, codec.rate(), latency);
                     let sink = self.audio_sink.clone();
                     let clock = self.audio_clock.clone();
+                    let status = self.status.clone();
                     let task = tokio::spawn(async move {
                         tracing::info!("[airplay] audio stream attached");
-                        Self::pump_audio(socket, key, stream_type as u8, codec, sink, clock, id).await;
+                        Self::pump_audio(
+                            socket,
+                            key,
+                            stream_type as u8,
+                            codec,
+                            sink,
+                            clock,
+                            id,
+                            status,
+                        )
+                        .await;
                     });
                     // Bound but never read; a failure here is not worth failing
                     // the whole setup over.
@@ -1266,10 +1345,23 @@ impl Session {
         let config = MicConfig::from_codec(codec, frames_per_packet);
         let peer = SocketAddr::new(self.peer.ip(), port);
         match self.mic.open(peer, 100, key, config).await {
-            Ok(()) => tracing::info!(
-                "[mic] uplink open to {peer} ({:?} {}Hz/{}ch, {} samples per packet)",
-                config.codec, config.sample_rate, config.channels, config.samples_per_packet
-            ),
+            Ok(()) => {
+                self.status.with(|s| {
+                    s.carplay.mic = Some(Mic {
+                        peer: Some(peer.to_string()),
+                        codec: config.codec.name().to_uppercase(),
+                        rate: config.sample_rate,
+                        channels: config.channels,
+                    });
+                });
+                tracing::info!(
+                    "[mic] uplink open to {peer} ({:?} {}Hz/{}ch, {} samples per packet)",
+                    config.codec,
+                    config.sample_rate,
+                    config.channels,
+                    config.samples_per_packet
+                );
+            }
             Err(e) => tracing::warn!("[mic] uplink to {peer} not opened: {e}"),
         }
     }
@@ -1303,7 +1395,12 @@ impl Session {
     }
 
     /// Video arrives on TCP as a stream of length-framed messages.
-    async fn pump_video(socket: TcpStream, key: SymKey, sink: Arc<dyn MediaSink>) {
+    async fn pump_video(
+        socket: TcpStream,
+        key: SymKey,
+        sink: Arc<dyn MediaSink>,
+        status: Arc<Status>,
+    ) {
         let mut rx = VideoReceiver::new(key, sink.clone());
         sink.push(StreamEvent::ScreenActive(true));
         let mut socket = socket;
@@ -1339,6 +1436,11 @@ impl Session {
             "[airplay] video stream closed after {frames} messages, {} frames",
             rx.frames()
         );
+        status.with(|s| {
+            s.carplay.video.active = false;
+            s.carplay.video.messages = frames;
+            s.carplay.video.frames = rx.frames();
+        });
     }
 
     /// Audio arrives on UDP, one frame per datagram.
@@ -1350,6 +1452,7 @@ impl Session {
         sink: Arc<dyn MediaSink>,
         clock: Arc<Mutex<AudioClock>>,
         id: u64,
+        status: Arc<Status>,
     ) {
         let mut rx = AudioReceiver::new(key, stream_type, codec, sink.clone());
         let mut buf = [0u8; 2048];
@@ -1543,6 +1646,22 @@ impl Session {
         tracing::info!(
             "[airplay] audio stream closed after {packets} packets, {missing} missing"
         );
+        // The counters only exist here, and the stream is over, so this is the
+        // last moment they can be reported at all.
+        status.with(|s| {
+            if let Some(a) = s
+                .carplay
+                .audio
+                .iter_mut()
+                .find(|a| a.stream_type == stream_type)
+            {
+                a.packets = packets;
+                a.missing = missing;
+                a.out_of_order = out_of_order;
+                a.duplicates = duplicates;
+                a.worst_gap_ms = worst_gap.as_millis() as u64;
+            }
+        });
     }
 
     /// Clock sync on the timing port.
@@ -1566,6 +1685,7 @@ impl Session {
         // replies to ours. Both stamp with the same steered clock.
         let rx = socket.clone();
         let rx_clock = self.timing.clone();
+        let rx_status = self.status.clone();
         let reader = tokio::spawn(async move {
             let mut buf = [0u8; 64];
             loop {
@@ -1604,6 +1724,14 @@ impl Session {
                     // the phone's domain, and this is the only place it is
                     // learned. The clock decides what a sample is worth.
                     clock.sample(offset, rtt);
+                    // Kept as well as applied: how far apart the two clocks are,
+                    // and over how long a round trip that was measured, is the
+                    // pair of numbers that says whether audio timing can be
+                    // trusted at all.
+                    rx_status.with(|s| {
+                        s.carplay.airplay.clock_offset_us = Some(offset as i64);
+                        s.carplay.airplay.clock_rtt_us = Some(rtt as i64);
+                    });
                 }
             }
         });

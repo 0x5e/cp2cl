@@ -17,6 +17,7 @@ mod commands;
 mod config;
 mod session;
 mod sink;
+mod web;
 mod wireless;
 
 use std::sync::Arc;
@@ -54,12 +55,36 @@ async fn main() -> Result<()> {
 
     tracing::info!("cp2cl — headless CarPlay receiver");
 
+    // Everything the page shows is reported from wherever it is learned, and
+    // nothing reads it back: see `web::status`. Started before anything else so
+    // that the first thing a page says is never "nothing yet" for want of a
+    // place to put it.
+    let status = Arc::new(web::Status::new());
+    status.with(|s| {
+        s.carplay.wireless = cfg.wireless;
+        s.carplay.name = cfg.name.clone();
+        s.carplay.bt_mac = cfg.bt_mac.clone();
+    });
+
+    // Bound before the streams are: a page that cannot be reached is worth
+    // saying so about at startup rather than when someone goes looking for it.
+    // Not fatal, though — the page is the one part of this that is not the
+    // bridge, and 80 is a port a machine not running as root cannot have.
+    match TcpListener::bind(web::ADDR).await {
+        Ok(listener) => {
+            tracing::info!("[web] the status page is on http://{}/", web::ADDR);
+            tokio::spawn(web::serve(listener, status.clone()));
+        }
+        Err(e) => tracing::warn!("[web] no status page on {}: {e:#}", web::ADDR),
+    }
+
     // Ask for a free port rather than picking one: whatever we get is what gets
     // advertised to the phone, so there is no way for the two to disagree.
     let listener = TcpListener::bind(("::", 0))
         .await
         .context("bind airplay listener")?;
     let airplay_port = listener.local_addr()?.port() as u32;
+    status.with(|s| s.carplay.airplay_port = Some(airplay_port));
 
     let codec = AudioCodec::default();
 
@@ -152,6 +177,7 @@ async fn main() -> Result<()> {
             mfi: auth.clone(),
             audio_clock: Arc::new(Mutex::new(AudioClock::default())),
             timing: Arc::new(Mutex::new(SyncedClock::new())),
+            status: status.clone(),
         },
         gate.clone(),
     ));
@@ -217,8 +243,11 @@ async fn main() -> Result<()> {
     // The car's own input goes the way everything else does, so the session gets
     // the same sink the CarPlay side fills in.
     let input = event_sink;
+    let reported = status.clone();
     tokio::spawn(async move {
-        if let Err(e) = carlife::serve(carried, &frames, &mut named, input, &mut report).await {
+        if let Err(e) =
+            carlife::serve(carried, &frames, &mut named, input, &mut report, reported).await
+        {
             // `{e:#}` and not `{e}`: the outer message says what we were doing
             // and the causes under it hold the errno, which is the part that
             // says why.
@@ -229,9 +258,9 @@ async fn main() -> Result<()> {
     });
 
     if cfg.wireless {
-        wireless::watch(cfg, auth, airplay_port, restart, gate).await;
+        wireless::watch(cfg, auth, airplay_port, restart, gate, status).await;
     } else {
-        session::watch(cfg, auth, airplay_port, restart, gate).await;
+        session::watch(cfg, auth, airplay_port, restart, gate, status).await;
     }
     Ok(())
 }

@@ -39,6 +39,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::config::Config;
+use crate::web::Status;
 use crate::wireless::{parse_mac, short};
 
 /// How often we ask who is attached. Cheap enough that a second is not rude, and
@@ -132,6 +133,7 @@ pub async fn watch(
     airplay_port: u32,
     restart: broadcast::Sender<()>,
     mut gate: tokio::sync::watch::Receiver<bool>,
+    status: Arc<Status>,
 ) {
     let mut busy: Option<String> = None;
     loop {
@@ -145,6 +147,17 @@ pub async fn watch(
         match &busy {
             Some(id) if !current.contains(id) => {
                 tracing::info!("[cp] {} unplugged", short(id));
+                // Nothing about a phone that has gone is still true, and the
+                // page is where that has to show: a session left standing after
+                // the cable is out is the page's most convincing lie.
+                status.with(|s| {
+                    s.carplay.phone = None;
+                    s.carplay.identified = false;
+                    s.carplay.authenticated = false;
+                    s.carplay.subscribed = false;
+                    s.carplay.advertised = None;
+                    s.carplay.av_iface = None;
+                });
                 busy = None;
             }
             _ => {}
@@ -152,7 +165,14 @@ pub async fn watch(
         if busy.is_none() {
             if let Some(phone) = phones.into_iter().next() {
                 tracing::info!("[cp] {} found over usb", short(&phone.id));
-                match attach(&cfg, auth.clone(), &phone, airplay_port, &restart).await {
+                status.with(|s| {
+                    s.carplay.phone = Some(phone.id.clone());
+                    s.carplay.identified = false;
+                    s.carplay.authenticated = false;
+                    s.carplay.subscribed = false;
+                    s.carplay.failed = None;
+                });
+                match attach(&cfg, auth.clone(), &phone, airplay_port, &restart, &status).await {
                     Ok(_) => busy = Some(phone.id.clone()),
                     Err(e) => tracing::warn!("[cp] {} could not attach: {e}", short(&phone.id)),
                 }
@@ -178,6 +198,7 @@ async fn attach(
     phone: &Phone,
     airplay_port: u32,
     restart: &broadcast::Sender<()>,
+    status: &Status,
 ) -> anyhow::Result<Ended> {
     // Subscribed before anything opens, so a display change made while the
     // carkit is coming up is still waiting for us rather than lost.
@@ -200,6 +221,7 @@ async fn attach(
         }
     };
     tracing::info!("[cp] av interface: {:?}", av_iface);
+    status.with(|s| s.carplay.av_iface = av_iface.clone());
 
     loop {
         let tunnel = carkit(&mux).await?;
@@ -262,7 +284,8 @@ async fn attach(
         });
 
         let ended =
-            run_bringup("[cp]", &short(&phone.id), airplay_port, None, rx, &mut changed).await;
+            run_bringup("[cp]", &short(&phone.id), airplay_port, None, rx, &mut changed, status)
+                .await;
 
         // Neither half of the link may outlive this round. Aborting the session
         // drops its handle to the link, and the latch is what makes the driver's
@@ -296,6 +319,9 @@ async fn attach(
 ///
 /// `changed` fires when what the phone should render has changed, which the
 /// caller turns into a new session.
+///
+/// `status` is told how far the conversation got, which is the only place any of
+/// these steps is known: see `crate::web::status`.
 pub(crate) async fn run_bringup(
     prefix: &str,
     peer: &str,
@@ -303,6 +329,7 @@ pub(crate) async fn run_bringup(
     ssid: Option<&str>,
     mut rx: mpsc::Receiver<BringupEvent>,
     changed: &mut broadcast::Receiver<()>,
+    status: &Status,
 ) -> Ended {
     loop {
         let event = tokio::select! {
@@ -320,21 +347,32 @@ pub(crate) async fn run_bringup(
             }
         };
         match event {
-            Some(BringupEvent::Identified) => tracing::info!("{prefix} {peer} identified"),
-            Some(BringupEvent::Authenticated) => {
-                tracing::info!("{prefix} {peer} MFi authentication passed")
+            Some(BringupEvent::Identified) => {
+                status.with(|s| s.carplay.identified = true);
+                tracing::info!("{prefix} {peer} identified");
             }
-            Some(BringupEvent::Subscribed) => tracing::info!("{prefix} {peer} subscriptions sent"),
+            Some(BringupEvent::Authenticated) => {
+                status.with(|s| s.carplay.authenticated = true);
+                tracing::info!("{prefix} {peer} MFi authentication passed");
+            }
+            Some(BringupEvent::Subscribed) => {
+                status.with(|s| s.carplay.subscribed = true);
+                tracing::info!("{prefix} {peer} subscriptions sent");
+            }
             Some(BringupEvent::WifiConfigSent) => {
                 if let Some(ssid) = ssid {
                     tracing::info!("{prefix} {peer} told to join {ssid:?}");
                 }
             }
-            Some(BringupEvent::CarPlayStartSent { ip }) => tracing::info!(
-                "{prefix} {peer} CarPlayStartSession sent — the phone should knock on \
-                 {ip}:{airplay_port}"
-            ),
+            Some(BringupEvent::CarPlayStartSent { ip }) => {
+                status.with(|s| s.carplay.advertised = Some(format!("{ip}:{airplay_port}")));
+                tracing::info!(
+                    "{prefix} {peer} CarPlayStartSession sent — the phone should knock on \
+                     {ip}:{airplay_port}"
+                );
+            }
             Some(BringupEvent::Failed(reason)) => {
+                status.with(|s| s.carplay.failed = Some(reason.to_string()));
                 tracing::error!("{prefix} {peer} session failed: {reason}");
                 return Ended::Finished;
             }

@@ -27,6 +27,7 @@ use tokio::sync::mpsc;
 
 use crate::airplay::EventSink;
 use crate::config::Config;
+use crate::web::Status;
 
 use super::desc;
 use super::session::{self, Frames};
@@ -72,6 +73,7 @@ pub async fn run<F>(
     screen: session::ScreenReport<'_>,
     events: Arc<EventSink>,
     carplay: &mut F,
+    status: Arc<Status>,
 ) -> Result<()>
 where
     F: FnMut(bool),
@@ -83,6 +85,14 @@ where
         from_car,
         to_car,
     } = endpoints;
+    // A device that is on the controller and not yet enumerated is a cable, a
+    // port or a car, and saying so is what makes "nothing is happening" mean
+    // something specific.
+    status.with(|s| {
+        s.carlife.usb.controller = Some(usb.controller().to_string());
+        s.carlife.usb.enumerated = Some(false);
+    });
+    describe_identity(&status, &identity);
 
     tracing::info!("[cl-usb] waiting for a head unit to enumerate the device");
 
@@ -95,6 +105,7 @@ where
         identity,
         tokio::fs::File::from_std(control),
         events_tx,
+        status.clone(),
     ));
 
     while let Some(event) = events_rx.recv().await {
@@ -104,19 +115,34 @@ where
             // CarLife straight away gets one here. Until the car says the first
             // thing on the channel, a session is silent, so the one that turns out
             // not to be needed costs nothing.
-            Event::Enabled => match bulk(&from_car, &to_car) {
-                Ok(pair) => {
-                    tracing::info!("[cl-usb] the host has enumerated us; starting the session");
-                    if let Err(e) =
-                        session::run(pair, frames, &cfg, &mut *screen, events.clone(), carplay).await
-                    {
-                        tracing::warn!("[cl] the session ended badly: {e:#}");
+            Event::Enabled => {
+                status.with(|s| s.carlife.usb.enumerated = Some(true));
+                match bulk(&from_car, &to_car) {
+                    Ok(pair) => {
+                        tracing::info!("[cl-usb] the host has enumerated us; starting the session");
+                        if let Err(e) = session::run(
+                            pair,
+                            frames,
+                            &cfg,
+                            &mut *screen,
+                            events.clone(),
+                            carplay,
+                            status.clone(),
+                        )
+                        .await
+                        {
+                            tracing::warn!("[cl] the session ended badly: {e:#}");
+                        }
                     }
+                    Err(e) => tracing::error!("[cl-usb] the endpoints are not usable: {e:#}"),
                 }
-                Err(e) => tracing::error!("[cl-usb] the endpoints are not usable: {e:#}"),
-            },
-            Event::Disabled => tracing::info!("[cl-usb] the host has gone"),
+            }
+            Event::Disabled => {
+                status.with(|s| s.carlife.usb.enumerated = Some(false));
+                tracing::info!("[cl-usb] the host has gone");
+            }
             Event::Accessory => {
+                status.with(|s| s.carlife.accessory = true);
                 tracing::info!("[cl-usb] the device is an accessory from here on")
             }
         }
@@ -137,6 +163,7 @@ async fn control_loop(
     mut identity: desc::Identity,
     mut ep0: tokio::fs::File,
     events: mpsc::Sender<Event>,
+    status: Arc<Status>,
 ) {
     let mut asked = desc::Asked::default();
 
@@ -159,14 +186,16 @@ async fn control_loop(
                 let _ = events.send(Event::Disabled).await;
             }
             EVENT_SETUP => {
-                match answer(&usb, &mut identity, &mut ep0, &mut asked, &raw).await {
+                match answer(&usb, &mut identity, &mut ep0, &mut asked, &raw, &status).await {
                     Ok(Answered::Switched) => {
                         if events.send(Event::Accessory).await.is_err() {
                             return;
                         }
                     }
                     Ok(Answered::Nothing) => {}
-                    Err(e) => tracing::warn!("[cl-usb] a control request could not be answered: {e:#}"),
+                    Err(e) => {
+                        tracing::warn!("[cl-usb] a control request could not be answered: {e:#}")
+                    }
                 }
             }
             other => tracing::debug!("[cl-usb] control event {other}"),
@@ -186,6 +215,7 @@ async fn answer(
     ep0: &mut tokio::fs::File,
     asked: &mut desc::Asked,
     raw: &[u8; 12],
+    status: &Status,
 ) -> Result<Answered> {
     let setup = desc::Setup::decode(raw).ok_or_else(|| anyhow!("a setup event with no setup packet"))?;
     tracing::info!(
@@ -206,6 +236,7 @@ async fn answer(
             // Nothing may be left buffered: the host is sitting on a control
             // transfer that this is the answer to.
             ep0.flush().await?;
+            status.with(|s| s.carlife.aoa_version = Some(desc::AOA_VERSION));
             tracing::info!("[cl-usb] answered with AOA {}", desc::AOA_VERSION);
             Ok(Answered::Nothing)
         }
@@ -217,7 +248,16 @@ async fn answer(
                 "[cl-usb] identifier {index}: {:?}",
                 String::from_utf8_lossy(&text)
             );
-            asked.set(index, String::from_utf8_lossy(&text).into_owned());
+            let text = String::from_utf8_lossy(&text).into_owned();
+            // The six are the car's own CarLife application naming itself, and
+            // they are worth keeping: they are the only description of the head
+            // unit anything here ever sees.
+            status.with(|s| {
+                if let Some(slot) = s.carlife.asked.get_mut(index) {
+                    *slot = Some(text.clone());
+                }
+            });
+            asked.set(index, text);
             Ok(Answered::Nothing)
         }
         // "Switch to accessory mode and re-enumerate."
@@ -234,6 +274,7 @@ async fn answer(
                 return Ok(Answered::Nothing);
             }
             switch(usb, identity, asked).await?;
+            describe_identity(status, identity);
             Ok(Answered::Switched)
         }
         // Not one of the three. Where it carries data, the data is still read.
@@ -299,6 +340,21 @@ async fn switch(usb: &Usb, identity: &mut desc::Identity, asked: &desc::Asked) -
     );
     *identity = accessory;
     Ok(())
+}
+
+/// The numbers and strings of the device descriptor, as a host reads them.
+///
+/// Reported wherever the identity changes rather than once: the device presents
+/// two of them, and which one is on the wire is the difference between a car
+/// seeing a phone and a car seeing an accessory.
+fn describe_identity(status: &Status, identity: &desc::Identity) {
+    status.with(|s| {
+        s.carlife.usb.vid = Some(identity.vid);
+        s.carlife.usb.pid = Some(identity.pid);
+        s.carlife.usb.manufacturer = Some(identity.manufacturer.clone());
+        s.carlife.usb.product = Some(identity.product.clone());
+        s.carlife.usb.serial = Some(identity.serial.clone());
+    });
 }
 
 /// A byte pipe over the two bulk endpoints, the shape `session` wants.
