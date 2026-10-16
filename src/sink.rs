@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 
+use crate::playing::Playing;
+
 /// What the audio pipeline agreed to deliver, which decides how the frames are
 /// framed for whoever decodes them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,22 +192,32 @@ const CL_BACKLOG: usize = 8;
 /// when it ends, so the next one gets them. Frames that arrive in between have
 /// nobody to go to and are dropped, which is what the sink says once rather
 /// than per frame.
+///
+/// There is a third queue beside them for what the phone is playing — see
+/// `playing` — because a session takes it and gives it back on exactly these
+/// terms, and nothing about that changes for it being a record rather than a
+/// stream.
 pub struct ClOutlet {
     video_tx: mpsc::Sender<Vec<u8>>,
     video_rx: Mutex<Option<mpsc::Receiver<Vec<u8>>>>,
     media_tx: mpsc::Sender<Media>,
     media_rx: Mutex<Option<mpsc::Receiver<Media>>>,
+    playing_tx: mpsc::Sender<Playing>,
+    playing_rx: Mutex<Option<mpsc::Receiver<Playing>>>,
 }
 
 impl ClOutlet {
     pub fn new() -> Self {
         let (video_tx, video_rx) = mpsc::channel(CL_BACKLOG);
         let (media_tx, media_rx) = mpsc::channel(CL_BACKLOG);
+        let (playing_tx, playing_rx) = mpsc::channel(CL_BACKLOG);
         Self {
             video_tx,
             video_rx: Mutex::new(Some(video_rx)),
             media_tx,
             media_rx: Mutex::new(Some(media_rx)),
+            playing_tx,
+            playing_rx: Mutex::new(Some(playing_rx)),
         }
     }
 
@@ -213,17 +225,20 @@ impl ClOutlet {
     ///
     /// One object takes all of them: a video event and an audio event differ in
     /// which channel they end up on and in nothing else, and both channels are
-    /// the same connection to the same car.
+    /// the same connection to the same car. What the phone is playing goes
+    /// through the same object for the same reason.
     pub fn sink(&self) -> Arc<ClSink> {
         Arc::new(ClSink {
             video: self.video_tx.clone(),
             media: self.media_tx.clone(),
+            playing: self.playing_tx.clone(),
             pending: Mutex::new(Vec::new()),
             media_stream: AtomicU8::new(NO_STREAM),
             no_video_reader: AtomicBool::new(false),
             video_behind: AtomicBool::new(false),
             no_media_reader: AtomicBool::new(false),
             media_behind: AtomicBool::new(false),
+            playing_dropped: AtomicBool::new(false),
         })
     }
 
@@ -250,6 +265,18 @@ impl ClOutlet {
             *guard = Some(rx);
         }
     }
+
+    /// What the phone is playing. Taken and given back on the same terms as the
+    /// two above.
+    pub fn take_playing(&self) -> Option<mpsc::Receiver<Playing>> {
+        self.playing_rx.lock().ok()?.take()
+    }
+
+    pub fn return_playing(&self, rx: mpsc::Receiver<Playing>) {
+        if let Ok(mut guard) = self.playing_rx.lock() {
+            *guard = Some(rx);
+        }
+    }
 }
 
 /// No audio stream is feeding the media channel. No stream type is numbered
@@ -260,6 +287,7 @@ const NO_STREAM: u8 = 0;
 pub struct ClSink {
     video: mpsc::Sender<Vec<u8>>,
     media: mpsc::Sender<Media>,
+    playing: mpsc::Sender<Playing>,
     /// Parameter sets from the newest codec description, put in front of the
     /// next frame. Held outside the queue deliberately: the queue can be full,
     /// and a dropped SPS/PPS costs everything that follows it.
@@ -275,6 +303,8 @@ pub struct ClSink {
     video_behind: AtomicBool,
     no_media_reader: AtomicBool,
     media_behind: AtomicBool,
+    /// And once for what the phone is playing, which is dropped in its own way.
+    playing_dropped: AtomicBool,
 }
 
 impl ClSink {
@@ -329,6 +359,24 @@ impl ClSink {
             &self.no_media_reader,
             &self.media_behind,
         );
+    }
+
+    /// What the phone is playing, on its way to the car's panel.
+    ///
+    /// Its own queue, and its own way of losing things. A track is a record
+    /// rather than a flow, so a car that is not reading is not *behind*: what it
+    /// did not hear is stale, and the next thing the phone says replaces it. So
+    /// the two ways of having nowhere to go are one line here, and one line
+    /// only — a phone playing to nobody would otherwise print a song per song.
+    pub fn playing(&self, item: Playing) {
+        if self.playing.try_send(item).is_err()
+            && !self.playing_dropped.swap(true, Ordering::Relaxed)
+        {
+            tracing::warn!(
+                "[cl] the phone is playing to nobody: no CarLife session is reading it, \
+                 and what it says is dropped"
+            );
+        }
     }
 }
 

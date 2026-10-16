@@ -15,6 +15,7 @@ mod airplay;
 mod carlife;
 mod commands;
 mod config;
+mod playing;
 mod session;
 mod sink;
 mod wireless;
@@ -32,7 +33,7 @@ use crate::airplay::clock::SyncedClock;
 use crate::airplay::pairing::Pairings;
 use crate::airplay::{AudioClock, EventSink, MicSink, ScreenParams, SharedScreen};
 use crate::config::Config;
-use crate::sink::{AudioCodec, ClOutlet, MediaSink};
+use crate::sink::{AudioCodec, ClOutlet, ClSink, MediaSink};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -95,10 +96,16 @@ async fn main() -> Result<()> {
     // only in which channel the consumer converts them to. There are two of them
     // because there are two streams that can be told apart this early — the
     // screen and the sound — and the CarLife sink is one object because both of
-    // them are the same car on the same connection.
-    let (video_sink, audio_sink): (Arc<dyn MediaSink>, Arc<dyn MediaSink>) = {
+    // them are the same car on the same connection. What the phone is playing
+    // goes through the same object, which is why it is kept whole rather than
+    // erased into the two traits above.
+    let (video_sink, audio_sink, playing): (
+        Arc<dyn MediaSink>,
+        Arc<dyn MediaSink>,
+        Arc<ClSink>,
+    ) = {
         let sink = outlet.sink();
-        (sink.clone(), sink)
+        (sink.clone(), sink.clone(), sink)
     };
 
     // Worth saying out loud: nothing here draws a picture, and what the phone is
@@ -229,9 +236,9 @@ async fn main() -> Result<()> {
     });
 
     if cfg.wireless {
-        wireless::watch(cfg, auth, airplay_port, restart, gate).await;
+        wireless::watch(cfg, auth, airplay_port, restart, gate, playing).await;
     } else {
-        session::watch(cfg, auth, airplay_port, restart, gate).await;
+        session::watch(cfg, auth, airplay_port, restart, gate, playing).await;
     }
     Ok(())
 }

@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use iap2_link::LinkConfig;
 use livi_runtime::bringup::{run_accessory, BringupEvent, CpConfig};
-use livi_runtime::driver::spawn_link_stream;
+use livi_runtime::driver::{spawn_link_stream, ArtworkRx};
 use livi_runtime::ident::Identity;
 // `CpConfig::transport` is a `Transport`, but `bringup` only imports it
 // privately, so it has to be named through the module that defines it.
@@ -39,6 +39,8 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::config::Config;
+use crate::playing::{Playing, Track};
+use crate::sink::ClSink;
 use crate::wireless::{parse_mac, short};
 
 /// How often we ask who is attached. Cheap enough that a second is not rude, and
@@ -50,6 +52,11 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(1);
 /// second, and the reference waits the same 750ms between tearing its own
 /// bootstrap down and starting another.
 const RESTART_PAUSE: Duration = Duration::from_millis(750);
+
+/// iAP2's `NowPlayingUpdate`, which is what the phone describes a song with. It
+/// is subscribed to with everything else at the start of a session — see LIVI's
+/// `bringup::subscriptions` — and arrives as one more incoming message.
+const NOW_PLAYING: u16 = 0x5001;
 
 /// Why a bringup ended, which is what says whether to start another.
 pub(crate) enum Ended {
@@ -126,12 +133,17 @@ async fn carkit(mux: &Arc<iap2_usbmux::MuxDevice>) -> anyhow::Result<Box<dyn ide
 /// `gate` is the CarLife session. While it is shut nothing is looked for at all:
 /// the phone has no CarPlay to start, and starting one would only produce an
 /// AirPlay connection the receiver is not accepting yet.
+///
+/// `playing` is where what the phone is playing goes. It is the CarLife side's
+/// own sink, so a song reaches the car's panel by the road every other thing the
+/// phone produces does.
 pub async fn watch(
     cfg: Arc<Config>,
     auth: SharedCoprocessor,
     airplay_port: u32,
     restart: broadcast::Sender<()>,
     mut gate: tokio::sync::watch::Receiver<bool>,
+    playing: Arc<ClSink>,
 ) {
     let mut busy: Option<String> = None;
     loop {
@@ -152,7 +164,7 @@ pub async fn watch(
         if busy.is_none() {
             if let Some(phone) = phones.into_iter().next() {
                 tracing::info!("[cp] {} found over usb", short(&phone.id));
-                match attach(&cfg, auth.clone(), &phone, airplay_port, &restart).await {
+                match attach(&cfg, auth.clone(), &phone, airplay_port, &restart, &playing).await {
                     Ok(_) => busy = Some(phone.id.clone()),
                     Err(e) => tracing::warn!("[cp] {} could not attach: {e}", short(&phone.id)),
                 }
@@ -178,6 +190,7 @@ async fn attach(
     phone: &Phone,
     airplay_port: u32,
     restart: &broadcast::Sender<()>,
+    playing: &Arc<ClSink>,
 ) -> anyhow::Result<Ended> {
     // Subscribed before anything opens, so a display change made while the
     // carkit is coming up is still waiting for us rather than lost.
@@ -224,6 +237,11 @@ async fn attach(
         };
         let (channel, artwork) = spawn_link_stream(stream, link, true);
 
+        // The cover art is a file transfer of its own on the same link, so it is
+        // carried across as it lands rather than waited for: the update that
+        // names the song says only that art is coming.
+        let carrying = tokio::spawn(carry_artwork(artwork, playing.clone()));
+
         let cp = CpConfig {
             wifi_iface: String::new(),
             ssid: cfg.name.clone(),
@@ -262,14 +280,16 @@ async fn attach(
         });
 
         let ended =
-            run_bringup("[cp]", &short(&phone.id), airplay_port, None, rx, &mut changed).await;
+            run_bringup("[cp]", &short(&phone.id), airplay_port, None, rx, &mut changed, playing)
+                .await;
 
         // Neither half of the link may outlive this round. Aborting the session
         // drops its handle to the link, and the latch is what makes the driver's
-        // parked read return so the tunnel itself closes — see `Latched`.
+        // parked read return so the tunnel itself closes — see `Latched`. The
+        // art has nowhere to go once the link that carried it is gone.
         accessory.abort();
         let _ = accessory.await;
-        drop(artwork);
+        carrying.abort();
         shut.shutdown();
 
         match ended {
@@ -296,6 +316,10 @@ async fn attach(
 ///
 /// `changed` fires when what the phone should render has changed, which the
 /// caller turns into a new session.
+///
+/// `playing` is where what the phone says it is playing goes: the bringup hands
+/// on every incoming message, and this is the one this side acts on rather than
+/// leaves alone.
 pub(crate) async fn run_bringup(
     prefix: &str,
     peer: &str,
@@ -303,6 +327,7 @@ pub(crate) async fn run_bringup(
     ssid: Option<&str>,
     mut rx: mpsc::Receiver<BringupEvent>,
     changed: &mut broadcast::Receiver<()>,
+    playing: &ClSink,
 ) -> Ended {
     loop {
         let event = tokio::select! {
@@ -342,11 +367,35 @@ pub(crate) async fn run_bringup(
                 tracing::info!("{prefix} {peer} session closed");
                 return Ended::Finished;
             }
+            // What the phone is playing, which the car's panel is owed. It is
+            // one of the messages the bringup hands on rather than acts on, and
+            // the only one of them that goes any further than the log.
+            Some(BringupEvent::Incoming {
+                msg_id: NOW_PLAYING,
+                frame,
+            }) => {
+                if let Some(track) = Track::from_iap2(&frame) {
+                    playing.playing(Playing::Track(track));
+                }
+            }
             Some(_) => {}
             // The bringup task ended without saying so, which only happens when
             // it was torn down; there is nothing left to watch.
             None => return Ended::Finished,
         }
+    }
+}
+
+/// The phone's cover art, as it lands, on its way to the car's panel.
+///
+/// It is its own file transfer on the link rather than part of the message that
+/// named the song, so this is where the two are put back together — as far as
+/// they can be: the file says nothing about which song it belongs to, so the
+/// CarLife side takes it as belonging to the newest one, and holds it until a
+/// song turns up to attach it to.
+pub(crate) async fn carry_artwork(mut artwork: ArtworkRx, playing: Arc<ClSink>) {
+    while let Some(image) = artwork.recv().await {
+        playing.playing(Playing::Artwork(image));
     }
 }
 

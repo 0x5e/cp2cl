@@ -16,7 +16,8 @@ use tokio::sync::broadcast;
 
 use super::{parse_mac, ready, run_session, short};
 use crate::config::{bt_address, Config};
-use crate::session::Ended;
+use crate::session::{carry_artwork, Ended};
+use crate::sink::ClSink;
 
 /// Keeps serving phones until the program stops. Nothing pushes "a phone just
 /// paired" from outside, so a session that ends puts us back to waiting for the
@@ -27,6 +28,7 @@ pub async fn watch(
     airplay_port: u32,
     restart: broadcast::Sender<()>,
     mut gate: tokio::sync::watch::Receiver<bool>,
+    playing: Arc<ClSink>,
 ) {
     if let Err(e) = ready(&cfg) {
         tracing::error!("[cp-wifi] {e}");
@@ -73,7 +75,10 @@ pub async fn watch(
         };
         // Over RFCOMM the phone speaks first, so we must not open with a
         // negotiate of our own.
-        let (channel, _artwork) = spawn_link(fd, link, false);
+        let (channel, artwork) = spawn_link(fd, link, false);
+        // The cover art is a file transfer of its own on the same link, and it
+        // goes to the car's panel the same way the song it belongs to does.
+        let carrying = tokio::spawn(carry_artwork(artwork, playing.clone()));
         // Ending the session drops the descriptor, which is the only way a
         // BlueZ channel ever closes; the profile's `AutoConnect` is what brings
         // the phone back.
@@ -85,8 +90,10 @@ pub async fn watch(
             local_mac(&cfg),
             &peer,
             &restart,
+            &playing,
         )
         .await;
+        carrying.abort();
         tracing::info!("[cp-wifi] {peer} done, waiting for the next one");
         if let Ended::Restart = ended {
             tracing::info!("[cp-wifi] waiting for the phone to open the channel again");

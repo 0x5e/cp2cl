@@ -13,6 +13,8 @@
 //! forgiving: the car reads these with a generated parser, so a body that does
 //! not decode makes the message disappear rather than fail loudly.
 
+use crate::playing::Track;
+
 /// One field, as it appears on the wire.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Field<'a> {
@@ -143,9 +145,15 @@ pub fn put_str(out: &mut Vec<u8>, number: u32, value: &str) {
     if value.is_empty() {
         return;
     }
+    put_bytes(out, number, value.as_bytes());
+}
+
+/// A length-delimited field of bytes that are not text — which is the same
+/// thing on the wire, and a different thing to read.
+fn put_bytes(out: &mut Vec<u8>, number: u32, value: &[u8]) {
     tag(out, number, 2);
     put_varint(out, value.len() as u64);
-    out.extend_from_slice(value.as_bytes());
+    out.extend_from_slice(value);
 }
 
 // --------------------------------------------------------- what we send up ---
@@ -253,6 +261,36 @@ pub fn media_init(rate: u32, channels: u16) -> Vec<u8> {
     put_int(&mut out, 1, rate as i32);
     put_int(&mut out, 2, i32::from(channels));
     put_int(&mut out, 3, 16);
+    out
+}
+
+/// `MSG_CMD_MEDIA_INFO` — what the car's panel is told about the song that is
+/// playing. The guide calls this one "当前歌曲播放信息" and says the refresh is
+/// "开始播放或者切换歌曲时" (guide §13.2).
+///
+/// `CarlifeMediaInfo` is nine fields and the guide calls every one of them
+/// required. Six are written here. The other three — `playlistNum`, `songId` and
+/// `mode` — are not, because the phone has nothing behind them: see
+/// `crate::playing` for which subscription is missing and why a zero would be a
+/// claim rather than a silence. The car's own parser reads a body that stops
+/// early and hands its callbacks the defaults, so an absent field is the same
+/// empty value, said honestly.
+///
+/// `duration` is in seconds, which is the unit the guide gives it, and
+/// `albumArt` is the cover as the phone transferred it — a file, not a bitmap
+/// this side drew.
+pub fn media_info(track: &Track, album_art: Option<&[u8]>) -> Vec<u8> {
+    let mut out = Vec::new();
+    put_str(&mut out, 1, track.source.as_deref().unwrap_or_default());
+    put_str(&mut out, 2, track.song.as_deref().unwrap_or_default());
+    put_str(&mut out, 3, track.artist.as_deref().unwrap_or_default());
+    put_str(&mut out, 4, track.album.as_deref().unwrap_or_default());
+    if let Some(art) = album_art {
+        put_bytes(&mut out, 5, art);
+    }
+    if let Some(seconds) = track.duration_s {
+        put_int(&mut out, 6, seconds);
+    }
     out
 }
 
@@ -532,5 +570,64 @@ mod tests {
 
         assert_eq!(str_of(&body, 1), Some("ok"));
         assert_eq!(str_of(&body, 2), None);
+    }
+
+    #[test]
+    fn the_panel_is_told_the_song_field_by_field() {
+        let track = Track {
+            source: Some("Music".into()),
+            song: Some("Reeperbahn".into()),
+            artist: Some("Hamburg".into()),
+            album: Some("Stadt".into()),
+            duration_s: Some(239),
+        };
+        let body = media_info(&track, Some(&[0xff, 0xd8, 0xff]));
+
+        assert_eq!(str_of(&body, 1), Some("Music"));
+        assert_eq!(str_of(&body, 2), Some("Reeperbahn"));
+        assert_eq!(str_of(&body, 3), Some("Hamburg"));
+        assert_eq!(str_of(&body, 4), Some("Stadt"));
+        assert_eq!(bytes_of(&body, 5), Some(&[0xffu8, 0xd8, 0xff][..]));
+        assert_eq!(int_of(&body, 6), Some(239));
+
+        // The three the phone has nothing to say about are absent rather than
+        // zero: a `mode` of 0 would be the panel told single-track repeat.
+        assert_eq!(int_of(&body, 7), None);
+        assert_eq!(str_of(&body, 8), None);
+        assert_eq!(int_of(&body, 9), None);
+    }
+
+    /// Nothing is written for a field there is nothing behind, so a song and
+    /// nothing else is a body of one field — and no cover at all is no cover
+    /// field, not an empty one.
+    #[test]
+    fn a_song_with_nothing_said_about_it_carries_only_its_name() {
+        let body = media_info(
+            &Track {
+                song: Some("Only".into()),
+                ..Track::default()
+            },
+            None,
+        );
+        assert_eq!(body, vec![0x12, 0x04, b'O', b'n', b'l', b'y']);
+    }
+
+    /// A cover is a file the phone sent, so it goes out byte for byte however
+    /// long it is — the length is a varint like every other.
+    #[test]
+    fn the_cover_goes_out_as_the_bytes_the_phone_sent() {
+        let art = vec![0xab; 200];
+        let body = media_info(
+            &Track {
+                song: Some("Song".into()),
+                ..Track::default()
+            },
+            Some(&art),
+        );
+        assert_eq!(bytes_of(&body, 5), Some(&art[..]));
+        // The song's field, then the cover's: a tag of its own and a length
+        // that no longer fits in one byte's worth of value.
+        assert_eq!(body[6], 0x2a);
+        assert_eq!(body[7], 0xc8);
     }
 }

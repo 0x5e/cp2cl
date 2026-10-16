@@ -591,6 +591,30 @@ the car up to this side — so the uplink opens and is reported
 the phone is listening and shut the rest of the time, so the way to see it is to
 start a call or invoke Siri.
 
+## Now playing
+
+The car's panel is told what the phone is playing. iOS describes a song over iAP2
+as `NowPlayingUpdate` — one attribute per message, with the cover art as a file
+transfer of its own — while CarLife's `MSG_CMD_MEDIA_INFO` carries the whole song
+in a single message. `src/playing.rs` is where the two shapes are reconciled:
+`Track` folds the phone's partial updates together, and the CarLife session sends
+the message whenever the folded song changes.
+
+The panel gets the song, the artist, the album, its length and where it is
+playing from, plus the cover once the phone has sent one. Three of the car's nine
+fields are left out rather than written as zero. `playlistNum` and `songId` are
+subscription-gated — the phone is not subscribed for `persistent_id` or
+`app_bundle_id` — and iAP2 has no message for the play `mode` at all. An absent
+field and a zero are not the same claim: a `mode` of zero would be single-track
+repeat.
+
+The cover arrives after the update that named the song and names no song itself,
+so it is taken as belonging to the newest one; a title that changes puts it down,
+rather than showing the old song's cover under the new name.
+
+The play position is not sent: `MSG_CMD_MEDIA_PROGRESS_BAR` is left alone, though
+the phone does describe where the song has got to.
+
 ## Depending on LIVI
 
 LIVI is a git submodule under `vendor/`, pinned to an exact commit:
@@ -643,6 +667,7 @@ this a derivative work, so cp2cl inherits that.
 | `src/airplay/event.rs` | input: HID reports and session commands, over the event channel |
 | `src/airplay/mic.rs` | the microphone uplink, sealed and sent back to the phone |
 | `src/sink.rs` | what a stream *is* — codec and description as well as bytes — and the two channels the car drains |
+| `src/playing.rs` | what the phone is playing, as the fields the car's panel is told |
 | `src/commands.rs` | the vocabulary of input |
 | `docker/` | the image that cross-compiles for the board, and the CMake toolchain it needs |
 | `board/` | the firmware half: the access point and its unit, laid out as the filesystem they land on |
@@ -678,9 +703,11 @@ this a derivative work, so cp2cl inherits that.
 ## Known gaps
 
 * The CarLife video and media channels carry the phone's picture and its sound,
-  and the car's touch and panel keys reach the phone. The two voice channels are
-  the car's own and stay empty, so navigation speech and the voice assistant are
-  silent.
+  the car's touch and panel keys reach the phone, and its panel is told what is
+  playing. The two voice channels are the car's own and stay empty, so navigation
+  speech and the voice assistant are silent.
+* The panel is told *which* song is playing but not where in it: the progress
+  bar's message is not sent. See [Now playing](#now-playing).
 * `up`/`down` overshoot. The knob's absolute Y axis is a *position* to the phone
   rather than a step, so a full throw scrolls several rows. Wired it is reliable,
   wireless it is intermittent. The knob's wheel axis cannot stand in for it: that

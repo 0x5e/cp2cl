@@ -28,6 +28,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::config::Config;
 use crate::session::{run_bringup, Ended};
+use crate::sink::ClSink;
 
 mod linux;
 
@@ -39,6 +40,12 @@ pub use linux::watch;
 /// `bt_mac` is this machine's own Bluetooth address: the phone checks that the
 /// accessory it is talking to is the one it paired with, so a made-up value
 /// gets the identification rejected.
+///
+/// One argument per thing the caller holds, which is one more than clippy counts
+/// by default. They are left apart rather than bundled: no two of them belong
+/// with each other, and a struct over them would exist only to be taken apart
+/// again on the first line.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_session(
     cfg: &Config,
     auth: SharedCoprocessor,
@@ -47,6 +54,7 @@ pub(crate) async fn run_session(
     bt_mac: [u8; 6],
     peer: &str,
     restart: &broadcast::Sender<()>,
+    playing: &ClSink,
 ) -> Ended {
     // Subscribed before anything goes out, so a display change made while the
     // identification is still running is waiting for us rather than lost.
@@ -129,6 +137,7 @@ pub(crate) async fn run_session(
         Some(ap.ssid.as_str()),
         rx,
         &mut changed,
+        playing,
     )
     .await;
 

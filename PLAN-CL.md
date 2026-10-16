@@ -443,6 +443,25 @@ CarLife `VOICE_MIC=0` 时麦克风在车机侧，HU 会把 16 kHz 单声道 PCM 
   AirPlay 侧只是没有人连进来。
 - 拔掉 iPhone：CarLife 会话不受影响，退回发心跳。
 
+### 4.6 媒体信息
+
+车机面板要显示「当前歌曲播放信息」，对应 `MSG_CMD_MEDIA_INFO`（`0x00010035`，指南 §13.2，刷新时机是「开始播放或者切换歌曲时」）。
+CarPlay 侧对应的是 iAP2 的 `NowPlayingUpdate`（`0x5001`），在 `bringup::subscriptions` 里随其余订阅一起订上，作为一条普通 incoming 消息到达。
+
+两侧形状不同：手机每次只描述一个属性（改了标题就只发标题），封面另起一个文件传输、且不指名属于哪首歌；车机的消息则一次给出整首歌。
+`src/playing.rs` 是两者对齐的地方——`Track::from_iap2` 读一条更新，`merge` 把「只说了变动」的更新折进已知内容，`carlife::session` 在折出来的结果变化时才发一条 `MEDIA_INFO`。
+
+`CarlifeMediaInfo` 九个字段，指南称都是必填，这里写六个（`source` / `song` / `artist` / `album` / `albumArt` / `duration`，`duration` 是秒）。剩下三个留空而不是写 0：
+
+- `playlistNum`、`songId`：手机没订 `persistent_id` 与 `app_bundle_id`（`bringup::subscriptions` 里这两个 flag 是 false），拿不到值；
+- `mode`：iAP2 根本没有描述播放模式的消息。
+
+留空与 0 不是同一件事：车机自己的解析器读到提前结束的 body 会用默认值回调，与「如实说没有」一致；而 `mode=0` 等于告诉面板单曲循环。
+
+封面文件不指名歌曲，按「属于最新那首」处理；标题一变就把它放下，免得新歌名下面挂着旧封面。
+
+`MSG_CMD_MEDIA_PROGRESS_BAR`（`0x00010036`，播放进度）没有发：手机那边有 `elapsed_ms`，但这条消息不在本次范围内。
+
 ---
 
 ## 5. 实验装置与验证
@@ -621,6 +640,7 @@ ffmpeg -f lavfi -i testsrc=size=1280x720:rate=30 -frames:v 1 -c:v libx264 \
 | D13 | 设备由**程序自组**（configfs 组装、ffs 挂载、描述符、绑 UDC 全在进程内）                             | 换身份必须解绑/重绑 UDC，只有拥有设备的一方做得到（§2.5）；代价是重启服务会把设备摘下来再放回去      |
 | D14 | 视频通道来源由 `CP2CL_INPUT_FILE` 定：设了就是那个文件，没设就是 CarPlay 会话                  | 让通道与车机解码器能脱离手机单独验（§4.5），不必再多一个开关                       |
 | D15 | 17.1 用 **`rsa` crate 的 unprefixed PKCS#1 v1.5** 应答，密钥是凭据目录里的一个固定文件名      | 手机端的 cipher 名是 Java 的 `RSA/ECB/PKCS1Padding`，其输出就是没有摘要前缀的那种块（§3.5）；RSA 不自己写；文件名写死不给配置面；`rsa` 本来就在依赖树里，直接依赖只多 80 KB |
+| D16 | 媒体信息**只发有值可填的字段**，`playlistNum`/`songId`/`mode` 留空不写 0                    | 留空与 0 对车机解析器是同一种空值，但 `mode=0` 是「单曲循环」的实义；前两个没订、第三个 iAP2 没有（§4.6） |
 
 ---
 
