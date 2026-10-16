@@ -1058,7 +1058,11 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // is held belongs to the one before it. Only the title: the
                 // phone also corrects the artist and the album of a song that is
                 // still the same one, and its cover is not sent again.
-                let another = update.song.is_some() && update.song != self.track.song;
+                // A cover that arrived before the first song is kept for it:
+                // "another" is only a song that replaces a song.
+                let another = update.song.is_some()
+                    && self.track.song.is_some()
+                    && update.song != self.track.song;
                 self.track.merge(update);
                 if self.track == before {
                     return Ok(());
@@ -1693,6 +1697,53 @@ mod tests {
                 }));
             }
             car.expect_silence(Duration::from_millis(300)).await;
+        });
+
+        run(device, &frames, &cfg, &mut screen, EventSink::new(), &mut carplay)
+            .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    /// A cover that arrives before the song it belongs to is kept for it, not
+    /// thrown away when the song turns up.
+    #[tokio::test]
+    async fn a_cover_that_arrives_before_the_song_is_kept_for_it() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
+
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+        let sink = outlet.sink();
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+
+            // The cover arrives first, with no song to attach it to yet.
+            sink.playing(Playing::Artwork(vec![0xff, 0xd8, 0xff]));
+            car.expect_silence(Duration::from_millis(300)).await;
+
+            // Then the song: the cover is still there, and the message carries
+            // both.
+            sink.playing(Playing::Track(Track {
+                song: Some("Reeperbahn".into()),
+                ..Track::default()
+            }));
+            let covered = car.expect(MEDIA_INFO).await;
+            assert_eq!(
+                covered.body,
+                proto::media_info(
+                    &Track {
+                        song: Some("Reeperbahn".into()),
+                        ..Track::default()
+                    },
+                    Some(&[0xff, 0xd8, 0xff])
+                )
+            );
         });
 
         run(device, &frames, &cfg, &mut screen, EventSink::new(), &mut carplay)
