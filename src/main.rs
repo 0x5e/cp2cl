@@ -15,6 +15,7 @@ mod airplay;
 mod carlife;
 mod commands;
 mod config;
+mod logging;
 mod session;
 mod sink;
 mod wireless;
@@ -47,6 +48,7 @@ async fn main() -> Result<()> {
     // to go.
     tracing_subscriber::fmt()
         .with_env_filter(config::log_filter())
+        .with_timer(logging::Clock)
         .with_target(false)
         .init();
 
