@@ -12,6 +12,8 @@
 
 ### 变更
 
+- 日志级别变量由 `CP2CL_LOG` 更名为 `CP2CL_LOG_LEVEL`，可选值收窄为 `error`、`warn`、`info`、`debug`（`2f10b36`）。
+- 日志行时间戳改为本地时间 `HH:MM:SS.mmm`，不再输出日期与时区（`e41c37c`）。
 - axum 重新引入，只开 `http1` 与 `tokio` 两个 feature，仅服务于状态页（`7512259`）。
 
 ## v0.7.0 alpha — 2026-10-16
