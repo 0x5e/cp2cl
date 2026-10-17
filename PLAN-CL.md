@@ -453,6 +453,10 @@ CarPlay 侧对应的是 iAP2 的 `NowPlayingUpdate`（`0x5001`），在 `bringup
 两侧形状不同：手机每次只描述一个属性（改了标题就只发标题），封面另起一个文件传输、且不指名属于哪首歌；车机的消息则一次给出整首歌。
 `src/playing.rs` 是两者对齐的地方——`Track::from_iap2` 读一条更新，`merge` 把「只说了变动」的更新折进已知内容，`carlife::session` 在折出来的结果变化时才发一条 `MEDIA_INFO`。
 
+发之前还要等一个停顿：手机描述一首歌是好几条消息（标题、歌手、专辑、时长），一条一发会让面板同一首歌重画好几遍。
+所以每条更新都把定时器推后 `CP2CL_MEDIA_DELAY_MS`（默认 1000 ms），到点才把折好的整首歌发出去；期间到达的消息只并进已知内容，不额外发。
+设为 0 就退化成「每条更新立即发」。
+
 `CarlifeMediaInfo` 九个字段，指南称都是必填，这里写六个（`source` / `song` / `artist` / `album` / `albumArt` / `duration`，`duration` 是秒）。剩下三个留空而不是写 0：
 
 - `playlistNum`、`songId`：手机没订 `persistent_id` 与 `app_bundle_id`（`bringup::subscriptions` 里这两个 flag 是 false），拿不到值；

@@ -188,6 +188,7 @@ Nothing sets it at the moment, so the car's own pixels are asked for as they are
 | `CP2CL_WIRELESS` | off | take CarPlay over Wi-Fi instead of USB |
 | `CP2CL_WIFI_IFACE` | `wlan0` | the interface the access point runs on |
 | `CP2CL_BT_ADAPTER` | `hci0` | which Bluetooth adapter |
+| `CP2CL_MEDIA_DELAY_MS` | `1000` | how long the phone has to finish describing a song before the panel is told; `0` sends every update at once |
 | `CP2CL_INPUT_FILE` | — | test video stream file |
 
 On the board every one of these is an environment variable of the process: the
@@ -598,7 +599,12 @@ as `NowPlayingUpdate` — one attribute per message, with the cover art as a fil
 transfer of its own — while CarLife's `MSG_CMD_MEDIA_INFO` carries the whole song
 in a single message. `src/playing.rs` is where the two shapes are reconciled:
 `Track` folds the phone's partial updates together, and the CarLife session sends
-the message whenever the folded song changes.
+the message once the folded song has stopped changing.
+
+One song therefore costs one message rather than one per attribute. Each update
+puts a pause back, and the message goes out when the pause ends — a second by
+default, `CP2CL_MEDIA_DELAY_MS` to change it, and `0` to send every update the
+moment it arrives.
 
 The panel gets the song, the artist, the album, its length and where it is
 playing from, plus the cover once the phone has sent one. Three of the car's nine
