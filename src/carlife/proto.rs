@@ -264,6 +264,15 @@ pub fn media_init(rate: u32, channels: u16) -> Vec<u8> {
     out
 }
 
+/// The largest cover the car's media message may carry.
+///
+/// The song and its cover travel in one command-channel message, whose body the
+/// car caps at 40 KB. The reference app keeps a cover under 30 KB, re-compressing
+/// it until it fits and falling back to a built-in placeholder when it will not.
+/// Nothing here re-compresses, so a cover larger than this is left out rather
+/// than sent as a message the car cannot take.
+pub const MAX_ART: usize = 30 * 1024;
+
 /// `MSG_CMD_MEDIA_INFO` — what the car's panel is told about the song that is
 /// playing. The guide calls this one "当前歌曲播放信息" and says the refresh is
 /// "开始播放或者切换歌曲时" (guide §13.2).

@@ -1096,6 +1096,19 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 }
             }
             Playing::Artwork(image) => {
+                // The car reads the song and its cover from one command-channel
+                // message, and the reference keeps a cover under 30 KB for it.
+                // Nothing here re-compresses, so a cover that would not fit is
+                // left out: the song still goes, the cover does not, and the
+                // message stays one the car can take.
+                if image.len() > proto::MAX_ART {
+                    tracing::warn!(
+                        "[cl] media info: cover dropped bytes={} cap={}",
+                        image.len(),
+                        proto::MAX_ART
+                    );
+                    return Ok(());
+                }
                 if self.art.as_deref() == Some(image.as_slice()) {
                     return Ok(());
                 }
@@ -1263,8 +1276,22 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     ///
     /// The channel is the number's top half-word and is written from it rather
     /// than passed separately, so the two cannot disagree.
+    ///
+    /// A body larger than the channel allows is dropped here rather than
+    /// written. The car's own reader refuses such a message, and refusing it
+    /// means the length no longer matches what is on the wire: the whole channel
+    /// goes with it. Dropping it costs one message; writing it costs the
+    /// session.
     async fn send_frame(&mut self, service_type: u32, timestamp_ms: u32, body: &[u8]) -> Result<()> {
         let channel = service_type >> 16;
+        let cap = frame::max_body(channel);
+        if body.len() > cap as usize {
+            tracing::warn!(
+                "[cl] message dropped: type={service_type:#010x} bytes={} cap={cap}",
+                body.len()
+            );
+            return Ok(());
+        }
         let message = frame::encode(channel, service_type, timestamp_ms, body);
         frame::write_chunk(&mut self.writer, channel, &message)
             .await
@@ -2043,6 +2070,103 @@ mod tests {
                     None
                 )
             );
+        });
+
+        run(device, &frames, &cfg, &mut screen, EventSink::new(), &mut carplay)
+            .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    /// A cover the car's message cannot carry is left out, and the song is not:
+    /// the panel loses the picture, not the song.
+    #[tokio::test]
+    async fn a_cover_too_large_for_the_cars_message_is_left_out() {
+        let cfg = immediately();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
+
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+        let sink = outlet.sink();
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+
+            let track = Track {
+                song: Some("Reeperbahn".into()),
+                ..Track::default()
+            };
+
+            // One byte past what the message may carry.
+            sink.playing(Playing::Artwork(vec![0xff; proto::MAX_ART + 1]));
+            sink.playing(Playing::Track(track.clone()));
+            let told = car.expect(MEDIA_INFO).await;
+            assert_eq!(told.body, proto::media_info(&track, None));
+
+            // And one that fits exactly is the car's to draw.
+            let fits = vec![0x89; proto::MAX_ART];
+            sink.playing(Playing::Artwork(fits.clone()));
+            let covered = car.expect(MEDIA_INFO).await;
+            assert_eq!(covered.body, proto::media_info(&track, Some(&fits)));
+        });
+
+        run(device, &frames, &cfg, &mut screen, EventSink::new(), &mut carplay)
+            .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    /// A body past what its channel allows is dropped rather than written. The
+    /// car refuses such a message, and a refused length leaves the channel
+    /// waiting for bytes that will never come: one lost message is the cheaper
+    /// of the two.
+    #[tokio::test]
+    async fn a_message_larger_than_its_channel_allows_is_dropped() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
+
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+        let sink = outlet.sink();
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+
+            sink.push(StreamEvent::AudioConfig {
+                stream_type: 102,
+                codec: AudioCodec::AacLc {
+                    rate: 48_000,
+                    channels: 2,
+                },
+                name: "media".into(),
+            });
+            car.expect(MEDIA_INIT).await;
+
+            // One byte past the media channel's body cap.
+            sink.push(StreamEvent::AudioPacket {
+                stream_type: 102,
+                timestamp_us: 1_000_000,
+                data: vec![0x11; 100 * 1024 + 1],
+            });
+            car.expect_silence(Duration::from_millis(300)).await;
+
+            // And the channel is still there, with nothing left over on it.
+            sink.push(StreamEvent::AudioPacket {
+                stream_type: 102,
+                timestamp_us: 1_100_000,
+                data: vec![0x22],
+            });
+            let sound = car.expect(MEDIA_DATA).await;
+            assert_eq!(sound.body, vec![0x22]);
+            assert_eq!(sound.timestamp_ms, Some(1_100));
         });
 
         run(device, &frames, &cfg, &mut screen, EventSink::new(), &mut carplay)

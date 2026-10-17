@@ -618,6 +618,16 @@ The cover arrives after the update that named the song and names no song itself,
 so it is taken as belonging to the newest one; a title that changes puts it down,
 rather than showing the old song's cover under the new name.
 
+A cover is only sent while it fits. The song and its cover travel in one
+command-channel message, whose body the car caps at 40 KB, and the reference app
+keeps a cover under 30 KB for it — `proto::MAX_ART`. Nothing here re-compresses,
+so a larger cover is dropped with a warning and the song goes without it.
+
+Every message is checked against its channel's cap before it is written, and one
+that would not fit is dropped with a warning rather than sent: the car refuses
+such a message, and a refused length leaves the channel waiting for bytes that
+never come, which costs the session rather than the message.
+
 The play position is not sent: `MSG_CMD_MEDIA_PROGRESS_BAR` is left alone, though
 the phone does describe where the song has got to.
 
