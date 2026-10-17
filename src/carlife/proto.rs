@@ -269,8 +269,9 @@ pub fn media_init(rate: u32, channels: u16) -> Vec<u8> {
 /// The song and its cover travel in one command-channel message, whose body the
 /// car caps at 40 KB. The reference app keeps a cover under 30 KB, re-compressing
 /// it until it fits and falling back to a built-in placeholder when it will not.
-/// Nothing here re-compresses, so a cover larger than this is left out rather
-/// than sent as a message the car cannot take.
+/// This layer does not re-compress: a cover is made to fit before it gets here
+/// (`crate::artwork`), and one that still does not is left out rather than sent
+/// as a message the car cannot take.
 pub const MAX_ART: usize = 30 * 1024;
 
 /// `MSG_CMD_MEDIA_INFO` — what the car's panel is told about the song that is

@@ -1098,9 +1098,11 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             Playing::Artwork(image) => {
                 // The car reads the song and its cover from one command-channel
                 // message, and the reference keeps a cover under 30 KB for it.
-                // Nothing here re-compresses, so a cover that would not fit is
-                // left out: the song still goes, the cover does not, and the
-                // message stays one the car can take.
+                // A cover too large for that has already been re-encoded on the
+                // CarPlay side — see `crate::artwork` — so what arrives here is
+                // either small enough or not going to be. This is the backstop:
+                // the song still goes, the cover does not, and the message stays
+                // one the car can take.
                 if image.len() > proto::MAX_ART {
                     tracing::warn!(
                         "[cl] media info: cover dropped bytes={} cap={}",

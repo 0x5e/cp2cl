@@ -12,6 +12,7 @@
 
 mod aac;
 mod airplay;
+mod artwork;
 mod carlife;
 mod commands;
 mod config;

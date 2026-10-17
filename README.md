@@ -620,8 +620,14 @@ rather than showing the old song's cover under the new name.
 
 A cover is only sent while it fits. The song and its cover travel in one
 command-channel message, whose body the car caps at 40 KB, and the reference app
-keeps a cover under 30 KB for it — `proto::MAX_ART`. Nothing here re-compresses,
-so a larger cover is dropped with a warning and the song goes without it.
+keeps a cover under 30 KB for it — `proto::MAX_ART`. A cover larger than that is
+re-encoded first, in `src/artwork.rs`: the picture is decoded, turned the way its
+EXIF orientation says it is meant to be seen, and re-encoded as a baseline JPEG
+with 4:2:0 chroma and no metadata. The size comes down to a 400px long edge, and
+the quality with it — 90, 80, 70, 60 — before the edge goes to 350 and then 300,
+six encodes at most. A cover that fits already is passed through untouched, and
+one that will not fit at any of the six is dropped with a warning and the song
+goes without it.
 
 Every message is checked against its channel's cap before it is written, and one
 that would not fit is dropped with a warning rather than sent: the car refuses
@@ -716,6 +722,7 @@ this a derivative work, so cp2cl inherits that.
 | `src/airplay/mic.rs` | the microphone uplink, sealed and sent back to the phone |
 | `src/sink.rs` | what a stream *is* — codec and description as well as bytes — and the two channels the car drains |
 | `src/playing.rs` | what the phone is playing, as the fields the car's panel is told |
+| `src/artwork.rs` | the cover art, made small enough for the car's one media message |
 | `src/navigation.rs` | where the phone is going, as the fields the car's turn-by-turn strip is told |
 | `src/commands.rs` | the vocabulary of input |
 | `docker/` | the image that cross-compiles for the board, and the CMake toolchain it needs |

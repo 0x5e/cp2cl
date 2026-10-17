@@ -467,7 +467,10 @@ CarPlay 侧对应的是 iAP2 的 `NowPlayingUpdate`（`0x5001`），在 `bringup
 封面文件不指名歌曲，按「属于最新那首」处理；标题一变就把它放下，免得新歌名下面挂着旧封面。
 
 封面还有大小限制：它和歌曲同处一条命令通道消息，而命令通道 body 上限 40 KB，参考实现（`carlife_app` 的 `MusicInfoSender`）把封面压到 30 KB 以内再发。
-这里不做重压，超过 `proto::MAX_ART`（30 KB）的封面直接丢弃并告警，歌照发。
+超过 `proto::MAX_ART`（30 KB）的封面由 `src/artwork.rs` 重编码后再发：解出 RGB、按 EXIF 方向转正、去掉全部元数据，输出 baseline JPEG + 4:2:0；
+尺寸先降到长边 400px，质量 90/80/70/60 逐档试，仍不行再把长边降到 350、300（只配 60 质量），最多 6 次编码，还不行才丢弃并告警，歌照发。
+本来就够小的封面按原字节直传，不做二次压缩；解码上限 2048×2048，超过的不解。
+重编码发生在 CarPlay 侧的 `carry_artwork` 任务里（`spawn_blocking`），不占写流的线程；同一张封面重复到达时按长度 + FNV-1a 指纹认出来，不重复解码。
 另有一道通用防护：`send_frame` 在写之前比对通道上限（命令 40 KB / 媒体 100 KB / 视频 600 KB），超了告警并丢弃——车机读不了这种消息，且长度不符会让整条通道断开，丢一条比丢会话划算。
 
 `MSG_CMD_MEDIA_PROGRESS_BAR`（`0x00010036`，播放进度）没有发：手机那边有 `elapsed_ms`，但这条消息不在本次范围内。
@@ -683,6 +686,7 @@ ffmpeg -f lavfi -i testsrc=size=1280x720:rate=30 -frames:v 1 -c:v libx264 \
 | D15 | 17.1 用 **`rsa` crate 的 unprefixed PKCS#1 v1.5** 应答，密钥是凭据目录里的一个固定文件名      | 手机端的 cipher 名是 Java 的 `RSA/ECB/PKCS1Padding`，其输出就是没有摘要前缀的那种块（§3.5）；RSA 不自己写；文件名写死不给配置面；`rsa` 本来就在依赖树里，直接依赖只多 80 KB |
 | D16 | 媒体信息**只发有值可填的字段**，`playlistNum`/`songId`/`mode` 留空不写 0                    | 留空与 0 对车机解析器是同一种空值，但 `mode=0` 是「单曲循环」的实义；前两个没订、第三个 iAP2 没有（§4.6） |
 | D17 | 导航信息**只发有值可填的字段**，`totalDistance`/`time` 留空；`turn_kind` 仅映射语义一致的类型，不近似 | `totalDistance` 与 `time` 没有对应源，填进去会误导； ramps / motorway changes / arrivals 在车机列表里没有对应箭头，近似反而降低可信度（§4.7） |
+| D18 | 封面超过 30 KB 时**在 CarPlay 侧重编码**（`src/artwork.rs`）：长边 400 配 90/80/70/60，再 350、300 配 60，去元数据并按 EXIF 方向转正，输出 baseline + 4:2:0 | 车机是整份替换，丢封面等于面板没图；本来够小的按原字节直传，避免二次压缩；重编码跑在 `carry_artwork` 的独立任务里，不占写流的线程（§4.6） |
 
 ---
 

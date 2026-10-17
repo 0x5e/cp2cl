@@ -39,6 +39,21 @@ symphonia = { version = "0.5", default-features = false, features = ["aac"] }
 # src/carlife/auth.rs.
 rsa = "0.9"
 
+# A cover that will not fit the car's media message is re-encoded before it is
+# sent, and the phone's artwork arrives as JPEG or PNG. Decode with the two zune
+# readers (they share zune-core), encode with jpeg-encoder, which writes baseline
+# 4:2:0 and no metadata. All pure Rust: the board's toolchain needs nothing new.
+# See src/artwork.rs.
+zune-jpeg = "0.5"
+zune-png = "0.5"
+# Both readers take their options from this crate and give back its colour
+# spaces, so it is named here rather than reached for through either of them.
+zune-core = "0.5"
+jpeg-encoder = "0.7"
+# One tag out of the phone's EXIF decides which way up the picture goes, and it
+# has to be applied before the metadata is dropped.
+kamadak-exif = "0.6"
+
 # CarPlay airplay net audio/video is sealed with ChaCha20-Poly1305 and its keys
 # come from an X25519 + Ed25519 handshake (see src/airplay/pairing.rs).
 x25519-dalek = { version = "2", features = ["static_secrets", "getrandom"] }
