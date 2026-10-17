@@ -372,7 +372,7 @@ PCM 与 `102/media` AAC-LC 两条路，手机选的是后者；`info.rs:173-177`
   的那一帧还早」的帧。Wi-Fi 会偶发乱序（本次实测约 0.6 次/s，在日志里表现为 `missing` 以 65536 的整数倍往上
   跳——那是序号倒退，不是丢包），乱序帧直接喂给解器，它自己就会说 `previous window is invalid`
   （symphonia 的 `debug!`；日志里**没有 `[tag]` 前缀**的行都是依赖里的），21 ms 的错位听感上就是一声咔。
-- **判据在日志里**（`CP2CL_LOG=debug`，每 5 秒一行 `[airplay] audio: …`）：
+- **判据在日志里**（`CP2CL_LOG_LEVEL=debug`，每 5 秒一行 `[airplay] audio: …`）：
   - `missing` / `out of order` / `duplicates`：线上的事（丢包 / 乱序 / 重包），累计；
   - `worst gap` / `bursts of N`：到达的块状程度（成块是手机的常态，一批 18 帧 ≈ 384 ms）；
   - `N held`：堆在队列里的帧数——**它必须不涨**，涨就是收得比发得快；
