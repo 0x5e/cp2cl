@@ -21,13 +21,13 @@ fn env_or(key: &str, default: &str) -> String {
     env(key).unwrap_or_else(|| default.to_string())
 }
 
-/// `CP2CL_LOG`, or `info`.
+/// `CP2CL_LOG_LEVEL`, or `info`.
 ///
 /// Read on its own rather than with the rest, because it has to be known before
 /// the config is: a setting that could not be used is reported by a log line,
 /// and that line needs a subscriber to already exist.
 pub fn log_filter() -> String {
-    env_or("CP2CL_LOG", "info")
+    env_or("CP2CL_LOG_LEVEL", "info")
 }
 
 fn env_num<T: std::str::FromStr>(key: &str, default: T) -> T {

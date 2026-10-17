@@ -36,7 +36,7 @@ use crate::sink::{AudioCodec, ClOutlet, MediaSink};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Everything the program prints goes through this, so `CP2CL_LOG` is the
+    // Everything the program prints goes through this, so `CP2CL_LOG_LEVEL` is the
     // only knob for how much of it is shown, and the levels are the usual ones:
     // `error` is something we set out to do and could not, `warn` is something
     // dropped or unexpected that we carried on from, `info` is the life of a
