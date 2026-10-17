@@ -8,8 +8,12 @@
 
 ### 新增
 
-- 桥接手机的正在播放到车机面板：`NowPlayingUpdate` → `MSG_CMD_MEDIA_INFO`；`playlistNum`、`songId`、`mode` 留空，无对应源；一首歌的多次更新合并后延迟发送，`CP2CL_MEDIA_DELAY_MS` 默认 1000 ms、`0` 为立即发送。
+- 桥接手机的正在播放到车机面板：`NowPlayingUpdate` → `MSG_CMD_MEDIA_INFO`；`playlistNum`、`songId`、`mode` 留空，无对应源；一首歌的多次更新合并后延迟发送，`CP2CL_MEDIA_DELAY_MS` 默认 1000 ms、`0` 为立即发送；封面超过 30 KB 不发送。
 - 桥接手机的路线引导到车机简易诱导条：`RouteGuidanceUpdate` / `RouteGuidanceManeuverUpdate` → `MSG_CMD_NAVI_NEXT_TURN_INFO` + `MSG_CMD_MODULE_STATUS`；`totalDistance`、`time` 留空，无对应源；`turn_kind` 仅映射语义一致的类型。
+
+### 修复
+
+- 发送前校验消息是否超过所在通道的 body 上限，超出则告警并丢弃，避免车机端因长度不符断开数据通道。
 
 ## v0.7.0 alpha — 2026-10-16
 
