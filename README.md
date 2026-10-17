@@ -593,17 +593,17 @@ API, and it answers with the same snapshot the page shows:
 
 A field is either a value or `null`, and `null` means the thing it describes has
 not happened yet — a car that has not asked for its six identifiers has six
-`null`s, not six empty strings. Nothing on the page is derived; every value is one
-the program observed, and the ones belonging to a connection are cleared when that
-connection ends, so a page left open shows the present rather than the last
-session.
+`null`s, not six empty strings. Every value is one the program observed, apart from
+the two the page adds itself: the vendor name a channel number maps to, and the
+codec this bridge only ever sends. The fields belonging to a connection are cleared
+when that connection ends, so a page left open shows the present rather than the
+last session.
 
-What is worth reading there is the two ends side by side. The car's
-`VIDEO_ENCODER_INIT` and the phone's `/info` are the same negotiation, and the
-page puts the requested and agreed resolution, the frame rate and the encoder's
-state within a screen of each other. The same is true of the two USB forms the
-device takes, of authentication in both directions, and of the airplay session —
-ports, pairing, encryption, clock offset — against the streams it carries.
+Both sections are short on purpose. What is worth reading there is the two ends
+side by side — the resolution the car agreed to against the one the phone renders,
+the protocol version and channel the car reports against the access method and the
+codecs the phone brought — because that is the question the page answers: whether
+the two halves met. What they said to each other is the log's.
 
 ## Input
 
