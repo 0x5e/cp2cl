@@ -18,7 +18,7 @@ use tokio::sync::{broadcast, watch, Mutex};
 use livi_runtime::AsyncAuth;
 
 use super::audio::{self, AudioReceiver};
-use super::bplist::to_binary;
+use super::bplist::{to_binary, to_json};
 use super::clock::{ntp_diff, SyncedClock};
 use super::crypto::{self, aes_ctr128, open_frames, seal_frames, sha1_all, sha256_all, SymKey};
 use super::event::{pump_events, EventSink};
@@ -819,42 +819,21 @@ impl Session {
         Ok(Response::new(200).plist(plist))
     }
 
-    /// Names what the phone asked for — but only when it is not one of the
-    /// routine ones. Those are answered with a 200 exactly as LIVI answers them,
-    /// so repeating them says nothing; a type we have never seen is news.
+    /// Prints a request body the phone sent, as one line of JSON.
+    ///
+    /// Nothing on `/command` is acted on — it is the phone asking the accessory
+    /// for a UI behaviour — so the body is the whole of what there is to know,
+    /// and every one of them is printed. The per-second requests never reach
+    /// here: `/feedback` is answered before this and OPTIONS carries no body.
     fn describe(what: &str, body: &[u8]) {
-        const ROUTINE: &[&str] = &[
-            "modesChanged",
-            "disableBluetooth",
-            "requestUI",
-            "suggestUI",
-            "duckAudio",
-            "unduckAudio",
-            "iAPSendMessage",
-        ];
-        if body.is_empty() {
-            return;
-        }
-        let Ok(dict) = Self::plist_body(body) else {
-            tracing::warn!(
-                "[airplay] {what}: not a plist ({}B) {}",
+        match Self::plist_body(body) {
+            Ok(dict) => tracing::info!("[airplay] {what} body: {}", to_json(&dict)),
+            Err(e) => tracing::warn!(
+                "[airplay] {what} body: {e} ({}B) {}",
                 body.len(),
                 hex::encode(&body[..body.len().min(24)])
-            );
-            return;
-        };
-        if dict.is_empty() {
-            return;
+            ),
         }
-        // `as_string` hands back a borrowed `&str`, so there is nothing to clone.
-        let kind = dict.get("type").and_then(|v| v.as_string()).unwrap_or("");
-        if ROUTINE.contains(&kind) {
-            return;
-        }
-        tracing::info!(
-            "[airplay] {what}: type {kind:?}, keys {:?}",
-            dict.keys().collect::<Vec<_>>()
-        );
     }
 
     /// Closes the streams the phone names. It names them by type, and it opens
@@ -862,15 +841,15 @@ impl Session {
     /// normal use — leaving it as a no-op leaked a port, a socket and a task
     /// per song, and kept `/feedback` reporting a stream that was already gone.
     async fn teardown(&mut self, req: &Request) {
-        let dict = Self::plist_body(&req.body);
-        let named = match &dict {
-            Ok(d) if !d.is_empty() => {
-                tracing::info!("[airplay] TEARDOWN body: {d:?}");
-                d.get("streams").and_then(|v| v.as_array())
+        let named = match Self::plist_body(&req.body) {
+            Ok(dict) => {
+                tracing::info!("[airplay] TEARDOWN body: {}", to_json(&dict));
+                dict.get("streams").and_then(|v| v.as_array()).cloned()
             }
-            _ => {
+            Err(e) => {
                 tracing::warn!(
-                    "[airplay] TEARDOWN body (not a plist): {}",
+                    "[airplay] TEARDOWN body: {e} ({}B) {}",
+                    req.body.len(),
                     hex::encode(&req.body[..req.body.len().min(48)])
                 );
                 None
@@ -1035,8 +1014,9 @@ impl Session {
 
     async fn setup(&mut self, req: &Request) -> Result<Response, String> {
         let dict = Self::plist_body(&req.body)?;
-        let keys: Vec<&String> = dict.keys().collect();
-        tracing::info!("[airplay] SETUP keys: {keys:?}");
+        // The whole body and nothing else: the keys were a table of contents for
+        // a body nobody could see, and the body is short enough to print.
+        tracing::info!("[airplay] SETUP body: {}", to_json(&dict));
         let has_streams = dict
             .get("streams")
             .and_then(|v| v.as_array())
