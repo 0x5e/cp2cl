@@ -190,7 +190,6 @@ Nothing sets it at the moment, so the car's own pixels are asked for as they are
 | `CP2CL_WIRELESS` | off | take CarPlay over Wi-Fi instead of USB |
 | `CP2CL_WIFI_IFACE` | `wlan0` | the interface the access point runs on |
 | `CP2CL_BT_ADAPTER` | `hci0` | which Bluetooth adapter |
-| `CP2CL_MEDIA_DELAY_MS` | `1000` | how long the phone has to finish describing a song before the panel is told; `0` sends every update at once |
 | `CP2CL_INPUT_FILE` | — | test video stream file |
 
 On the board every one of these is an environment variable of the process: the

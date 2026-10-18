@@ -18,6 +18,9 @@
   .weui-cell_block .weui-cell__bd{padding-right:0}
   .weui-cell_block .weui-cell__ft{text-align:left;margin-top:6px;font-size:13px;opacity:.75}
   .line{padding:2px 0}
+  /* 封面与字段名同一行：字段名贴顶，图靠右，行高由图决定。 */
+  .weui-cell_cover{align-items:flex-start}
+  .cover{display:block;max-width:100%;max-height:200px;border-radius:6px;margin:2px 0 0 auto}
   .v-ok{color:#07c160}
   .v-warn{color:#fa9d3b}
   .v-bad{color:#fa5151}
@@ -30,6 +33,8 @@
   <div class="weui-cells" id="carlife"></div>
   <div class="weui-cells__title">CarPlay 连接 · 手机端</div>
   <div class="weui-cells" id="carplay"></div>
+  <div class="weui-cells__title" id="playing-title">正在播放</div>
+  <div class="weui-cells" id="playing"></div>
   <p class="stamp" id="stamp">正在读取…</p>
 </div>
 <script>
@@ -48,6 +53,12 @@ function size(s) {
 }
 function pair(a, b) {
   return a === null || a === undefined ? null : (b === null || b === undefined ? String(a) : a + " / " + b);
+}
+/* 秒数写成「分:秒」。车机面板上就是这么显示的，这里也照这个形状。 */
+function clock(seconds) {
+  if (seconds === null || seconds === undefined) return null;
+  const total = Math.max(0, Math.round(Number(seconds)));
+  return Math.floor(total / 60) + ":" + String(total % 60).padStart(2, "0");
 }
 
 /* 渠道号 → 厂商名映射（来自逆向报告 CARLIFE_AUTH.md §2.4）。
@@ -101,6 +112,9 @@ function channelLabel(raw) {
 const CARLIFE_UP = d => d.session_up === true;
 const CARPLAY_UP = d => !!(d.airplay && d.airplay.peer);
 
+/* 正在播放是两端的合流：一边断了，这一栏说的就不再是眼下的事，索性不显示。 */
+const BOTH_UP = d => CARLIFE_UP(d.carlife) && CARPLAY_UP(d.carplay);
+
 /* 一行：标签、取值、状态（ok / warn / bad，决定右侧颜色）。
    第一行是会话状态，也是这一栏的开关，所以它自己不受开关约束。 */
 const CARLIFE_ROWS = [
@@ -131,6 +145,17 @@ const CARPLAY_ROWS = [
 ];
 
 const CARPLAY_BLOCKS = [];
+
+/* 正在播放：车机面板上的那首歌，也就是我们发给它的那一条。
+   这一栏没有自己的「会话状态」——没有歌的时候每条都是「—」。
+   封面单独取，URL 带着封面的名字（内容的哈希），换了封面才重新下载。 */
+const PLAYING_ROWS = [
+  ["来源", d => d.source],
+  ["歌曲", d => d.song],
+  ["艺人 / 歌手", d => d.artist],
+  ["专辑", d => d.album],
+  ["时长", d => clock(d.duration_s)],
+];
 
 /* 一个单元格：标签在左，取值在右；取值多行时改为上下排布。 */
 function cell(label, value, tone, block) {
@@ -178,9 +203,73 @@ function fill(host, rows, blocks, data, up) {
   }
 }
 
+/* 这一栏只在内容变了的时候重画：每两秒重建一次 <img> 会让封面闪，
+   也会让浏览器重新解一次那张图。 */
+let playingKey = "";
+let coverShown = null;
+let coverImg = null;
+
+function renderPlaying(playing) {
+  if (!playing) return;
+  const key = [playing.source, playing.song, playing.artist, playing.album,
+               playing.duration_s, playing.cover ? playing.cover.id : ""].join("\u0000");
+  if (key === playingKey) return;
+  playingKey = key;
+
+  const host = document.getElementById("playing");
+  host.textContent = "";
+  for (const [label, value] of PLAYING_ROWS) {
+    host.appendChild(cell(label, value(playing), null, false));
+  }
+  host.appendChild(coverCell(playing.cover));
+}
+
+/* 封面和其余几行同形：标签在左、图在右，标签贴顶而不是随图居中。 */
+function coverCell(cover) {
+  const row = document.createElement("div");
+  row.className = "weui-cell weui-cell_cover";
+
+  const bd = document.createElement("div");
+  bd.className = "weui-cell__bd";
+  const label = document.createElement("p");
+  label.textContent = "封面";
+  bd.appendChild(label);
+
+  const ft = document.createElement("div");
+  ft.className = "weui-cell__ft";
+  if (!cover) {
+    ft.textContent = NONE;
+    ft.classList.add("none");
+  } else {
+    if (!coverImg) {
+      coverImg = document.createElement("img");
+      coverImg.className = "cover";
+      coverImg.alt = "封面";
+    }
+    /* 同一张图不重新取：名字是这张图内容的哈希，名字没变就是同一张。
+       没有名字就不取——后端只认名字，取回来也只会是一张对不上号的图。 */
+    if (cover.id && coverShown !== cover.id) {
+      coverShown = cover.id;
+      coverImg.src = "/api/cover?id=" + encodeURIComponent(cover.id);
+    }
+    ft.appendChild(coverImg);
+  }
+
+  row.appendChild(bd);
+  row.appendChild(ft);
+  return row;
+}
+
 function render(data) {
   fill(document.getElementById("carlife"), CARLIFE_ROWS, CARLIFE_BLOCKS, data.carlife, CARLIFE_UP(data.carlife));
   fill(document.getElementById("carplay"), CARPLAY_ROWS, CARPLAY_BLOCKS, data.carplay, CARPLAY_UP(data.carplay));
+
+  /* 只有两端都连着才显示这一栏，标题一起收起来。 */
+  const both = BOTH_UP(data);
+  for (const id of ["playing-title", "playing"]) {
+    document.getElementById(id).style.display = both ? "" : "none";
+  }
+  renderPlaying(data.now_playing);
 }
 
 const stamp = document.getElementById("stamp");

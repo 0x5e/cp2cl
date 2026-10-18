@@ -17,7 +17,7 @@
 //! The shape of the snapshot is the page's contract, and it is written down once
 //! — in `Snapshot::json` — rather than in three places that have to agree.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
@@ -58,6 +58,37 @@ impl Status {
         snapshot.json()
     }
 
+    /// The cover the car was last given, for the page to draw.
+    ///
+    /// Handed over whole, with the name it is served under, because the two
+    /// belong together: the page asks for a cover by that name and the answer
+    /// has to be the same picture. The bytes are an `Arc`, so the caller copies
+    /// them outside the lock — it is the one thing here that is not a few
+    /// assignments.
+    pub fn cover(&self) -> Option<Cover> {
+        let snapshot = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        snapshot.now_playing.cover.clone()
+    }
+
+    /// Reports the cover that has just gone to the car.
+    ///
+    /// An empty one is not a picture but the phone saying this song has none,
+    /// and it puts the last one down: the page shows nothing rather than the
+    /// cover of a song that has finished.
+    pub fn cover_changed(&self, bytes: Vec<u8>) {
+        let cover = (!bytes.is_empty()).then(|| Cover {
+            id: cover_id(&bytes),
+            bytes: Arc::new(bytes),
+        });
+        self.with(|s| s.now_playing.cover = cover);
+    }
+
+    /// Reports that there is no song any more, which is what a new session
+    /// starts with.
+    pub fn now_playing_cleared(&self) {
+        self.with(|s| s.now_playing = NowPlaying::default());
+    }
+
     /// Reports that the phone's connection to the airplay receiver is gone.
     ///
     /// Everything about the connection goes with it. The fields are cleared
@@ -92,6 +123,52 @@ pub struct Snapshot {
     pub carlife: Carlife,
     /// The phone's half: an iPhone talking iAP2 and AirPlay to us.
     pub carplay: Carplay,
+    /// What the two halves agree on: the song the phone is playing, which is
+    /// the one thing here that belongs to neither end. It is what the car's
+    /// panel is showing, so it is also the only part of this a person sitting
+    /// in the car can see for themselves.
+    pub now_playing: NowPlaying,
+}
+
+/// The song on the car's panel.
+#[derive(Debug, Clone, Default)]
+pub struct NowPlaying {
+    /// The app it is playing from, which the car shows as the song's source.
+    pub source: Option<String>,
+    pub song: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    /// Seconds, as `Track` has it. The page writes it as minutes and seconds.
+    pub duration_s: Option<i32>,
+    /// The cover exactly as it went to the car, which is the only picture the
+    /// panel can be showing. Kept when a song changes without one, because
+    /// that is what the car does with it too.
+    pub cover: Option<Cover>,
+}
+
+/// A picture, and the name the page asks for it by.
+#[derive(Debug, Clone)]
+pub struct Cover {
+    /// The bytes, exactly as the car was given them.
+    pub bytes: Arc<Vec<u8>>,
+    /// A hash of those bytes, which is what the page puts in its request.
+    pub id: u64,
+}
+
+/// A name for a picture, from the picture.
+///
+/// A hash rather than a counter: the page keeps what it has fetched and asks
+/// again only when the name changes, so the same cover under two songs should
+/// cost one request — and a name that came round again would show a picture
+/// belonging to a song that has finished. FNV-1a over the bytes, which is small
+/// enough to carry in this file and good enough to name a JPEG.
+fn cover_id(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 // ---------------------------------------------------------------- carlife ---
@@ -361,6 +438,25 @@ impl Snapshot {
         json!({
             "carlife": self.carlife.json(),
             "carplay": self.carplay.json(),
+            "now_playing": self.now_playing.json(),
+        })
+    }
+}
+
+impl NowPlaying {
+    fn json(&self) -> Value {
+        json!({
+            "source": self.source,
+            "song": self.song,
+            "artist": self.artist,
+            "album": self.album,
+            "duration_s": self.duration_s,
+            // The bytes are not in the answer: the page fetches the picture
+            // from its own path, and this is what it asks for it by.
+            "cover": self.cover.as_ref().map(|cover| json!({
+                "id": format!("{:016x}", cover.id),
+                "bytes": cover.bytes.len(),
+            })),
         })
     }
 }
