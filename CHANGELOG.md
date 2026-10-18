@@ -9,6 +9,9 @@
 ### 新增
 
 - 状态页：80 端口提供单页，分「CarLife 连接」与「CarPlay 连接」两段，每 2 秒轮询 `GET /api/status` 重绘；页面与 WeUI 样式表内置进二进制，不依赖外部文件、CDN 或环境变量（`7512259`）。
+- 桥接手机的正在播放到车机面板：`NowPlayingUpdate` → `MSG_CMD_MEDIA_INFO`，每条更新即时发送；`playlistNum`、`songId`、`mode` 留空，无对应源。封面随歌曲走：带时长的更新即清空，只改标题的不清除；大小为 0 的封面视为这首歌没有封面，消息里不写 `albumArt`；超过 30 KB 时先重编码（baseline JPEG、4:2:0、去元数据），仍放不下才不发（`2e8d4db`）。
+- 状态页新增「正在播放」一节：来源、歌曲、艺人、专辑、时长（分:秒）与封面，仅在车机与手机两端都连接时显示；封面由 `GET /api/cover?id=<哈希>` 单独取，只回答当前那张，新的 CarLife 会话开始时清空（`2e8d4db`）。
+- 桥接手机的路线引导到车机简易诱导条：`RouteGuidanceUpdate` / `RouteGuidanceManeuverUpdate` → `MSG_CMD_NAVI_NEXT_TURN_INFO` + `MSG_CMD_MODULE_STATUS`；`totalDistance`、`time` 留空，无对应源；`turn_kind` 仅映射语义一致的类型（`2e8d4db`）。
 
 ### 变更
 
@@ -20,6 +23,11 @@
 - 状态页的视频编码格式不再由页面写死，改由后端返回，常量定义在 `airplay::screen::CODEC`。
 - 状态页的物理尺寸由车机协商的分辨率与 `CP2CL_PPI` 算出，并挪到车机端的「分辨率」之后。
 - 链路同步参数里的单包上限由 65535 字节改为 4096 字节，对端据此分片。
+- 媒体信息的日志两端都在 `debug`：CarPlay 侧每收到一条 `NowPlayingUpdate` 记一条（只列该条带了的字段，一个都不带的不记），解不出的记 `warn`；CarLife 侧每发出一条记一条，`cover` 记大小（kB）（`2e8d4db`）。
+
+### 修复
+
+- 发送前校验消息是否超过所在通道的 body 上限，超出则告警并丢弃，避免车机端因长度不符断开数据通道（`2e8d4db`）。
 
 ## v0.7.0 alpha — 2026-10-16
 
