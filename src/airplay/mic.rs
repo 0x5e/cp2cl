@@ -13,7 +13,7 @@
 //!
 //! Nothing captures anything yet, so the half that takes a captured payload and
 //! sends it is the one the `dead_code` allowances below are for: the microphone
-//! will be the CarLife side's. See `PLAN-CL.md` §4.4.
+//! will be the CarLife side's.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

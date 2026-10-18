@@ -19,7 +19,7 @@
 //! Baidu hands out, and the car is told the verdict — see `channel_is_legal`.
 //!
 //! Both are in the guide's §17. The channel rule is not: it was read out of the
-//! app itself, and the report it came from is cited in `PLAN-CL.md` §3.5.
+//! app itself.
 
 use std::fs;
 use std::path::Path;
@@ -192,9 +192,8 @@ fn version_of(text: &str) -> Option<[u32; 3]> {
 /// leading 2, and not either of the two numbers that stand for "no particular
 /// car" — `20000000` for the aftermarket and `20000001` for a pre-installed app,
 /// which its own table marks as invalid. There is no list of approved numbers
-/// anywhere, which is what makes this cheap to satisfy and what `PLAN-CL.md`
-/// §3.5 is about: any other `2xxxxxxx` is accepted, whether or not it appears in
-/// the table of 64 the app ships with.
+/// anywhere, which is what makes this cheap to satisfy: any other `2xxxxxxx` is
+/// accepted, whether or not it appears in the table of 64 the app ships with.
 ///
 /// One channel needs more than this and gets it anyway. `20062100` (Daimler) is
 /// the only one whose app also compares its own package signature with Baidu's,

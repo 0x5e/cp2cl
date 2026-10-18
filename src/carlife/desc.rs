@@ -20,7 +20,7 @@ const HAS_HS_DESC: u32 = 2;
 const ALL_CTRL_RECIP: u32 = 64;
 
 /// The interface's own form: class `ff`/`ff`/`00`, which is what both a head
-/// unit and the reference implementation look for. See `PLAN-CL.md`.
+/// unit and the reference implementation look for.
 const INTERFACE_CLASS: [u8; 3] = [0xff, 0xff, 0x00];
 
 /// Placeholder endpoint addresses. FunctionFS hands both to the controller's own

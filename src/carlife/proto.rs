@@ -254,8 +254,7 @@ pub fn frame_rate(rate: i32) -> Vec<u8> {
 /// way: `channelConfig` is the channel count, with 1 mono and 2 stereo; and
 /// `sampleFormat` is the width of a sample in bits, with 8 meaning 8-bit and
 /// anything else meaning 16 — which is why the width is written down rather than
-/// a code. Both readings are still unconfirmed against a real car; see
-/// `PLAN-CL.md` §5.
+/// a code. Both readings are still unconfirmed against a real car.
 pub fn media_init(rate: u32, channels: u16) -> Vec<u8> {
     let mut out = Vec::new();
     put_int(&mut out, 1, rate as i32);

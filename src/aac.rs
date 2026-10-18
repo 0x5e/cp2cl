@@ -4,7 +4,7 @@
 //! codec has to be decoded somewhere between the two. This is that place, and
 //! it is the only place in the program where a stream is decoded rather than
 //! forwarded — which also makes it the only cost that is set by the phone's
-//! encoder rather than by the wire. See `PLAN-CL.md` §4.2.
+//! encoder rather than by the wire.
 //!
 //! The frames are the codec's own, with no ADTS header: what the phone put in
 //! each packet is what `airplay::audio` hands over, so the format is told to

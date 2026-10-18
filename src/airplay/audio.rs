@@ -23,7 +23,7 @@
 //! is the one stream in the program that is decoded rather than forwarded; see
 //! `aac`. Opus is left alone: it is what the two low-bandwidth voice streams
 //! use, they belong to the car's own voice channels, and there is no decoder for
-//! it here. See `PLAN-CL.md` §4.2.
+//! it here.
 
 use super::crypto::{open, SymKey};
 use crate::aac;
