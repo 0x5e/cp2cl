@@ -28,12 +28,13 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use super::{auth, frame, proto};
-use crate::airplay::{EventSink, ScreenParams};
+use crate::airplay::{info, EventSink, ScreenParams};
 use crate::commands::{Command, TouchContact, PHONE_DROP, PHONE_HOOK_SWITCH, PHONE_MUTE};
 use crate::config::Config;
 use crate::navigation::{turn_kind, Guidance};
 use crate::playing::{Playing, Track};
 use crate::sink::{ClOutlet, Media};
+use crate::web::{Size, Statistic, Status};
 
 // What the car sends, by name — the numbers are CarLifeVehicleLib's
 // `EPackageHeadType`.
@@ -271,6 +272,7 @@ pub async fn run<S, F>(
     screen: ScreenReport<'_>,
     events: Arc<EventSink>,
     carplay: &mut F,
+    status: Arc<Status>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
@@ -361,6 +363,7 @@ where
         next_tick: Instant::now(),
         up: false,
         last_touch: None,
+        status,
     };
 
     let outcome = loop {
@@ -470,6 +473,13 @@ where
         carplay(false);
         tracing::info!("[cl] the session is over; the CarPlay side goes with it");
     }
+    // A session that has ended is not one that is running, and the page has to
+    // say so: an encoder left "running" after the car has gone is the one thing
+    // on it that would be actively wrong rather than merely stale.
+    session.status.with(|s| {
+        s.carlife.session_up = false;
+        s.carlife.encoding = false;
+    });
     outcome
 }
 
@@ -623,6 +633,9 @@ struct Session<'a, W> {
     /// Where the finger was the last time the car said. A release has to name it
     /// — see `touch`.
     last_touch: Option<(u16, u16)>,
+    /// Where the status page reads this session from. Reported to and never
+    /// read back: see `crate::web::status`.
+    status: Arc<Status>,
 }
 
 impl<W: AsyncWrite + Unpin> Session<'_, W> {
@@ -648,6 +661,8 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             HU_PROTOCOL_VERSION => {
                 let (major, minor) = proto::decode_protocol_version(&message.body);
                 tracing::info!("[cl] the car speaks CarLife {major}.{minor}");
+                self.status
+                    .with(|s| s.carlife.protocol = Some((major, minor)));
                 let body = proto::protocol_version_match_status(proto::MATCH);
                 self.send(MATCH_STATUS, &body).await?;
             }
@@ -663,6 +678,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 self.send(MD_INFO, &body).await?;
                 if !self.up {
                     self.up = true;
+                    self.status.with(|s| s.carlife.session_up = true);
                     tracing::info!("[cl] the car has our device information; the session is up");
                     carplay(true);
                 }
@@ -682,6 +698,17 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     info.connect_success_count,
                     info.connect_time
                 );
+                self.status.with(|s| {
+                    s.carlife.statistic = Some(Statistic {
+                        cuid: info.cuid.to_string(),
+                        version_name: info.version_name.to_string(),
+                        version_code: info.version_code,
+                        channel: info.channel.to_string(),
+                        connect_count: info.connect_count,
+                        connect_success_count: info.connect_success_count,
+                        connect_time: info.connect_time,
+                    });
+                });
                 // The other half of the authentication: the car's channel number
                 // is what the phone judges it by, and the judgement is what this
                 // message answers with. A verdict either way is sent — the car is
@@ -693,9 +720,11 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 self.send(FEATURE_CONFIG_REQUEST, &[]).await?;
             }
             HU_FEATURE_CONFIG_RESPONSE => {
-                for (key, value) in proto::decode_feature_configs(&message.body) {
+                let configs = proto::decode_feature_configs(&message.body);
+                for (key, value) in &configs {
                     tracing::info!("[cl] the car set {key} = {value}");
                 }
+                self.status.with(|s| s.carlife.features = configs);
             }
             HU_AUTHEN_REQUEST => {
                 let challenge = proto::decode_authen_request(&message.body).unwrap_or_default();
@@ -706,6 +735,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // liked the answer. Nothing is owed back: the phone's verdict is
                 // about the car and was sent with the statistics above.
                 let passed = proto::decode_authen_result(&message.body).unwrap_or(false);
+                self.status.with(|s| s.carlife.accepted = Some(passed));
                 if passed {
                     tracing::info!("[cl] the car accepted us");
                 } else {
@@ -746,6 +776,28 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     agreed.frame_rate
                 );
                 self.agreed = Some(agreed);
+                // The panel is the car's, so its physical size is worked out
+                // here, from the size it just named and the one density there
+                // is: `CP2CL_PPI`. Nothing in the protocol carries a size.
+                let ppi = self.cfg.ppi;
+                let physical = (
+                    info::millimetres(agreed.width as u32, ppi),
+                    info::millimetres(agreed.height as u32, ppi),
+                );
+                self.status.with(|s| {
+                    s.carlife.requested = Some(Size {
+                        width: asked.width,
+                        height: asked.height,
+                        fps: asked.frame_rate,
+                    });
+                    s.carlife.agreed = Some(Size {
+                        width: agreed.width,
+                        height: agreed.height,
+                        fps: agreed.frame_rate,
+                    });
+                    s.carlife.physical = Some(physical);
+                    s.carlife.frame_rate = Some(agreed.frame_rate);
+                });
                 let body = proto::video_encoder_info(agreed);
                 self.send(VIDEO_ENCODER_INIT_DONE, &body).await?;
                 // The car has just said what its screen is, and that is what the
@@ -760,6 +812,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 tracing::info!("[cl] the car started the encoder; video begins");
                 let now = Instant::now();
                 self.started_at = Some(now);
+                self.status.with(|s| s.carlife.encoding = true);
                 // The start itself is what the car hears next, so the first
                 // heartbeat is only owed if no picture arrives within a period.
                 self.channel_touched = Some(now);
@@ -768,6 +821,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             HU_VIDEO_ENCODER_PAUSE | HU_VIDEO_ENCODER_RESET => {
                 tracing::info!("[cl] the car stopped the encoder");
                 self.started_at = None;
+                self.status.with(|s| s.carlife.encoding = false);
             }
             HU_VIDEO_ENCODER_FRAME_RATE_CHANGE => {
                 let asked = proto::decode_frame_rate(&message.body).unwrap_or(0);
@@ -779,6 +833,12 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 if let Some(agreed) = self.agreed.as_mut() {
                     agreed.frame_rate = accepted;
                 }
+                self.status.with(|s| {
+                    if let Some(agreed) = s.carlife.agreed.as_mut() {
+                        agreed.fps = accepted;
+                    }
+                    s.carlife.frame_rate = Some(accepted);
+                });
                 let body = proto::frame_rate(accepted);
                 self.send(VIDEO_ENCODER_FRAME_RATE_CHANGE_DONE, &body)
                     .await?;
@@ -825,6 +885,8 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 self.publish_hud().await?;
             }
             HU_ERROR_CODE => {
+                self.status
+                    .with(|s| s.carlife.error_bytes = Some(message.body.len()));
                 tracing::warn!(
                     "[cl] the car reported an error, {} bytes of it",
                     message.body.len()
@@ -843,6 +905,12 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     /// lied to. The car does not get to hear about the failure either way; it
     /// works it out for itself, and says so with `HU_AUTHEN_RESULT`.
     async fn answer(&mut self, challenge: &str) -> Result<()> {
+        // Reported before it is attempted, so that a challenge nothing can
+        // answer shows up as asked-and-unanswered rather than as never asked.
+        self.status.with(|s| {
+            s.carlife.challenge = Some(challenge.to_string());
+            s.carlife.challenge_answered = Some(false);
+        });
         let Some(key) = self.auth.as_ref() else {
             tracing::warn!(
                 "[cl] the car asked us to authenticate and there is no key to answer it with; \
@@ -857,6 +925,8 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             "[cl] the car's challenge {challenge:?} is answered; {} characters went out",
             value.len()
         );
+        self.status
+            .with(|s| s.carlife.challenge_answered = Some(true));
         let body = proto::authen_response(&value);
         self.send(MD_AUTHEN_RESPONSE, &body).await
     }
@@ -872,6 +942,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     /// thing a real phone would be telling it.
     async fn judge(&mut self, channel: &str) -> Result<()> {
         let legal = auth::channel_is_legal(channel);
+        self.status.with(|s| s.carlife.channel_legal = Some(legal));
         if legal {
             tracing::info!("[cl] the car's channel {channel:?} is one a phone serves");
         } else {
@@ -1047,6 +1118,8 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 }
                 tracing::info!("[cl] the media channel carries PCM at {rate} Hz, {channels}ch");
                 self.media_format = Some((rate, channels));
+                self.status
+                    .with(|s| s.carlife.media = Some((rate, channels)));
                 let body = proto::media_init(rate, channels);
                 self.send(MEDIA_INIT, &body).await
             }
@@ -1448,6 +1521,7 @@ mod tests {
             &mut |_, _, _| {},
             EventSink::new(),
             &mut carplay,
+            Arc::new(Status::new()),
         )
         .await
         .expect("the session ends cleanly");
@@ -1526,9 +1600,17 @@ mod tests {
                 .expect("the car's check passes");
         });
 
-        run(device, &Frames::None, &cfg, &mut |_, _, _| {}, EventSink::new(), &mut carplay)
-            .await
-            .expect("the session ends cleanly");
+        run(
+            device,
+            &Frames::None,
+            &cfg,
+            &mut |_, _, _| {},
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+        .expect("the session ends cleanly");
         car.await.unwrap();
     }
 
@@ -1548,9 +1630,17 @@ mod tests {
             // Dropping the pipe is the car going away.
         });
 
-        run(device, &Frames::None, &cfg, &mut |_, _, _| {}, EventSink::new(), &mut carplay)
-            .await
-            .expect("the session ends cleanly");
+        run(
+            device,
+            &Frames::None,
+            &cfg,
+            &mut |_, _, _| {},
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+        .expect("the session ends cleanly");
         car.await.unwrap();
 
         assert_eq!(*switches.lock().unwrap(), vec![true, false]);
@@ -1581,9 +1671,17 @@ mod tests {
         let mut screen = move |width: u32, height: u32, fps: u32| {
             seen.lock().unwrap().push((width, height, fps));
         };
-        run(device, &Frames::None, &cfg, &mut screen, EventSink::new(), &mut carplay)
-            .await
-            .expect("the session ends cleanly");
+        run(
+            device,
+            &Frames::None,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+        .expect("the session ends cleanly");
         car.await.unwrap();
 
         assert_eq!(*screens.lock().unwrap(), vec![(1920, 480, 24)]);
@@ -1610,9 +1708,17 @@ mod tests {
             .await;
         });
 
-        run(device, &Frames::None, &cfg, &mut screen, EventSink::new(), &mut carplay)
-            .await
-            .expect("the session ends cleanly");
+        run(
+            device,
+            &Frames::None,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+        .expect("the session ends cleanly");
         car.await.unwrap();
     }
 
@@ -1701,9 +1807,17 @@ mod tests {
             car.expect(MEDIA_STOP).await;
         });
 
-        run(device, &frames, &cfg, &mut screen, EventSink::new(), &mut carplay)
-            .await
-            .expect("the session ends cleanly");
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+        .expect("the session ends cleanly");
         car.await.unwrap();
     }
 
@@ -1786,8 +1900,16 @@ mod tests {
             car.expect_silence(Duration::from_millis(300)).await;
         });
 
-        run(device, &frames, &cfg, &mut screen, EventSink::new(), &mut carplay)
-            .await
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
             .expect("the session ends cleanly");
         car.await.unwrap();
     }
@@ -1833,8 +1955,16 @@ mod tests {
             );
         });
 
-        run(device, &frames, &cfg, &mut screen, EventSink::new(), &mut carplay)
-            .await
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
             .expect("the session ends cleanly");
         car.await.unwrap();
     }
@@ -1907,8 +2037,16 @@ mod tests {
             );
         });
 
-        run(device, &frames, &cfg, &mut screen, EventSink::new(), &mut carplay)
-            .await
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
             .expect("the session ends cleanly");
         car.await.unwrap();
     }
@@ -1957,8 +2095,16 @@ mod tests {
             );
         });
 
-        run(device, &frames, &cfg, &mut screen, EventSink::new(), &mut carplay)
-            .await
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
             .expect("the session ends cleanly");
         car.await.unwrap();
     }
@@ -2018,8 +2164,16 @@ mod tests {
             );
         });
 
-        run(device, &frames, &cfg, &mut screen, EventSink::new(), &mut carplay)
-            .await
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
             .expect("the session ends cleanly");
         car.await.unwrap();
     }
@@ -2074,8 +2228,16 @@ mod tests {
             );
         });
 
-        run(device, &frames, &cfg, &mut screen, EventSink::new(), &mut carplay)
-            .await
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
             .expect("the session ends cleanly");
         car.await.unwrap();
     }
@@ -2116,8 +2278,16 @@ mod tests {
             assert_eq!(covered.body, proto::media_info(&track, Some(&fits)));
         });
 
-        run(device, &frames, &cfg, &mut screen, EventSink::new(), &mut carplay)
-            .await
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
             .expect("the session ends cleanly");
         car.await.unwrap();
     }
@@ -2171,8 +2341,16 @@ mod tests {
             assert_eq!(sound.timestamp_ms, Some(1_100));
         });
 
-        run(device, &frames, &cfg, &mut screen, EventSink::new(), &mut carplay)
-            .await
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
             .expect("the session ends cleanly");
         car.await.unwrap();
     }
@@ -2256,8 +2434,16 @@ mod tests {
             );
         });
 
-        run(device, &frames, &cfg, &mut screen, EventSink::new(), &mut carplay)
-            .await
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
             .expect("the session ends cleanly");
         car.await.unwrap();
     }
@@ -2312,8 +2498,16 @@ mod tests {
             car.expect_silence(Duration::from_millis(300)).await;
         });
 
-        run(device, &frames, &cfg, &mut screen, EventSink::new(), &mut carplay)
-            .await
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
             .expect("the session ends cleanly");
         car.await.unwrap();
     }
@@ -2346,9 +2540,17 @@ mod tests {
             assert_eq!(answer.body, proto::data_subscribe_done(&[(7, false)]));
         });
 
-        run(device, &Frames::None, &cfg, &mut |_, _, _| {}, EventSink::new(), &mut carplay)
-            .await
-            .expect("the session ends cleanly");
+        run(
+            device,
+            &Frames::None,
+            &cfg,
+            &mut |_, _, _| {},
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+        .expect("the session ends cleanly");
         car.await.unwrap();
     }
 
@@ -2390,8 +2592,16 @@ mod tests {
             );
         });
 
-        run(device, &frames, &cfg, &mut screen, EventSink::new(), &mut carplay)
-            .await
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
             .expect("the session ends cleanly");
         car.await.unwrap();
     }
@@ -2434,8 +2644,16 @@ mod tests {
             car.expect_silence(Duration::from_millis(300)).await;
         });
 
-        run(device, &frames, &cfg, &mut screen, EventSink::new(), &mut carplay)
-            .await
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
             .expect("the session ends cleanly");
         car.await.unwrap();
     }
@@ -2465,9 +2683,17 @@ mod tests {
             vec![0x00, 0x00, 0x00, 0x01, 0x65],
             vec![0x00, 0x00, 0x00, 0x01, 0x41],
         ]);
-        run(device, &frames, &cfg, &mut |_, _, _| {}, EventSink::new(), &mut carplay)
-            .await
-            .expect("the session ends cleanly");
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut |_, _, _| {},
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+        .expect("the session ends cleanly");
         car.await.unwrap();
     }
 
@@ -2520,9 +2746,17 @@ mod tests {
         });
 
         let frames = Frames::Cycle(vec![vec![0x00, 0x00, 0x00, 0x01, 0x65]]);
-        run(device, &frames, &cfg, &mut |_, _, _| {}, EventSink::new(), &mut carplay)
-            .await
-            .expect("the session ends cleanly");
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut |_, _, _| {},
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+        .expect("the session ends cleanly");
         car.await.unwrap();
     }
 
@@ -2547,9 +2781,17 @@ mod tests {
             car.expect_silence(Duration::from_millis(500)).await;
         });
 
-        run(device, &Frames::None, &cfg, &mut |_, _, _| {}, EventSink::new(), &mut carplay)
-            .await
-            .expect("the session ends cleanly");
+        run(
+            device,
+            &Frames::None,
+            &cfg,
+            &mut |_, _, _| {},
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+        .expect("the session ends cleanly");
         car.await.unwrap();
     }
 
@@ -2585,9 +2827,17 @@ mod tests {
             });
         });
 
-        run(device, &frames, &cfg, &mut |_, _, _| {}, EventSink::new(), &mut carplay)
-            .await
-            .expect("the session ends cleanly");
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut |_, _, _| {},
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+        .expect("the session ends cleanly");
         car.await.unwrap();
         pushing.await.unwrap();
     }
@@ -2606,9 +2856,17 @@ mod tests {
             // Dropping the pipe is the car going away.
         });
 
-        run(device, &frames, &cfg, &mut |_, _, _| {}, EventSink::new(), &mut carplay)
-            .await
-            .expect("the session ends cleanly");
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut |_, _, _| {},
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+        .expect("the session ends cleanly");
         car.await.unwrap();
 
         // The next session after the car is plugged back in gets receivers that
@@ -2643,9 +2901,17 @@ mod tests {
             car.expect_silence(Duration::from_millis(300)).await;
         });
 
-        run(device, &Frames::None, &cfg, &mut |_, _, _| {}, EventSink::new(), &mut carplay)
-            .await
-            .expect("the session ends cleanly");
+        run(
+            device,
+            &Frames::None,
+            &cfg,
+            &mut |_, _, _| {},
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+        .expect("the session ends cleanly");
         car.await.unwrap();
     }
 

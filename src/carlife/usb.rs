@@ -235,6 +235,13 @@ impl Usb {
         self.root.join("functions").join(function_name())
     }
 
+    /// The controller the gadget is bound to, as the kernel names it. Reported
+    /// rather than acted on: it is the one thing about the device that comes
+    /// from the board rather than from this program.
+    pub fn controller(&self) -> &str {
+        &self.controller
+    }
+
     /// Takes down whatever is at this gadget's name, and any mount of the
     /// instance it may have left behind.
     ///

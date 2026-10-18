@@ -26,6 +26,12 @@ use std::sync::Arc;
 
 pub const HEADER_LEN: usize = 128;
 
+/// The one coding this receiver reads. `parse_video_config` understands an avcC
+/// record and nothing else, and CarLife's head units decode `video/avc`, so the
+/// name is a property of this side rather than of any one session. It is written
+/// once here and read from here by the log line and the status page.
+pub const CODEC: &str = "H.264";
+
 /// Everything unpacking one TCP connection needs.
 pub struct VideoReceiver {
     key: SymKey,

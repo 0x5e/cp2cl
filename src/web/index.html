@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>cp2cl 状态</title>
+<link rel="stylesheet" href="/vendor/weui.min.css">
+<style>
+  .page{padding:4px 0 calc(28px + env(safe-area-inset-bottom))}
+  .weui-cells__title{margin-top:22px}
+  .weui-cells__title:first-child{margin-top:14px}
+  .weui-cell{padding-top:11px;padding-bottom:11px}
+  .weui-cell__bd{flex:0 0 auto;padding-right:16px}
+  .weui-cell__ft{flex:1 1 auto;min-width:0;overflow-wrap:anywhere;font-size:14px}
+  .weui-cell__ft.none{opacity:.35}
+  .weui-cell_block{display:block}
+  .weui-cell_block .weui-cell__bd{padding-right:0}
+  .weui-cell_block .weui-cell__ft{text-align:left;margin-top:6px;font-size:13px;opacity:.75}
+  .line{padding:2px 0}
+  .v-ok{color:#07c160}
+  .v-warn{color:#fa9d3b}
+  .v-bad{color:#fa5151}
+  .stamp{text-align:center;font-size:12px;opacity:.45;padding:18px 16px 0;margin:0}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="weui-cells__title">CarLife 连接 · 车机端</div>
+  <div class="weui-cells" id="carlife"></div>
+  <div class="weui-cells__title">CarPlay 连接 · 手机端</div>
+  <div class="weui-cells" id="carplay"></div>
+  <p class="stamp" id="stamp">正在读取…</p>
+</div>
+<script>
+"use strict";
+
+const NONE = "—";
+
+function bool(v, on, off) {
+  return v === null || v === undefined ? null : (v ? on : off);
+}
+function num(v) {
+  return v === null || v === undefined ? null : Number(v).toLocaleString("zh-CN");
+}
+function size(s) {
+  return s ? s.width + " × " + s.height + " @ " + s.fps + " fps" : null;
+}
+function pair(a, b) {
+  return a === null || a === undefined ? null : (b === null || b === undefined ? String(a) : a + " / " + b);
+}
+
+/* 渠道号 → 厂商名映射（来自逆向报告 CARLIFE_AUTH.md §2.4）。
+   找不到映射时只显示渠道号本身。 */
+const CHANNEL_MAP = {
+  "20012100": "DUAL_AUDIO_TRACK",
+  "20022100": "HYUNDAI", "20022101": "LFSONATA", "20022102": "CFMISTRA",
+  "20022103": "MDAVANTE", "20022104": "LMIX35", "20022105": "GCIX25",
+  "20022106": "GRANDSANTEFE",
+  "20032100": "KIA", "20032101": "KX5", "20032102": "K3",
+  "20041100": "AUDI", "20042100": "AUDI_DUAL_AUDIO",
+  "20051100": "SHANGHAIGM",
+  "20062100": "DAIMLER",
+  "20071100": "PANASONIC",
+  "20081100": "VOLKSWAGEN",
+  "20092100": "CHANGAN", "20092101": "CS15", "20092102": "V716",
+  "20092103": "CS3516", "20092104": "YIDONG16", "20092105": "RUICHENG16",
+  "20101100": "HARMAN",
+  "20111100": "DELPHI",
+  "20122100": "HUAYANG_MTK3360", "20122101": "HUAYANG_MTK8317",
+  "20131100": "ALPINE",
+  "20141100": "PIONEER",
+  "20152100": "ROADROVER_MSTAR786", "20152101": "ROADROVER_QUANZHI",
+  "20152102": "ROADROVER_MTK8317", "20152200": "ROADROVER_MSTAR786_2",
+  "20162100": "FEIGE_G6", "20162101": "FEIGE_G8", "20162102": "FEIGE_G9",
+  "20171100": "WISTEON",
+  "20181100": "上汽通用_CADILLAC", "20182100": "CADILLAC_DUAL_AUDIO",
+  "20191100": "上汽通用_BUICK", "20192100": "BUICK_DUAL_AUDIO",
+  "20201100": "上汽通用_CHEVROLET", "20202100": "CHEVROLET_DUAL_AUDIO",
+  "20211100": "BYD",
+  "20222101": "YUANFENG", "20222102": "YUANFENG_CSRA", "20222103": "CHEVROLET_K216",
+  "20282119": "YIQIFENGTIAN_COROLLA_DA", "20282120": "COROLLA_GSHV",
+  "20282126": "IZOA_PANASONIC",
+  "20302100": "KAIYUE",
+  "20312173": "GELLYAUTO_GEOMETRY",
+  "20452100": "GUANGFENG_LEVIN", "20452101": "HIGHLANDER",
+  "20452102": "AVN", "20452106": "LEVIN_PHV",
+  "20482100": "YUANFENG_ELH_PCBA", "20482101": "YUANFENG_ONLINE",
+  "20542100": "YUANFENG_YILI",
+  "21070001": "TOYOTA_RAV4",
+};
+
+function channelLabel(raw) {
+  if (!raw) return null;
+  const name = CHANNEL_MAP[raw.trim()];
+  return name ? raw + " (" + name + ")" : raw;
+}
+
+/* 每一栏是否有内容，只看这一栏的会话状态。
+   手机端以 airplay 连接存在为准：对端的地址是连接打开时写下的，断开时连同整段状态一起清掉。 */
+const CARLIFE_UP = d => d.session_up === true;
+const CARPLAY_UP = d => !!(d.airplay && d.airplay.peer);
+
+/* 一行：标签、取值、状态（ok / warn / bad，决定右侧颜色）。
+   第一行是会话状态，也是这一栏的开关，所以它自己不受开关约束。 */
+const CARLIFE_ROWS = [
+  ["会话状态", d => bool(CARLIFE_UP(d), "已建立", "未建立"), d => CARLIFE_UP(d) ? "ok" : null],
+  ["厂商 / 型号", d => pair(d.asked[0], d.asked[1])],
+  ["描述", d => d.asked[2]],
+  ["序列号", d => d.asked[5]],
+  ["CarLife 协议版本", d => d.protocol ? d.protocol.major + "." + d.protocol.minor : null],
+  ["CUID", d => d.statistic && d.statistic.cuid],
+  ["渠道号", d => d.statistic && channelLabel(d.statistic.channel)],
+  ["分辨率", d => size(d.agreed)],
+  /* 车机那一侧的物理尺寸：车机的像素乘以面板密度，密度是本机设的，见 CP2CL_PPI。 */
+  ["物理尺寸", d => d.physical
+    ? d.physical.width_mm + " × " + d.physical.height_mm + " mm"
+    : null],
+];
+
+const CARLIFE_BLOCKS = [];
+
+const CARPLAY_ROWS = [
+  ["会话状态", d => bool(CARPLAY_UP(d), "已建立", "未建立"), d => CARPLAY_UP(d) ? "ok" : null],
+  ["接入方式", d => bool(d.wireless, "WiFi", "USB")],
+  ["分辨率", d => d.screen ? size(d.screen) : null],
+  ["视频编码格式", d => d.video.codec],
+  ["音频编码格式", d => d.audio.length
+    ? d.audio.map(a => a.codec).join(" / ")
+    : null],
+];
+
+const CARPLAY_BLOCKS = [];
+
+/* 一个单元格：标签在左，取值在右；取值多行时改为上下排布。 */
+function cell(label, value, tone, block) {
+  const row = document.createElement("div");
+  row.className = block ? "weui-cell weui-cell_block" : "weui-cell";
+
+  const bd = document.createElement("div");
+  bd.className = "weui-cell__bd";
+  const name = document.createElement("p");
+  name.textContent = label;
+  bd.appendChild(name);
+
+  const ft = document.createElement("div");
+  ft.className = "weui-cell__ft";
+  if (tone) ft.classList.add("v-" + tone);
+  if (value === null || value === "") {
+    ft.textContent = NONE;
+    ft.classList.add("none");
+  } else if (block) {
+    for (const line of value) {
+      const p = document.createElement("div");
+      p.className = "line";
+      p.textContent = line;
+      ft.appendChild(p);
+    }
+  } else {
+    ft.textContent = value;
+  }
+
+  row.appendChild(bd);
+  row.appendChild(ft);
+  return row;
+}
+
+function fill(host, rows, blocks, data, up) {
+  host.textContent = "";
+  rows.forEach(([label, value, tone], i) => {
+    const live = i === 0 || up;
+    host.appendChild(cell(label, live ? value(data) : null, live && tone ? tone(data) : null, false));
+  });
+  for (const [label, lines] of blocks) {
+    const value = up ? lines(data) : null;
+    // 一项都没有的空块不是「未知」，而是「没有」：两者都不显示更干净。
+    if (value && value.length) host.appendChild(cell(label, value, null, true));
+  }
+}
+
+function render(data) {
+  fill(document.getElementById("carlife"), CARLIFE_ROWS, CARLIFE_BLOCKS, data.carlife, CARLIFE_UP(data.carlife));
+  fill(document.getElementById("carplay"), CARPLAY_ROWS, CARPLAY_BLOCKS, data.carplay, CARPLAY_UP(data.carplay));
+}
+
+const stamp = document.getElementById("stamp");
+
+async function tick() {
+  try {
+    const response = await fetch("/api/status", { cache: "no-store" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    render(await response.json());
+    stamp.className = "stamp";
+    stamp.textContent = "最后更新 " +
+      new Date().toLocaleTimeString("zh-CN", { hour12: false });
+  } catch (e) {
+    // 读不到就是读不到：说清楚比留一个空页面有用。
+    stamp.className = "stamp v-bad";
+    stamp.textContent = "读取失败：" + e.message;
+  }
+}
+
+/* 页面在后台时不必轮询：这块板子还要跑桥接。 */
+function schedule() {
+  if (document.hidden) return;
+  tick();
+}
+
+tick();
+setInterval(schedule, 2000);
+document.addEventListener("visibilitychange", schedule);
+</script>
+</body>
+</html>

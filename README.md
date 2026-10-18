@@ -20,6 +20,8 @@ to half screen.
 
 - No video transcoding on bridge, only transfer.
 - Support both wired and wireless CarPlay.
+- A status page showing both halves at once — what the head unit is doing and what
+  the phone is doing.
 
 ## Requirements
 
@@ -184,7 +186,7 @@ Nothing sets it at the moment, so the car's own pixels are asked for as they are
 |---|---|---|
 | `CP2CL_AUTH_DIR` | `./authentication` | MFi and CarLife credentials (identity.pk8, certificate.p7b, carlife_md_rsa_private.pem) |
 | `CP2CL_PPI` | `120` | the panel's density, in pixels per inch |
-| `CP2CL_LOG` | `info` | log level: `error`, `warn`, `info`, `debug`, `trace` |
+| `CP2CL_LOG_LEVEL` | `info` | log level: `error`, `warn`, `info`, `debug` |
 | `CP2CL_WIRELESS` | off | take CarPlay over Wi-Fi instead of USB |
 | `CP2CL_WIFI_IFACE` | `wlan0` | the interface the access point runs on |
 | `CP2CL_BT_ADAPTER` | `hci0` | which Bluetooth adapter |
@@ -233,7 +235,7 @@ controller has to advertise itself as in-car audio/video, or the phone does not
 treat the machine as a car. And a channel that opens but never carries anything
 usually means the phone's service records are stale.
 
-`CP2CL_LOG=debug` brings up the per-event detail.
+`CP2CL_LOG_LEVEL=debug` brings up the per-event detail.
 
 ## CarLife
 
@@ -245,8 +247,9 @@ before a car is talking, which is why a head unit is what starts the whole thing
 see [Trying it without a car](#trying-it-without-a-car) for the one that stands in
 for it on a desk.
 
-That also means there is nothing to watch here: no page, no panel, and the
-picture goes to the car. `CP2CL_LOG` is where a run is read.
+That also means the car is the only thing that starts a session — but it is not
+the only thing that can watch one. [The status page](#the-status-page) shows both
+halves as they stand, and `CP2CL_LOG_LEVEL` is where a run is read in full.
 
 What is there: the USB interface the car enumerates, the AOA control requests,
 the session a head unit drives — the version handshake, device information,
@@ -483,8 +486,8 @@ board](#running-it-on-the-board).
 **If the port stays empty, the reason is on the program's own output.** It says
 what it could not do: no configfs, a controller already held, a mount that did not
 happen, an endpoint that would not open. A device that enumerates and then goes
-quiet is a head unit waiting for an answer, which `CP2CL_LOG=debug` prints request
-by request.
+quiet is a head unit waiting for an answer, which `CP2CL_LOG_LEVEL=debug` prints
+request by request.
 
 **The access point advertises no gateway.** Joining it does not take a machine's
 default route away from wherever it was: the client keeps that route, and still
@@ -542,7 +545,7 @@ the program itself, but a gadget left by an earlier arrangement is not, and a un
 holding one is not something to stop over the link it carries. That is what
 [the reboot after installing](#setting-the-board-up) is for.
 
-**Output is `tracing`, to the terminal.** `CP2CL_LOG` is the one control over it
+**Output is `tracing`, to the terminal.** `CP2CL_LOG_LEVEL` is the one control over it
 and there is no journal to read: the log is the answer to whether the board came
 up, whether the device was composed, and what a head unit asked. See
 [Environment](#environment) for the rest.
@@ -557,6 +560,51 @@ challenge is reported and left unanswered rather than guessed at. The other
 direction is ours to decide: the car names a channel number along with its
 statistics, and is told whether a phone would serve it. `src/carlife/auth.rs`
 holds both halves, and a head unit has accepted the answer to its challenge.
+
+## The status page
+
+A single page is served on port 80, so it is the board's own address and nothing
+else: `http://<board>/` from anything on the same network. It is the one place
+both halves are visible at once, and they are two halves of one negotiation seen
+from opposite ends: **CarLife连接** is what the head unit is doing,
+**CarPlay连接** is what the phone is doing, and neither end can see the other's
+side.
+
+The port is not a setting, and neither is the page: it is one HTML file with no
+build step, compiled into the binary along with its stylesheet. There is nothing
+to install beside the program and nothing to fetch — which matters here, because
+the board's access point deliberately announces no gateway, so there is no route
+for a CDN to be reached over — see [Wireless CarPlay](#wireless-carplay).
+`src/web/index.html` is the page, `src/web/mod.rs` the router, and
+`src/web/status.rs` the snapshot behind it.
+
+Port 80 is below 1024, so it takes root to bind; the board runs the program as
+root and this is one more thing that needs nothing configured. Where it is
+refused — a machine running it as someone else — the page is what is lost: the
+program says so and carries on, because the streams are the bridge and the page
+is not.
+
+The page asks for nothing over the network of its own: it polls `GET /api/status`
+every two seconds and redraws from what comes back. That endpoint is the whole
+API, and it answers with the same snapshot the page shows:
+
+```json
+{ "carlife": { ... }, "carplay": { ... } }
+```
+
+A field is either a value or `null`, and `null` means the thing it describes has
+not happened yet — a car that has not asked for its six identifiers has six
+`null`s, not six empty strings. Every value is one the program observed, apart from
+the two the page adds itself: the vendor name a channel number maps to, and the
+codec this bridge only ever sends. The fields belonging to a connection are cleared
+when that connection ends, so a page left open shows the present rather than the
+last session.
+
+Both sections are short on purpose. What is worth reading there is the two ends
+side by side — the resolution the car agreed to against the one the phone renders,
+the protocol version and channel the car reports against the access method and the
+codecs the phone brought — because that is the question the page answers: whether
+the two halves met. What they said to each other is the log's.
 
 ## Input
 
@@ -725,6 +773,10 @@ this a derivative work, so cp2cl inherits that.
 | `src/artwork.rs` | the cover art, made small enough for the car's one media message |
 | `src/navigation.rs` | where the phone is going, as the fields the car's turn-by-turn strip is told |
 | `src/commands.rs` | the vocabulary of input |
+| `src/web/status.rs` | the snapshot both halves report into, and the JSON behind `/api/status` |
+| `src/web/mod.rs` | the status page's router and listener |
+| `src/web/index.html` | the page itself — one file, two sections, polling |
+| `src/web/vendor/weui.min.css` | its stylesheet, vendored so the page needs no network |
 | `docker/` | the image that cross-compiles for the board, and the CMake toolchain it needs |
 | `board/` | the firmware half: the access point and its unit, laid out as the filesystem they land on |
 

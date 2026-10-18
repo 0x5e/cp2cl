@@ -8,8 +8,20 @@
 
 ### 新增
 
+- 状态页：80 端口提供单页，分「CarLife 连接」与「CarPlay 连接」两段，每 2 秒轮询 `GET /api/status` 重绘；页面与 WeUI 样式表内置进二进制，不依赖外部文件、CDN 或环境变量（`7512259`）。
 - 桥接手机的正在播放到车机面板：`NowPlayingUpdate` → `MSG_CMD_MEDIA_INFO`；`playlistNum`、`songId`、`mode` 留空，无对应源；一首歌的多次更新合并后延迟发送，`CP2CL_MEDIA_DELAY_MS` 默认 1000 ms、`0` 为立即发送；封面超过 30 KB 时先重编码（baseline JPEG、4:2:0、去元数据并按 EXIF 转正），仍放不下才不发送。
 - 桥接手机的路线引导到车机简易诱导条：`RouteGuidanceUpdate` / `RouteGuidanceManeuverUpdate` → `MSG_CMD_NAVI_NEXT_TURN_INFO` + `MSG_CMD_MODULE_STATUS`；`totalDistance`、`time` 留空，无对应源；`turn_kind` 仅映射语义一致的类型。
+
+### 变更
+
+- 日志级别变量由 `CP2CL_LOG` 更名为 `CP2CL_LOG_LEVEL`，可选值收窄为 `error`、`warn`、`info`、`debug`（`2f10b36`）。
+- 日志行时间戳改为本地时间 `HH:MM:SS.mmm`，不再输出日期与时区（`e41c37c`）。
+- 链路断开时的日志写明未被应答的消息名与 id、所在会话，以及重传次数与等待时长，不再只有包序号（`1923594`）。
+- axum 重新引入，只开 `http1` 与 `tokio` 两个 feature，仅服务于状态页（`7512259`）。
+- 状态页两段各自以「会话状态」打头，未连接时该段其余各项留空。
+- 状态页的视频编码格式不再由页面写死，改由后端返回，常量定义在 `airplay::screen::CODEC`。
+- 状态页的物理尺寸由车机协商的分辨率与 `CP2CL_PPI` 算出，并挪到车机端的「分辨率」之后。
+- 链路同步参数里的单包上限由 65535 字节改为 4096 字节，对端据此分片。
 
 ### 修复
 

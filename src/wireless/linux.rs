@@ -18,6 +18,7 @@ use super::{parse_mac, ready, run_session, short};
 use crate::config::{bt_address, Config};
 use crate::session::{carry_artwork, Ended};
 use crate::sink::ClSink;
+use crate::web::Status;
 
 /// Keeps serving phones until the program stops. Nothing pushes "a phone just
 /// paired" from outside, so a session that ends puts us back to waiting for the
@@ -29,6 +30,7 @@ pub async fn watch(
     restart: broadcast::Sender<()>,
     mut gate: tokio::sync::watch::Receiver<bool>,
     panel: Arc<ClSink>,
+    status: Arc<Status>,
 ) {
     if let Err(e) = ready(&cfg) {
         tracing::error!("[cp-wifi] {e}");
@@ -68,6 +70,15 @@ pub async fn watch(
     while let Some(IncomingConn { fd, peer_mac }) = incoming.recv().await {
         let peer = short(&peer_mac);
         tracing::info!("[cp-wifi] {peer} opened a channel");
+        // Over Bluetooth there is no serial to be had: the peer is an address
+        // and nothing more, so that is what the page is given.
+        status.with(|s| {
+            s.carplay.phone = Some(peer_mac.clone());
+            s.carplay.identified = false;
+            s.carplay.authenticated = false;
+            s.carplay.subscribed = false;
+            s.carplay.failed = None;
+        });
         let link = LinkConfig {
             max_outgoing: 4,
             control_version: 2,
@@ -91,6 +102,7 @@ pub async fn watch(
             &peer,
             &restart,
             &panel,
+            &status,
         )
         .await;
         carrying.abort();

@@ -210,7 +210,7 @@ fn audio_formats(rate: u32) -> Value {
 /// the inch. A density of zero would be a division by zero, so it is read as one
 /// pixel per inch — a physical size that large is what tells the phone to draw
 /// at 1×, which is what asking for it means.
-fn millimetres(pixels: u32, ppi: u32) -> u32 {
+pub(crate) fn millimetres(pixels: u32, ppi: u32) -> u32 {
     (pixels as u64 * 254 / (ppi.max(1) as u64 * 10)) as u32
 }
 
