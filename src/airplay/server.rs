@@ -812,7 +812,10 @@ impl Session {
         .map_err(|e| e.to_string())?;
         // H.264 is the only family on offer: CarLife carries an elementary
         // stream and its head units decode `video/avc`.
-        tracing::info!("[airplay] answered GET /info ({width}x{height}@{fps} at {ppi} ppi, H.264)");
+        tracing::info!(
+            "[airplay] answered GET /info ({width}x{height}@{fps} at {ppi} ppi, {})",
+            screen::CODEC
+        );
         Ok(Response::new(200).plist(plist))
     }
 

@@ -28,7 +28,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use super::{auth, frame, proto};
-use crate::airplay::{EventSink, ScreenParams};
+use crate::airplay::{info, EventSink, ScreenParams};
 use crate::commands::{Command, TouchContact, PHONE_DROP, PHONE_HOOK_SWITCH, PHONE_MUTE};
 use crate::config::Config;
 use crate::sink::{ClOutlet, Media};
@@ -647,6 +647,14 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     agreed.frame_rate
                 );
                 self.agreed = Some(agreed);
+                // The panel is the car's, so its physical size is worked out
+                // here, from the size it just named and the one density there
+                // is: `CP2CL_PPI`. Nothing in the protocol carries a size.
+                let ppi = self.cfg.ppi;
+                let physical = (
+                    info::millimetres(agreed.width as u32, ppi),
+                    info::millimetres(agreed.height as u32, ppi),
+                );
                 self.status.with(|s| {
                     s.carlife.requested = Some(Size {
                         width: asked.width,
@@ -658,6 +666,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                         height: agreed.height,
                         fps: agreed.frame_rate,
                     });
+                    s.carlife.physical = Some(physical);
                     s.carlife.frame_rate = Some(agreed.frame_rate);
                 });
                 let body = proto::video_encoder_info(agreed);

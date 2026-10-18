@@ -131,6 +131,11 @@ pub struct Carlife {
     /// two differ when the car names a rate outside the range we serve.
     pub requested: Option<Size>,
     pub agreed: Option<Size>,
+    /// What `agreed` works out to on the car's panel, in millimetres. Derived
+    /// from `CP2CL_PPI`, because no CarLife message carries a physical size: the
+    /// density is a property of the screen this device is wired to, so the size
+    /// is reported on the car's side of the page rather than the phone's.
+    pub physical: Option<(u32, u32)>,
     /// Whether the head unit has the encoder running.
     pub encoding: bool,
     /// The last frame rate the two ends agreed to, which is not always the rate
@@ -386,6 +391,10 @@ impl Carlife {
             "accepted": self.accepted,
             "requested": self.requested.as_ref().map(Size::json),
             "agreed": self.agreed.as_ref().map(Size::json),
+            "physical": self.physical.map(|(width_mm, height_mm)| json!({
+                "width_mm": width_mm,
+                "height_mm": height_mm,
+            })),
             "encoding": self.encoding,
             "frame_rate": self.frame_rate,
             "features": self
@@ -441,6 +450,11 @@ impl Carplay {
             })),
             "video": {
                 "active": self.video.active,
+                // A coding is a property of this receiver rather than of the
+                // session it happens to be carrying, so it is named where the
+                // config parser is and reported from there: the page reads it
+                // like any other field instead of knowing one of its own.
+                "codec": crate::airplay::screen::CODEC,
                 "messages": self.video.messages,
                 "frames": self.video.frames,
             },

@@ -130,4 +130,30 @@ mod tests {
         assert!(body.get("carlife").is_some());
         assert!(body.get("carplay").is_some());
     }
+
+    /// A coding is a constant of the receiver, not of the page: the answer has to
+    /// carry it, and the page has to read it from there.
+    #[test]
+    fn the_page_reads_the_coding_from_the_answer() {
+        assert!(PAGE.contains("d.video.codec"), "the page reads the field");
+        assert!(!PAGE.contains("H.264"), "and names no coding itself");
+        let body = Status::new().json();
+        assert_eq!(
+            body["carplay"]["video"]["codec"],
+            crate::airplay::screen::CODEC,
+            "which is what the snapshot carries"
+        );
+    }
+
+    /// The panel is the car's, so the page shows its physical size on the car's
+    /// side, next to the size the car named, and reads it from the answer.
+    #[test]
+    fn the_page_reads_the_panel_size_from_the_cars_half() {
+        assert!(PAGE.contains("d.physical"), "the page reads the field");
+        let status = Status::new();
+        status.with(|s| s.carlife.physical = Some((407, 229)));
+        let body = status.json();
+        assert_eq!(body["carlife"]["physical"]["width_mm"], 407);
+        assert_eq!(body["carlife"]["physical"]["height_mm"], 229);
+    }
 }

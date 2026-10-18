@@ -96,27 +96,35 @@ function channelLabel(raw) {
   return name ? raw + " (" + name + ")" : raw;
 }
 
-/* 一行：标签、取值、状态（ok / warn / bad，决定右侧颜色）。 */
+/* 每一栏是否有内容，只看这一栏的会话状态。
+   手机端以 airplay 连接存在为准：对端的地址是连接打开时写下的，断开时连同整段状态一起清掉。 */
+const CARLIFE_UP = d => d.session_up === true;
+const CARPLAY_UP = d => !!(d.airplay && d.airplay.peer);
+
+/* 一行：标签、取值、状态（ok / warn / bad，决定右侧颜色）。
+   第一行是会话状态，也是这一栏的开关，所以它自己不受开关约束。 */
 const CARLIFE_ROWS = [
+  ["会话状态", d => bool(CARLIFE_UP(d), "已建立", "未建立"), d => CARLIFE_UP(d) ? "ok" : null],
   ["厂商 / 型号", d => pair(d.asked[0], d.asked[1])],
   ["描述", d => d.asked[2]],
   ["序列号", d => d.asked[5]],
   ["CarLife 协议版本", d => d.protocol ? d.protocol.major + "." + d.protocol.minor : null],
-  ["会话状态", d => bool(d.session_up, "已建立", "未建立"), d => d.session_up ? "ok" : null],
   ["CUID", d => d.statistic && d.statistic.cuid],
   ["渠道号", d => d.statistic && channelLabel(d.statistic.channel)],
   ["分辨率", d => size(d.agreed)],
+  /* 车机那一侧的物理尺寸：车机的像素乘以面板密度，密度是本机设的，见 CP2CL_PPI。 */
+  ["物理尺寸", d => d.physical
+    ? d.physical.width_mm + " × " + d.physical.height_mm + " mm"
+    : null],
 ];
 
 const CARLIFE_BLOCKS = [];
 
 const CARPLAY_ROWS = [
+  ["会话状态", d => bool(CARPLAY_UP(d), "已建立", "未建立"), d => CARPLAY_UP(d) ? "ok" : null],
   ["接入方式", d => bool(d.wireless, "WiFi", "USB")],
   ["分辨率", d => d.screen ? size(d.screen) : null],
-  ["物理尺寸", d => d.screen
-    ? d.screen.width_mm + " × " + d.screen.height_mm + " mm"
-    : null],
-  ["视频编码格式", () => "H.264"],
+  ["视频编码格式", d => d.video.codec],
   ["音频编码格式", d => d.audio.length
     ? d.audio.map(a => a.codec).join(" / ")
     : null],
@@ -157,21 +165,22 @@ function cell(label, value, tone, block) {
   return row;
 }
 
-function fill(host, rows, blocks, data) {
+function fill(host, rows, blocks, data, up) {
   host.textContent = "";
-  for (const [label, value, tone] of rows) {
-    host.appendChild(cell(label, value(data), tone ? tone(data) : null, false));
-  }
+  rows.forEach(([label, value, tone], i) => {
+    const live = i === 0 || up;
+    host.appendChild(cell(label, live ? value(data) : null, live && tone ? tone(data) : null, false));
+  });
   for (const [label, lines] of blocks) {
-    const value = lines(data);
+    const value = up ? lines(data) : null;
     // 一项都没有的空块不是「未知」，而是「没有」：两者都不显示更干净。
     if (value && value.length) host.appendChild(cell(label, value, null, true));
   }
 }
 
 function render(data) {
-  fill(document.getElementById("carlife"), CARLIFE_ROWS, CARLIFE_BLOCKS, data.carlife);
-  fill(document.getElementById("carplay"), CARPLAY_ROWS, CARPLAY_BLOCKS, data.carplay);
+  fill(document.getElementById("carlife"), CARLIFE_ROWS, CARLIFE_BLOCKS, data.carlife, CARLIFE_UP(data.carlife));
+  fill(document.getElementById("carplay"), CARPLAY_ROWS, CARPLAY_BLOCKS, data.carplay, CARPLAY_UP(data.carplay));
 }
 
 const stamp = document.getElementById("stamp");
