@@ -567,7 +567,10 @@ else: `http://<board>/` from anything on the same network. It is the one place
 both halves are visible at once, and they are two halves of one negotiation seen
 from opposite ends: **CarLife连接** is what the head unit is doing,
 **CarPlay连接** is what the phone is doing, and neither end can see the other's
-side.
+side. **正在播放** is what the two agree on: the song the car's panel is showing,
+which belongs to neither half and is the one part of the page someone sitting in
+the car can check against what they see. It is shown only while both ends are
+up — a song on a page whose halves are down describes a moment that has passed.
 
 The port is not a setting, and neither is the page: it is one HTML file with no
 build step, compiled into the binary along with its stylesheet. There is nothing
@@ -588,8 +591,18 @@ every two seconds and redraws from what comes back. That endpoint is the whole
 API, and it answers with the same snapshot the page shows:
 
 ```json
-{ "carlife": { ... }, "carplay": { ... } }
+{ "carlife": { ... }, "carplay": { ... }, "now_playing": { ... } }
 ```
+
+The cover is the one thing not in it. It is a JPEG, fetched from `GET
+/api/cover?id=<hash>`, where the hash is what `now_playing.cover.id` holds: the
+name is the picture, so the page keeps the one it is drawing and downloads
+another only when the car has been given one. A request naming anything else —
+a cover from a song that has finished, or no name at all — is answered with
+`404` rather than with whatever is current, because an answer under the wrong
+name would be one song's picture drawn as another's and cached under it for a
+year. A new song arrives without a cover and puts the last one down — see
+[Now playing](#now-playing).
 
 A field is either a value or `null`, and `null` means the thing it describes has
 not happened yet — a car that has not asked for its six identifiers has six
@@ -638,6 +651,94 @@ the car up to this side — so the uplink opens and is reported
 (`[mic] uplink open to ...`) for a capture that does not exist. It is open while
 the phone is listening and shut the rest of the time, so the way to see it is to
 start a call or invoke Siri.
+
+## Now playing
+
+The car's panel is told what the phone is playing. iOS describes a song over iAP2
+as `NowPlayingUpdate` — one attribute per message, with the cover art as a file
+transfer of its own — while CarLife's `MSG_CMD_MEDIA_INFO` carries the whole song
+in a single message. `src/playing.rs` is where the two shapes are reconciled:
+`Track` folds the phone's partial updates together, and the CarLife session sends
+the whole of what is known each time one arrives.
+
+Every update therefore goes out as it arrives, one message per attribute, which
+is what the phone's own panel does with the same messages: a title, then the
+title and artist, then the three of them. There is no pause and nothing to
+tune — the phone is what decides when the song changes.
+
+The panel gets the song, the artist, the album, its length and where it is
+playing from, plus the cover once the phone has sent one. A field is written
+only when there is something behind it: one left out carries its default, which
+is the same value an empty one would, so a song without a cover has no
+`albumArt` at all rather than a field of length zero. Three of the car's nine
+fields are left out rather than written as zero. `playlistNum` and `songId` are
+subscription-gated — the phone is not subscribed for `persistent_id` or
+`app_bundle_id` — and iAP2 has no message for the play `mode` at all. An absent
+field and a zero are not the same claim: a `mode` of zero would be single-track
+repeat.
+
+The cover arrives after the update that named the song and names no song itself,
+so it is taken as belonging to the newest one. What puts it down is a song
+carrying a length: the length is what the phone sends when it describes a song
+rather than a change of play state, and it comes with the rest of the new one
+rather than after it, so it is the moment a song has started — and the picture
+held belongs to the one before it. A title that changes without a length keeps
+it, which is what an app that writes its lyrics into the title needs: it renames
+the song for every line, and every one of those is the same song. A file transfer
+that completes with no bytes in it is the phone saying this song has no picture.
+It puts down the cover that is held, and the message that follows carries no
+`albumArt` at all rather than a field with nothing in it to draw.
+
+A cover is only sent while it fits. The song and its cover travel in one
+command-channel message, whose body the car caps at 40 KB, and the reference app
+keeps a cover under 30 KB for it — `proto::MAX_ART`. A cover larger than that is
+re-encoded first, in `src/artwork.rs`: the picture is decoded, turned the way its
+EXIF orientation says it is meant to be seen, and re-encoded as a baseline JPEG
+with 4:2:0 chroma and no metadata. The size comes down to a 400px long edge, and
+the quality with it — 90, 80, 70, 60 — before the edge goes to 350 and then 300,
+six encodes at most. A cover that fits already is passed through untouched, and
+one that will not fit at any of the six is dropped with a warning and the song
+goes without it.
+
+Every message is checked against its channel's cap before it is written, and one
+that would not fit is dropped with a warning rather than sent: the car refuses
+such a message, and a refused length leaves the channel waiting for bytes that
+never come, which costs the session rather than the message.
+
+The play position is not sent: `MSG_CMD_MEDIA_PROGRESS_BAR` is left alone, though
+the phone does describe where the song has got to.
+
+## Navigation
+
+The car's turn-by-turn strip is told what the phone is guiding towards. iOS
+describes a route over iAP2 as two messages — `RouteGuidanceUpdate` (0x5201)
+carries the state of the route as a whole and names which of its turns is the
+current one, while `RouteGuidanceManeuverUpdate` (0x5202) describes one turn at a
+time, by index, with that turn's type and the road it leads onto.
+
+`src/navigation.rs` is where the two shapes are reconciled: `Guidance::from_iap2`
+reads one of the phone's messages, `merge` folds it into what is known, and
+`current` answers which turn the strip is about. The CarLife session sends
+`MSG_CMD_NAVI_NEXT_TURN_INFO` when the turn changes and `MSG_CMD_MODULE_STATUS`
+when the route starts or stops.
+
+The strip gets the turn kind, the road it leads onto, and how far away it is.
+Two of the car's six fields are left empty rather than written as zero.
+`totalDistance` is a second distance to the same turn — the guide's "total"
+against the "remaining" — and iAP2 describes only one distance to a turn, so
+there is nothing to put in it. `time` is the seconds to the turn, and the phone's
+own countdown is to the destination: a countdown to the wrong place is worse than
+no countdown.
+
+`turn_kind` is deliberately incomplete. The phone's `EManeuverType` has 54 values
+and the car's `TurnKind` has 58; a kind is named only where the two vocabularies
+mean the same thing. Ramps, motorway changes and arrivals have no counterpart in
+the car's list, and are left unnamed rather than rounded to the nearest arrow.
+
+The strip is only sent once the car has asked for it, with
+`MSG_CMD_CARLIFE_DATA_SUBSCRIBE_START`; before that the module state alone is
+sent, because that is the phone saying something about itself rather than data
+the car subscribes to.
 
 ## Depending on LIVI
 
@@ -691,6 +792,9 @@ this a derivative work, so cp2cl inherits that.
 | `src/airplay/event.rs` | input: HID reports and session commands, over the event channel |
 | `src/airplay/mic.rs` | the microphone uplink, sealed and sent back to the phone |
 | `src/sink.rs` | what a stream *is* — codec and description as well as bytes — and the two channels the car drains |
+| `src/playing.rs` | what the phone is playing, as the fields the car's panel is told |
+| `src/artwork.rs` | the cover art, made small enough for the car's one media message |
+| `src/navigation.rs` | where the phone is going, as the fields the car's turn-by-turn strip is told |
 | `src/commands.rs` | the vocabulary of input |
 | `src/web/status.rs` | the snapshot both halves report into, and the JSON behind `/api/status` |
 | `src/web/mod.rs` | the status page's router and listener |
@@ -730,9 +834,11 @@ this a derivative work, so cp2cl inherits that.
 ## Known gaps
 
 * The CarLife video and media channels carry the phone's picture and its sound,
-  and the car's touch and panel keys reach the phone. The two voice channels are
-  the car's own and stay empty, so navigation speech and the voice assistant are
-  silent.
+  the car's touch and panel keys reach the phone, and its panel is told what is
+  playing and where the phone is guiding. The two voice channels are the car's
+  own and stay empty, so navigation speech and the voice assistant are silent.
+* The panel is told *which* song is playing but not where in it: the progress
+  bar's message is not sent. See [Now playing](#now-playing).
 * `up`/`down` overshoot. The knob's absolute Y axis is a *position* to the phone
   rather than a step, so a full throw scrolls several rows. Wired it is reliable,
   wireless it is intermittent. The knob's wheel axis cannot stand in for it: that

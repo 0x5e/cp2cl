@@ -31,6 +31,8 @@ use super::{auth, frame, proto};
 use crate::airplay::{info, EventSink, ScreenParams};
 use crate::commands::{Command, TouchContact, PHONE_DROP, PHONE_HOOK_SWITCH, PHONE_MUTE};
 use crate::config::Config;
+use crate::navigation::{turn_kind, Guidance};
+use crate::playing::{Playing, Track};
 use crate::sink::{ClOutlet, Media};
 use crate::web::{Size, Statistic, Status};
 
@@ -45,6 +47,9 @@ const HU_VIDEO_ENCODER_RESET: u32 = 0x0001_800B;
 const HU_VIDEO_ENCODER_FRAME_RATE_CHANGE: u32 = 0x0001_800C;
 const HU_GO_TO_FOREGROUND: u32 = 0x0001_8025;
 const HU_STATISTIC_INFO: u32 = 0x0001_8027;
+const HU_DATA_SUBSCRIBE: u32 = 0x0001_8043;
+const HU_DATA_SUBSCRIBE_START: u32 = 0x0001_8045;
+const HU_DATA_SUBSCRIBE_STOP: u32 = 0x0001_8046;
 const HU_AUTHEN_REQUEST: u32 = 0x0001_8048;
 const HU_AUTHEN_RESULT: u32 = 0x0001_804A;
 const HU_FEATURE_CONFIG_RESPONSE: u32 = 0x0001_8052;
@@ -55,6 +60,10 @@ const MATCH_STATUS: u32 = 0x0001_0002;
 const MD_INFO: u32 = 0x0001_0004;
 const VIDEO_ENCODER_INIT_DONE: u32 = 0x0001_0008;
 const VIDEO_ENCODER_FRAME_RATE_CHANGE_DONE: u32 = 0x0001_000D;
+const MODULE_STATUS: u32 = 0x0001_0026;
+const NAVI_NEXT_TURN_INFO: u32 = 0x0001_0030;
+const MEDIA_INFO: u32 = 0x0001_0035;
+const DATA_SUBSCRIBE_DONE: u32 = 0x0001_0044;
 const MD_AUTHEN_RESPONSE: u32 = 0x0001_0049;
 const MD_AUTHEN_RESULT: u32 = 0x0001_004B;
 const GO_TO_FOREGROUND_RESPONSE: u32 = 0x0001_004C;
@@ -269,22 +278,36 @@ where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     F: FnMut(bool),
 {
-    // A session is what drains the bridge, so it takes both receiving halves for
-    // as long as it runs: one channel carries pictures and the other the phone's
-    // sound. The car unplugged and plugged back in is a new session and a new
-    // call to this function, which is why the halves are given back on the way
-    // out rather than dropped with everything else.
-    let (mut video, mut media, source) = match frames {
+    // A session is what drains the bridge, so it takes all four receiving halves
+    // for as long as it runs: one channel carries pictures, one the phone's
+    // sound, and the last two what the phone says about itself — the song it is
+    // playing and the route it is guiding along. The car unplugged and plugged
+    // back in is a new session and a new call to this function, which is why the
+    // halves are given back on the way out rather than dropped with everything
+    // else.
+    // A panel that has just been plugged in has no song on it: what the last
+    // session was showing belongs to a car that is no longer here, and the page
+    // would otherwise go on showing it.
+    status.now_playing_cleared();
+    let (mut video, mut media, mut playing, mut guidance, source) = match frames {
         Frames::Live(outlet) => match outlet.take_video() {
-            Some(rx) => (Some(rx), outlet.take_media(), Source::Live),
+            Some(rx) => (
+                Some(rx),
+                outlet.take_media(),
+                outlet.take_playing(),
+                outlet.take_guidance(),
+                Source::Live,
+            ),
             None => {
                 tracing::warn!(
                     "[cl] the video channel is already being read; sending heartbeats only"
                 );
-                (None, None, Source::None)
+                (None, None, None, None, Source::None)
             }
         },
         Frames::Cycle(units) => (
+            None,
+            None,
             None,
             None,
             Source::Cycle {
@@ -292,7 +315,7 @@ where
                 next: 0,
             },
         ),
-        Frames::None => (None, None, Source::None),
+        Frames::None => (None, None, None, None, Source::None),
     };
 
     // Reads are their own task. A frame can be six hundred kilobytes and the
@@ -325,6 +348,17 @@ where
         agreed: None,
         started_at: None,
         media_format: None,
+        track: Track::default(),
+        art: None,
+        // A route is described by the phone in messages of its own, so the
+        // session starts knowing nothing about one and hears about it as it
+        // goes. A car that plugs in mid-route is a car the phone describes the
+        // whole route to again, because a new CarLife session is a new CarPlay
+        // one.
+        guidance: Guidance::default(),
+        subscribed: false,
+        navi: None,
+        shown: None,
         // Read here rather than once for the program: a car plugged out and back
         // in is a new session, and a key that has gone missing since is worth
         // saying so each time the car asks for an answer.
@@ -376,6 +410,34 @@ where
                 // The CarPlay side has gone; there is nothing left to play.
                 None => media = None,
             },
+            // What the phone is playing, on the command channel. Written as it
+            // arrives, like the three above: the phone is what decides when the
+            // song changes, and what the car is told is the whole of what is
+            // known, so a message says only what the phone has said.
+            said = recv_playing(&mut playing) => match said {
+                Some(item) => {
+                    if let Err(e) = session.send_playing(item).await {
+                        break Err(e);
+                    }
+                }
+                // The CarPlay side has gone; the panel keeps what it was last
+                // told, which is the last song there was.
+                None => playing = None,
+            },
+            // Where the phone is going, on the command channel. Written as it
+            // arrives, like the three above: the phone is what decides when the
+            // route changes, and what the strip is told is the whole of what is
+            // known, so a message is only sent when it says something new.
+            moving = recv_guidance(&mut guidance) => match moving {
+                Some(update) => {
+                    if let Err(e) = session.send_guidance(update).await {
+                        break Err(e);
+                    }
+                }
+                // The CarPlay side has gone; the strip keeps what it was last
+                // told, which is the last turn there was.
+                None => guidance = None,
+            },
             // Only a tick moves the schedule forward, so a busy stream of
             // messages cannot starve the video channel.
             _ = tokio::time::sleep_until(deadline) => {
@@ -394,6 +456,12 @@ where
         }
         if let Some(rx) = media {
             outlet.return_media(rx);
+        }
+        if let Some(rx) = playing {
+            outlet.return_playing(rx);
+        }
+        if let Some(rx) = guidance {
+            outlet.return_guidance(rx);
         }
     }
     if session.up {
@@ -474,6 +542,22 @@ async fn recv_media(media: &mut Option<mpsc::Receiver<Media>>) -> Option<Media> 
     }
 }
 
+/// The same, for what the phone is playing.
+async fn recv_playing(playing: &mut Option<mpsc::Receiver<Playing>>) -> Option<Playing> {
+    match playing {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The same, for where the phone is going.
+async fn recv_guidance(guidance: &mut Option<mpsc::Receiver<Guidance>>) -> Option<Guidance> {
+    match guidance {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 struct Session<'a, W> {
     writer: W,
     cfg: &'a Config,
@@ -495,6 +579,32 @@ struct Session<'a, W> {
     /// it has been told. A stream that opens with the same one is not worth a
     /// second message: nothing about it has changed.
     media_format: Option<(u32, u16)>,
+    /// What the phone has said about the song that is playing, folded together.
+    /// It describes one attribute per update and the car's message is the whole
+    /// song, so this is what the two are reconciled through.
+    track: Track,
+    /// The cover art that belongs to `track`, once the phone has sent it. Held
+    /// apart from the track because it arrives as a file of its own, after the
+    /// update that named the song and names none itself.
+    art: Option<Vec<u8>>,
+    /// The route the phone is guiding along, folded together from the two
+    /// messages it describes one with — see `crate::navigation`, which is also
+    /// where the phone's turn types become the car's.
+    guidance: Guidance,
+    /// Whether the car has asked to be told about the route. It asks with
+    /// `MSG_CMD_CARLIFE_DATA_SUBSCRIBE_START` and stops asking with the `_STOP`
+    /// that follows it, and no turn is sent before it does: the strip is the
+    /// car's, and a car that has not asked for one is a car with nowhere to put
+    /// it. The navigation module's own state is not behind this — see
+    /// `publish_hud`.
+    subscribed: bool,
+    /// The navigation state the car was last told, so it is told again only when
+    /// it changes. `None` is a car that has not been told yet.
+    navi: Option<i32>,
+    /// The turn the car's strip was last told to show, and `None` when it was
+    /// last told to take one down. The action of the next message follows from
+    /// what this holds and what is known now.
+    shown: Option<proto::NextTurn>,
     /// The key the car's challenge is answered with, when the operator has put
     /// one where credentials are looked for. `None` is a session that cannot
     /// answer it, which is said out loud when the car asks.
@@ -723,6 +833,37 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // gives a device that is actually switching.
                 tracing::debug!("[cl] the car asked us to come to the foreground");
                 self.send(GO_TO_FOREGROUND_RESPONSE, &[]).await?;
+            }
+            // The car asking whether this device can tell it about a route. The
+            // answer is owed per module, and the car is the one that decides what
+            // to do with it — so it is told exactly what this side has.
+            HU_DATA_SUBSCRIBE => {
+                let asked = proto::decode_data_subscribe(&message.body);
+                tracing::info!("[cl] the car asks which data we can provide: {asked:?}");
+                let answer: Vec<(i32, bool)> = asked
+                    .iter()
+                    .map(|module| (*module, *module == proto::DATA_TURN_BY_TURN))
+                    .collect();
+                let body = proto::data_subscribe_done(&answer);
+                self.send(DATA_SUBSCRIBE_DONE, &body).await?;
+            }
+            // And the car asking to be sent it, or to stop being sent it. Both
+            // are answered by what the strip is told next rather than by a
+            // message of their own.
+            HU_DATA_SUBSCRIBE_START | HU_DATA_SUBSCRIBE_STOP => {
+                let asked = proto::decode_data_subscribe(&message.body);
+                let wanted = message.service_type == HU_DATA_SUBSCRIBE_START;
+                tracing::info!(
+                    "[cl] the car asks us to {} {asked:?}",
+                    if wanted { "send" } else { "stop sending" }
+                );
+                if asked.contains(&proto::DATA_TURN_BY_TURN) {
+                    self.subscribed = wanted;
+                }
+                // Now rather than at the next change of route: a car that asks
+                // mid-route is owed the turn it is already on, and one that has
+                // stopped asking is owed the strip taken down.
+                self.publish_hud().await?;
             }
             HU_ERROR_CODE => {
                 self.status
@@ -976,6 +1117,247 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         }
     }
 
+    /// One thing the phone said it is playing, folded into what is known and
+    /// then written out.
+    ///
+    /// The phone describes one attribute at a time and the car's message is the
+    /// whole song, so every update sends the song as it now stands: the panel
+    /// redraws once per attribute, which is what the phone's own panel does
+    /// with the same messages. An update that says nothing new is not worth a
+    /// message.
+    ///
+    /// The cover art is the one thing that is not a field of that message's
+    /// subject: it is a file, it arrives after the song it belongs to, and a
+    /// song the panel has not been told about is not one to attach it to yet.
+    ///
+    /// It is held until the phone sends another, or until a song that carries a
+    /// length says a new one has started — see the arm below for why that is
+    /// the only moment at which a stale cover can be told from an early one.
+    async fn send_playing(&mut self, item: Playing) -> Result<()> {
+        match item {
+            Playing::Track(update) => {
+                // A length is sent for a song and never for a change of play
+                // state, and it arrives with the rest of the new song rather
+                // than after it — so it is what says here that a song has
+                // started. The cover that is held belongs to the one before
+                // it: a file transfer names no song, so there is no later
+                // moment at which the two could be told apart, and a new song
+                // that arrives without a picture would otherwise wear the last
+                // one's. It goes down here, and the song is sent without it.
+                let started = update.duration_s.is_some();
+                let before = self.track.clone();
+                self.track.merge(update);
+                if self.track == before && !started {
+                    return Ok(());
+                }
+                if started {
+                    self.art = None;
+                    self.publish_cover();
+                }
+            }
+            Playing::Artwork(image) => {
+                // The car reads the song and its cover from one command-channel
+                // message, and the reference keeps a cover under 30 KB for it.
+                // A cover too large for that has already been re-encoded on the
+                // CarPlay side — see `crate::artwork` — so what arrives here is
+                // either small enough or not going to be. This is the backstop:
+                // the song still goes, the cover does not, and the message stays
+                // one the car can take.
+                if image.len() > proto::MAX_ART {
+                    tracing::warn!(
+                        "[cl] media info: cover dropped bytes={} cap={}",
+                        image.len(),
+                        proto::MAX_ART
+                    );
+                    return Ok(());
+                }
+                // A file transfer that carried nothing is the phone saying this
+                // song has no picture. It is not ignored: it takes the place of
+                // the cover that is held — which is what puts the last song's
+                // down — and the message that follows carries no `albumArt` at
+                // all rather than a zero-length one.
+                if self.art.as_deref() == Some(image.as_slice()) {
+                    return Ok(());
+                }
+                if image.is_empty() {
+                    tracing::debug!("[cl] media info: an empty cover; the song goes without one");
+                }
+                self.art = Some(image);
+                // The page draws it as soon as it is here rather than when the
+                // song it belongs to goes out: it is the same picture the car
+                // will be given, and a cover often arrives after the title.
+                self.publish_cover();
+            }
+        }
+
+        // An app name on its own is not a song, and the panel is better left
+        // with the last song it was told than emptied by the play state.
+        if self.track.is_silent() {
+            return Ok(());
+        }
+        self.publish_song();
+        self.write_media().await
+    }
+
+    /// Puts the song on the status page, which is the one place anyone but the
+    /// car can see it.
+    ///
+    /// Reported before the message is written rather than after: the page is a
+    /// report of what is playing, not of what has been written to the socket.
+    fn publish_song(&self) {
+        let track = &self.track;
+        self.status.with(|s| {
+            s.now_playing.source = track.source.clone();
+            s.now_playing.song = track.song.clone();
+            s.now_playing.artist = track.artist.clone();
+            s.now_playing.album = track.album.clone();
+            s.now_playing.duration_s = track.duration_s;
+        });
+    }
+
+    /// And the cover, which the page draws from a path of its own.
+    ///
+    /// A cover that has just been put down is reported as one: the page draws
+    /// nothing rather than the picture of a song that has finished.
+    fn publish_cover(&self) {
+        self.status
+            .cover_changed(self.art.clone().unwrap_or_default());
+    }
+
+    /// The whole of what is known about the song, as the car's one message.
+    ///
+    /// What `send_playing` calls once the phone's word is folded in.
+    async fn write_media(&mut self) -> Result<()> {
+        // A song that has been emptied since is not one to tell the panel
+        // about: the last one it was told is better than a blank.
+        if self.track.is_silent() {
+            return Ok(());
+        }
+        let song = self.track.song.as_deref().unwrap_or_default();
+        let artist = self.track.artist.as_deref().unwrap_or_default();
+        let album = self.track.album.as_deref().unwrap_or_default();
+        let source = self.track.source.as_deref().unwrap_or_default();
+        // The size rather than a flag, so this line and the car's own can be put
+        // side by side: the panel takes the picture from this message and
+        // nothing else, so a size that does not match is the whole difference.
+        //
+        // `debug` rather than `info`: an app that puts its lyrics in the title
+        // has the phone sending a new one per line, so this is per-event detail
+        // however much it looks like one line per song.
+        let cover = self
+            .art
+            .as_ref()
+            .map_or(0.0, |art| art.len() as f64 / 1024.0);
+        tracing::debug!(
+            "[cl] media info: song={song:?} artist={artist:?} album={album:?} \
+             duration={} source={source:?} cover={cover:.1}kB",
+            self.track.duration_s.unwrap_or(0)
+        );
+        let body = proto::media_info(&self.track, self.art.as_deref().filter(|art| !art.is_empty()));
+        self.send(MEDIA_INFO, &body).await
+    }
+
+    /// One thing the phone said about the route it is guiding along.
+    ///
+    /// The phone describes a route in messages of its own, each carrying one
+    /// part of it, so what arrives is folded into what is known and the car is
+    /// told the whole of it when that changes. See `crate::navigation` for the
+    /// folding and for the one table that knows both vocabularies.
+    async fn send_guidance(&mut self, update: Guidance) -> Result<()> {
+        self.guidance.merge(update);
+        self.publish_hud().await
+    }
+
+    /// Whatever the car's turn-by-turn strip is owed right now, and nothing when
+    /// it is owed nothing.
+    ///
+    /// Two messages, neither sent twice with the same content.
+    /// `MSG_CMD_MODULE_STATUS` is the state of this device's navigation module,
+    /// which is the phone's own business rather than part of the data a car
+    /// subscribes to, so it goes out whether or not a strip was asked for.
+    /// `MSG_CMD_NAVI_NEXT_TURN_INFO` is the turn itself, and its action follows
+    /// from what the strip was last told: the first turn put up is a `SHOW`, one
+    /// that replaces a turn already there is an `UPDATE`, and a strip with
+    /// nothing left to show is taken down with a `HIDE`.
+    async fn publish_hud(&mut self) -> Result<()> {
+        if let Some(running) = self.guidance.running() {
+            let state = if running {
+                proto::NAVI_START
+            } else {
+                proto::NAVI_IDLE
+            };
+            if self.navi != Some(state) {
+                self.navi = Some(state);
+                tracing::info!("[cl] navi state: running={running}");
+                let body = proto::module_status(proto::NAVI_MODULE, state);
+                self.send(MODULE_STATUS, &body).await?;
+            }
+        }
+
+        let wanted = self.turn_to_show();
+        let action = match (&self.shown, &wanted) {
+            // Nothing was up and there is nothing to put up.
+            (None, None) => return Ok(()),
+            (None, Some(_)) => proto::ACTION_SHOW,
+            // The route is over, or the car has stopped asking: either way there
+            // is nothing left to show.
+            (Some(_), None) => proto::ACTION_HIDE,
+            // The same turn described again, with nothing about it changed.
+            (Some(shown), Some(turn)) if shown == turn => return Ok(()),
+            (Some(_), Some(_)) => proto::ACTION_UPDATE,
+        };
+        self.shown = match action {
+            proto::ACTION_HIDE => None,
+            _ => wanted,
+        };
+
+        let nothing = proto::NextTurn::default();
+        let turn = self.shown.as_ref().unwrap_or(&nothing);
+        let action_name = match action {
+            proto::ACTION_SHOW => "show",
+            proto::ACTION_UPDATE => "update",
+            _ => "hide",
+        };
+        if action == proto::ACTION_HIDE {
+            tracing::info!("[cl] navi turn: action={action_name}");
+        } else {
+            tracing::info!(
+                "[cl] navi turn: action={action_name} kind={:?} road={:?} remain_m={:?}",
+                turn.kind.map(|k| format!("0x{k:02X}")),
+                turn.road,
+                turn.remain_m
+            );
+        }
+        let body = proto::navi_next_turn_info(action, turn);
+        self.send(NAVI_NEXT_TURN_INFO, &body).await
+    }
+
+    /// The turn the strip is to show, or nothing when there is none to show.
+    ///
+    /// Three things have to hold. The car has to have asked for the data, the
+    /// phone has to say a route is being guided, and the guidance has to point
+    /// at a turn the phone has described. Anything less is a strip with nothing
+    /// behind it, and the car's own field for each of them is written only when
+    /// there is something to put in it.
+    fn turn_to_show(&self) -> Option<proto::NextTurn> {
+        if !self.subscribed || self.guidance.running() != Some(true) {
+            return None;
+        }
+        let turn = self.guidance.current()?;
+        Some(proto::NextTurn {
+            kind: turn.kind.and_then(turn_kind),
+            road: turn.onto.clone(),
+            // Metres either way, so only the width of the two numbers differs.
+            // The car's field is an `int32` and the phone's a `uint32`; a
+            // distance that does not fit is a distance this side does not have
+            // rather than one it rounds.
+            remain_m: self
+                .guidance
+                .distance_m()
+                .and_then(|metres| i32::try_from(metres).ok()),
+        })
+    }
+
     /// How long until the next tick: a frame's worth of time when there is a
     /// picture to send on a schedule and one has been agreed, otherwise the
     /// heartbeat's.
@@ -997,8 +1379,22 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     ///
     /// The channel is the number's top half-word and is written from it rather
     /// than passed separately, so the two cannot disagree.
+    ///
+    /// A body larger than the channel allows is dropped here rather than
+    /// written. The car's own reader refuses such a message, and refusing it
+    /// means the length no longer matches what is on the wire: the whole channel
+    /// goes with it. Dropping it costs one message; writing it costs the
+    /// session.
     async fn send_frame(&mut self, service_type: u32, timestamp_ms: u32, body: &[u8]) -> Result<()> {
         let channel = service_type >> 16;
+        let cap = frame::max_body(channel);
+        if body.len() > cap as usize {
+            tracing::warn!(
+                "[cl] message dropped: type={service_type:#010x} bytes={} cap={cap}",
+                body.len()
+            );
+            return Ok(());
+        }
         let message = frame::encode(channel, service_type, timestamp_ms, body);
         frame::write_chunk(&mut self.writer, channel, &message)
             .await
@@ -1073,11 +1469,38 @@ mod tests {
             self.send(HU_VIDEO_ENCODER_START, &[]).await;
         }
 
+        /// The car asking which data this device can provide, and the answer it
+        /// gets back.
+        async fn ask(&mut self, modules: &[i32]) -> frame::Message {
+            self.send(HU_DATA_SUBSCRIBE, &module_list(modules)).await;
+            self.expect(DATA_SUBSCRIBE_DONE).await
+        }
+
+        /// The car asking whether this device can tell it about a route, and
+        /// then asking to be told.
+        async fn subscribe(&mut self, modules: &[i32]) {
+            self.ask(modules).await;
+            self.send(HU_DATA_SUBSCRIBE_START, &module_list(modules)).await;
+        }
+
         /// Nothing at all on the pipe for this long.
         async fn expect_silence(&mut self, quiet_for: Duration) {
             let heard = tokio::time::timeout(quiet_for, frame::read_chunk(&mut self.pipe)).await;
             assert!(heard.is_err(), "the session spoke when it should not have");
         }
+    }
+
+    /// What the car sends when it asks about a module, or asks to be sent it: a
+    /// count and that many `{moduleID}` entries.
+    fn module_list(modules: &[i32]) -> Vec<u8> {
+        let mut out = Vec::new();
+        proto::put_int(&mut out, 1, modules.len() as i32);
+        for module in modules {
+            let mut entry = Vec::new();
+            proto::put_int(&mut entry, 1, *module);
+            proto::put_bytes(&mut out, 2, &entry);
+        }
+        out
     }
 
     fn asked() -> proto::VideoEncoderInfo {
@@ -1416,9 +1839,908 @@ mod tests {
         car.await.unwrap();
     }
 
+    /// The panel is told the song, not the phone's way of describing it: what
+    /// arrives as one attribute per update goes out as one message per change,
+    /// with the cover art joined onto the song it belongs to when it lands.
     #[tokio::test]
-    async fn the_files_access_units_go_out_in_order_and_start_over_at_the_end() {
+    async fn the_cars_panel_is_told_the_song_that_is_playing() {
         let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
+
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+        let sink = outlet.sink();
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+
+            // The phone names the song, and nothing else about it yet.
+            sink.playing(Playing::Track(Track {
+                song: Some("Reeperbahn".into()),
+                ..Track::default()
+            }));
+            let named = car.expect(MEDIA_INFO).await;
+            assert_eq!(
+                named.body,
+                proto::media_info(
+                    &Track {
+                        song: Some("Reeperbahn".into()),
+                        ..Track::default()
+                    },
+                    None
+                )
+            );
+
+            // Then the artist, which is the same song described further.
+            sink.playing(Playing::Track(Track {
+                artist: Some("Hamburg".into()),
+                ..Track::default()
+            }));
+            let described = car.expect(MEDIA_INFO).await;
+            assert_eq!(
+                described.body,
+                proto::media_info(
+                    &Track {
+                        song: Some("Reeperbahn".into()),
+                        artist: Some("Hamburg".into()),
+                        ..Track::default()
+                    },
+                    None
+                )
+            );
+
+            // The cover arrives as a file of its own, after the song it is of.
+            sink.playing(Playing::Artwork(vec![0xff, 0xd8, 0xff]));
+            let covered = car.expect(MEDIA_INFO).await;
+            assert_eq!(
+                covered.body,
+                proto::media_info(
+                    &Track {
+                        song: Some("Reeperbahn".into()),
+                        artist: Some("Hamburg".into()),
+                        ..Track::default()
+                    },
+                    Some(&[0xff, 0xd8, 0xff])
+                )
+            );
+
+            // The same song again is not worth a fourth message.
+            for _ in 0..2 {
+                sink.playing(Playing::Track(Track {
+                    song: Some("Reeperbahn".into()),
+                    ..Track::default()
+                }));
+            }
+            car.expect_silence(Duration::from_millis(300)).await;
+        });
+
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    /// A cover that arrives before the song it belongs to is kept for it, not
+    /// thrown away when the song turns up.
+    #[tokio::test]
+    async fn a_cover_that_arrives_before_the_song_is_kept_for_it() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
+
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+        let sink = outlet.sink();
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+
+            // The cover arrives first, with no song to attach it to yet.
+            sink.playing(Playing::Artwork(vec![0xff, 0xd8, 0xff]));
+            car.expect_silence(Duration::from_millis(300)).await;
+
+            // Then the song: the cover is still there, and the message carries
+            // both.
+            sink.playing(Playing::Track(Track {
+                song: Some("Reeperbahn".into()),
+                ..Track::default()
+            }));
+            let covered = car.expect(MEDIA_INFO).await;
+            assert_eq!(
+                covered.body,
+                proto::media_info(
+                    &Track {
+                        song: Some("Reeperbahn".into()),
+                        ..Track::default()
+                    },
+                    Some(&[0xff, 0xd8, 0xff])
+                )
+            );
+        });
+
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    /// A title that changes without a length is not another song but the same
+    /// one, renamed: an app that puts its lyrics in the title sends one per
+    /// line, and none of them is a song of its own. The cover stays, because
+    /// the song it belongs to has not gone anywhere.
+    #[tokio::test]
+    async fn a_line_of_lyrics_keeps_the_cover() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
+
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+        let sink = outlet.sink();
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+
+            let reeperbahn = Track {
+                song: Some("Reeperbahn".into()),
+                artist: Some("Hamburg".into()),
+                album: Some("Beatles".into()),
+                duration_s: Some(180),
+                ..Track::default()
+            };
+
+            sink.playing(Playing::Track(reeperbahn.clone()));
+            car.expect(MEDIA_INFO).await;
+            sink.playing(Playing::Artwork(vec![0xff, 0xd8]));
+            let covered = car.expect(MEDIA_INFO).await;
+            assert_eq!(
+                covered.body,
+                proto::media_info(&reeperbahn, Some(&[0xff, 0xd8]))
+            );
+
+            // The next line of the lyrics: a title, and nothing else said.
+            sink.playing(Playing::Track(Track {
+                song: Some("Reeperbahn — line two".into()),
+                ..Track::default()
+            }));
+            let told = car.expect(MEDIA_INFO).await;
+            let renamed = Track {
+                song: Some("Reeperbahn — line two".into()),
+                ..reeperbahn.clone()
+            };
+            assert_eq!(
+                told.body,
+                proto::media_info(&renamed, Some(&[0xff, 0xd8]))
+            );
+        });
+
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    /// A file transfer that carried nothing is the phone saying the song has no
+    /// picture. It is kept as the cover that is held, so the one before it goes
+    /// down with it — and the message that follows carries no `albumArt` at all
+    /// rather than a field with nothing in it to draw.
+    #[tokio::test]
+    async fn an_empty_cover_puts_the_last_one_down() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
+
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+        let sink = outlet.sink();
+
+        let song = Track {
+            song: Some("Reeperbahn".into()),
+            ..Track::default()
+        };
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+
+            sink.playing(Playing::Track(song.clone()));
+            car.expect(MEDIA_INFO).await;
+
+            // A picture, which the car is given.
+            let art = vec![0xff, 0xd8, 0xff];
+            sink.playing(Playing::Artwork(art.clone()));
+            let told = car.expect(MEDIA_INFO).await;
+            assert_eq!(told.body, proto::media_info(&song, Some(&art)));
+
+            // And the phone saying there is none takes it back.
+            sink.playing(Playing::Artwork(Vec::new()));
+            let told = car.expect(MEDIA_INFO).await;
+            assert_eq!(told.body, proto::media_info(&song, None));
+        });
+
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    /// A length is what says a song has started, and the cover that is held
+    /// belongs to the one before it. A file transfer names no song, so the new
+    /// one is sent without a cover rather than wearing the last one's — and the
+    /// page puts its picture down with it.
+    #[tokio::test]
+    async fn a_song_with_a_length_puts_the_last_cover_down() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
+
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+        let sink = outlet.sink();
+
+        let first = Track {
+            song: Some("Reeperbahn".into()),
+            ..Track::default()
+        };
+        let next = Track {
+            song: Some("So What".into()),
+            duration_s: Some(545),
+            ..Track::default()
+        };
+
+        let status = Arc::new(Status::new());
+        let page = status.clone();
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+
+            sink.playing(Playing::Track(first.clone()));
+            car.expect(MEDIA_INFO).await;
+
+            let art = vec![0xff, 0xd8, 0xff];
+            sink.playing(Playing::Artwork(art.clone()));
+            let told = car.expect(MEDIA_INFO).await;
+            assert_eq!(told.body, proto::media_info(&first, Some(&art)));
+            assert!(page.cover().is_some(), "the page has the picture");
+
+            // The next song announces itself with its length.
+            sink.playing(Playing::Track(next.clone()));
+            let told = car.expect(MEDIA_INFO).await;
+            assert_eq!(told.body, proto::media_info(&next, None));
+            assert!(page.cover().is_none(), "and the page puts it down");
+
+            // Its own picture then goes out with it, as any cover does.
+            sink.playing(Playing::Artwork(vec![0x89, 0x50]));
+            let told = car.expect(MEDIA_INFO).await;
+            assert_eq!(told.body, proto::media_info(&next, Some(&[0x89, 0x50])));
+        });
+
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            status,
+        )
+        .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    /// The app the phone is playing from is not a song. It is sent with every
+    /// change of play state, and a panel emptied by one of those is worse than
+    /// one the car never updated.
+    #[tokio::test]
+    async fn the_play_state_on_its_own_is_not_a_song() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
+
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+        let sink = outlet.sink();
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+
+            sink.playing(Playing::Track(Track {
+                source: Some("Music".into()),
+                ..Track::default()
+            }));
+            car.expect_silence(Duration::from_millis(300)).await;
+
+            // And the song that follows carries the app with it.
+            sink.playing(Playing::Track(Track {
+                song: Some("Reeperbahn".into()),
+                ..Track::default()
+            }));
+            let told = car.expect(MEDIA_INFO).await;
+            assert_eq!(
+                told.body,
+                proto::media_info(
+                    &Track {
+                        source: Some("Music".into()),
+                        song: Some("Reeperbahn".into()),
+                        ..Track::default()
+                    },
+                    None
+                )
+            );
+        });
+
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    /// The phone describes a song one attribute at a time, and each of those is
+    /// sent as it arrives: the car's message is the whole song, so the panel is
+    /// told the song as it stands rather than waiting for the phone to finish
+    /// describing it. It redraws once per attribute, which is what the phone's
+    /// own panel does with the same messages.
+    #[tokio::test]
+    async fn every_word_from_the_phone_goes_out_at_once() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
+
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+        let sink = outlet.sink();
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+
+            // The title, and nothing else yet.
+            sink.playing(Playing::Track(Track {
+                song: Some("Reeperbahn".into()),
+                ..Track::default()
+            }));
+            let told = car.expect(MEDIA_INFO).await;
+            assert_eq!(
+                told.body,
+                proto::media_info(
+                    &Track {
+                        song: Some("Reeperbahn".into()),
+                        ..Track::default()
+                    },
+                    None
+                )
+            );
+
+            // The artist, which goes out with the title already known.
+            sink.playing(Playing::Track(Track {
+                artist: Some("Hamburg".into()),
+                ..Track::default()
+            }));
+            let told = car.expect(MEDIA_INFO).await;
+            assert_eq!(
+                told.body,
+                proto::media_info(
+                    &Track {
+                        song: Some("Reeperbahn".into()),
+                        artist: Some("Hamburg".into()),
+                        ..Track::default()
+                    },
+                    None
+                )
+            );
+
+            // And the album, which is the last of it.
+            sink.playing(Playing::Track(Track {
+                album: Some("Stadt".into()),
+                ..Track::default()
+            }));
+            let told = car.expect(MEDIA_INFO).await;
+            assert_eq!(
+                told.body,
+                proto::media_info(
+                    &Track {
+                        song: Some("Reeperbahn".into()),
+                        artist: Some("Hamburg".into()),
+                        album: Some("Stadt".into()),
+                        ..Track::default()
+                    },
+                    None
+                )
+            );
+        });
+
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    /// A cover the car's message cannot carry is left out, and the song is not:
+    /// the panel loses the picture, not the song.
+    #[tokio::test]
+    async fn a_cover_too_large_for_the_cars_message_is_left_out() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
+
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+        let sink = outlet.sink();
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+
+            let track = Track {
+                song: Some("Reeperbahn".into()),
+                ..Track::default()
+            };
+
+            // One byte past what the message may carry.
+            sink.playing(Playing::Artwork(vec![0xff; proto::MAX_ART + 1]));
+            sink.playing(Playing::Track(track.clone()));
+            let told = car.expect(MEDIA_INFO).await;
+            assert_eq!(told.body, proto::media_info(&track, None));
+
+            // And one that fits exactly is the car's to draw.
+            let fits = vec![0x89; proto::MAX_ART];
+            sink.playing(Playing::Artwork(fits.clone()));
+            let covered = car.expect(MEDIA_INFO).await;
+            assert_eq!(covered.body, proto::media_info(&track, Some(&fits)));
+        });
+
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    /// A body past what its channel allows is dropped rather than written. The
+    /// car refuses such a message, and a refused length leaves the channel
+    /// waiting for bytes that will never come: one lost message is the cheaper
+    /// of the two.
+    #[tokio::test]
+    async fn a_message_larger_than_its_channel_allows_is_dropped() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
+
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+        let sink = outlet.sink();
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+
+            sink.push(StreamEvent::AudioConfig {
+                stream_type: 102,
+                codec: AudioCodec::AacLc {
+                    rate: 48_000,
+                    channels: 2,
+                },
+                name: "media".into(),
+            });
+            car.expect(MEDIA_INIT).await;
+
+            // One byte past the media channel's body cap.
+            sink.push(StreamEvent::AudioPacket {
+                stream_type: 102,
+                timestamp_us: 1_000_000,
+                data: vec![0x11; 100 * 1024 + 1],
+            });
+            car.expect_silence(Duration::from_millis(300)).await;
+
+            // And the channel is still there, with nothing left over on it.
+            sink.push(StreamEvent::AudioPacket {
+                stream_type: 102,
+                timestamp_us: 1_100_000,
+                data: vec![0x22],
+            });
+            let sound = car.expect(MEDIA_DATA).await;
+            assert_eq!(sound.body, vec![0x22]);
+            assert_eq!(sound.timestamp_ms, Some(1_100));
+        });
+
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    /// The strip is the whole point of the subscription. The phone's two
+    /// route-guidance messages say nothing about a strip and the car's two say
+    /// nothing about a route, so this is the join between them — and what the
+    /// car is told changes exactly when the strip it would draw does.
+    #[tokio::test]
+    async fn the_cars_strip_is_told_the_turn_the_phone_is_guiding_to() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
+
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+        let sink = outlet.sink();
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+            car.subscribe(&[proto::DATA_TURN_BY_TURN]).await;
+
+            // The phone describes a turn before it says which one is current,
+            // and until it says, there is no strip to draw.
+            sink.guidance(Guidance::about_a_turn(1, Some(1), Some("Elbchaussee")));
+            car.expect_silence(Duration::from_millis(300)).await;
+
+            // Now the route: a left turn, 350 m away.
+            sink.guidance(Guidance::about_the_route(Some(1), Some(350), Some(vec![1])));
+            let state = car.expect(MODULE_STATUS).await;
+            assert_eq!(
+                state.body,
+                proto::module_status(proto::NAVI_MODULE, proto::NAVI_START)
+            );
+            let shown = car.expect(NAVI_NEXT_TURN_INFO).await;
+            assert_eq!(
+                shown.body,
+                proto::navi_next_turn_info(
+                    proto::ACTION_SHOW,
+                    &proto::NextTurn {
+                        kind: Some(0x07),
+                        road: Some("Elbchaussee".into()),
+                        remain_m: Some(350),
+                    }
+                )
+            );
+
+            // The same turn, closer: an update and not a second show.
+            sink.guidance(Guidance::about_the_route(Some(1), Some(120), None));
+            let updated = car.expect(NAVI_NEXT_TURN_INFO).await;
+            assert_eq!(
+                updated.body,
+                proto::navi_next_turn_info(
+                    proto::ACTION_UPDATE,
+                    &proto::NextTurn {
+                        kind: Some(0x07),
+                        road: Some("Elbchaussee".into()),
+                        remain_m: Some(120),
+                    }
+                )
+            );
+
+            // And the same turn again is not worth a third message.
+            sink.guidance(Guidance::about_the_route(None, Some(120), None));
+            car.expect_silence(Duration::from_millis(300)).await;
+
+            // The route is over: the module is idle and the strip comes down.
+            sink.guidance(Guidance::about_the_route(Some(0), None, None));
+            let idle = car.expect(MODULE_STATUS).await;
+            assert_eq!(
+                idle.body,
+                proto::module_status(proto::NAVI_MODULE, proto::NAVI_IDLE)
+            );
+            let hidden = car.expect(NAVI_NEXT_TURN_INFO).await;
+            assert_eq!(
+                hidden.body,
+                proto::navi_next_turn_info(proto::ACTION_HIDE, &proto::NextTurn::default())
+            );
+        });
+
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    /// The strip is behind the car's subscription; the navigation module's own
+    /// state is not. The first is data the car asked to be told, and the second
+    /// is the phone saying something about itself, which the car hears either
+    /// way — and a car with no strip to fill is a car with nowhere to put one.
+    #[tokio::test]
+    async fn the_strip_is_not_sent_until_the_car_asks_for_it() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
+
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+        let sink = outlet.sink();
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+
+            // A whole route, described and being guided, with nobody having
+            // asked: a right turn onto the B27, 90 m away.
+            sink.guidance(Guidance::about_a_turn(1, Some(2), Some("B27")));
+            sink.guidance(Guidance::about_the_route(Some(1), Some(90), Some(vec![1])));
+
+            let state = car.expect(MODULE_STATUS).await;
+            assert_eq!(
+                state.body,
+                proto::module_status(proto::NAVI_MODULE, proto::NAVI_START)
+            );
+            car.expect_silence(Duration::from_millis(300)).await;
+
+            // And the moment the car asks, the turn it is already on.
+            car.subscribe(&[proto::DATA_TURN_BY_TURN]).await;
+            let shown = car.expect(NAVI_NEXT_TURN_INFO).await;
+            assert_eq!(
+                shown.body,
+                proto::navi_next_turn_info(
+                    proto::ACTION_SHOW,
+                    &proto::NextTurn {
+                        kind: Some(0x03),
+                        road: Some("B27".into()),
+                        remain_m: Some(90),
+                    }
+                )
+            );
+            // The state it was already told is not said twice.
+            car.expect_silence(Duration::from_millis(300)).await;
+        });
+
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    /// The car's question is about what this device can do, so it is answered
+    /// per module — including the one there is nothing behind, which is not a
+    /// thing to claim.
+    #[tokio::test]
+    async fn the_cars_question_about_what_this_device_can_provide_is_answered() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+
+            // The two the guide names, in the order it names them: the simple
+            // guidance is what this device produces, the assistant guide is not.
+            let answer = car.ask(&[proto::DATA_TURN_BY_TURN, 1]).await;
+            assert_eq!(
+                answer.body,
+                proto::data_subscribe_done(&[(proto::DATA_TURN_BY_TURN, true), (1, false)])
+            );
+
+            // And a module neither side has a name for is not one to claim
+            // either.
+            let answer = car.ask(&[7]).await;
+            assert_eq!(answer.body, proto::data_subscribe_done(&[(7, false)]));
+        });
+
+        run(
+            device,
+            &Frames::None,
+            &cfg,
+            &mut |_, _, _| {},
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+        .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    /// A turn the two vocabularies have no word in common for goes out without
+    /// one. The road and the distance are still true, and an arrow would not be.
+    #[tokio::test]
+    async fn a_turn_the_car_has_no_word_for_is_sent_without_one() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
+
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+        let sink = outlet.sink();
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+            car.subscribe(&[proto::DATA_TURN_BY_TURN]).await;
+
+            // Leaving a motorway: iAP2's own type 8, which the car's list of
+            // turns has no arrow for.
+            sink.guidance(Guidance::about_a_turn(1, Some(8), Some("B27")));
+            sink.guidance(Guidance::about_the_route(Some(1), Some(400), Some(vec![1])));
+            car.expect(MODULE_STATUS).await;
+            let shown = car.expect(NAVI_NEXT_TURN_INFO).await;
+            assert_eq!(
+                shown.body,
+                proto::navi_next_turn_info(
+                    proto::ACTION_SHOW,
+                    &proto::NextTurn {
+                        kind: None,
+                        road: Some("B27".into()),
+                        remain_m: Some(400),
+                    }
+                )
+            );
+        });
+
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    /// A car that stops asking has the strip taken down — and is told nothing
+    /// else, because the navigation it stopped being told about is still
+    /// running.
+    #[tokio::test]
+    async fn the_strip_is_taken_down_when_the_car_stops_asking_for_it() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
+
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+        let sink = outlet.sink();
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+            car.subscribe(&[proto::DATA_TURN_BY_TURN]).await;
+
+            sink.guidance(Guidance::about_a_turn(1, Some(2), Some("B27")));
+            sink.guidance(Guidance::about_the_route(Some(1), Some(90), Some(vec![1])));
+            car.expect(MODULE_STATUS).await;
+            car.expect(NAVI_NEXT_TURN_INFO).await;
+
+            car.send(
+                HU_DATA_SUBSCRIBE_STOP,
+                &module_list(&[proto::DATA_TURN_BY_TURN]),
+            )
+            .await;
+            let hidden = car.expect(NAVI_NEXT_TURN_INFO).await;
+            assert_eq!(
+                hidden.body,
+                proto::navi_next_turn_info(proto::ACTION_HIDE, &proto::NextTurn::default())
+            );
+            car.expect_silence(Duration::from_millis(300)).await;
+        });
+
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_files_access_units_go_out_in_order_and_start_over_at_the_end() {        let cfg = Config::from_env();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
 
@@ -1602,7 +2924,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn both_channels_are_given_back_when_the_session_ends() {
+    async fn every_channel_is_given_back_when_the_session_ends() {
         let cfg = Config::from_env();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
@@ -1635,6 +2957,14 @@ mod tests {
         outlet.return_video(rx);
         let rx = outlet.take_media().expect("the media channel was handed back");
         outlet.return_media(rx);
+        let rx = outlet
+            .take_playing()
+            .expect("what the phone is playing was handed back");
+        outlet.return_playing(rx);
+        let rx = outlet
+            .take_guidance()
+            .expect("where the phone is going was handed back");
+        outlet.return_guidance(rx);
     }
 
     #[tokio::test]

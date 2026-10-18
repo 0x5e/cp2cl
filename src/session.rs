@@ -24,11 +24,11 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use iap2_link::LinkConfig;
 use livi_runtime::bringup::{run_accessory, BringupEvent, CpConfig};
-use livi_runtime::driver::spawn_link_stream;
+use livi_runtime::driver::{spawn_link_stream, ArtworkRx};
 use livi_runtime::ident::Identity;
 // `CpConfig::transport` is a `Transport`, but `bringup` only imports it
 // privately, so it has to be named through the module that defines it.
@@ -38,7 +38,12 @@ use livi_runtime::vehicle::Vehicle;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{broadcast, mpsc};
 
+use crate::artwork::{self, Fitted};
+use crate::carlife::proto;
 use crate::config::Config;
+use crate::navigation::Guidance;
+use crate::playing::{Playing, Track};
+use crate::sink::ClSink;
 use crate::web::Status;
 use crate::wireless::{parse_mac, short};
 
@@ -51,6 +56,19 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(1);
 /// second, and the reference waits the same 750ms between tearing its own
 /// bootstrap down and starting another.
 const RESTART_PAUSE: Duration = Duration::from_millis(750);
+
+/// iAP2's `NowPlayingUpdate`, which is what the phone describes a song with. It
+/// is subscribed to with everything else at the start of a session — see LIVI's
+/// `bringup::subscriptions` — and arrives as one more incoming message.
+const NOW_PLAYING: u16 = 0x5001;
+
+/// iAP2's two route-guidance messages, which the car's turn-by-turn strip is
+/// drawn from: the route as a whole — its state, the distance to the next turn,
+/// and which of its turns is the current one — and one turn of it at a time, by
+/// index. Subscribed to with everything else at the start of a session, like
+/// `NOW_PLAYING` above, and reconciled on the other side; see `crate::navigation`.
+const ROUTE_GUIDANCE: u16 = 0x5201;
+const ROUTE_GUIDANCE_MANEUVER: u16 = 0x5202;
 
 /// Why a bringup ended, which is what says whether to start another.
 pub(crate) enum Ended {
@@ -127,12 +145,18 @@ async fn carkit(mux: &Arc<iap2_usbmux::MuxDevice>) -> anyhow::Result<Box<dyn ide
 /// `gate` is the CarLife session. While it is shut nothing is looked for at all:
 /// the phone has no CarPlay to start, and starting one would only produce an
 /// AirPlay connection the receiver is not accepting yet.
+///
+/// `panel` is where what the phone has to say about itself goes — the song it is
+/// playing, the route it is guiding along. It is the CarLife side's own sink, so
+/// all of it reaches the car by the road every other thing the phone produces
+/// does.
 pub async fn watch(
     cfg: Arc<Config>,
     auth: SharedCoprocessor,
     airplay_port: u32,
     restart: broadcast::Sender<()>,
     mut gate: tokio::sync::watch::Receiver<bool>,
+    panel: Arc<ClSink>,
     status: Arc<Status>,
 ) {
     let mut busy: Option<String> = None;
@@ -172,7 +196,17 @@ pub async fn watch(
                     s.carplay.subscribed = false;
                     s.carplay.failed = None;
                 });
-                match attach(&cfg, auth.clone(), &phone, airplay_port, &restart, &status).await {
+                match attach(
+                    &cfg,
+                    auth.clone(),
+                    &phone,
+                    airplay_port,
+                    &restart,
+                    &panel,
+                    &status,
+                )
+                .await
+                {
                     Ok(_) => busy = Some(phone.id.clone()),
                     Err(e) => tracing::warn!("[cp] {} could not attach: {e}", short(&phone.id)),
                 }
@@ -198,6 +232,7 @@ async fn attach(
     phone: &Phone,
     airplay_port: u32,
     restart: &broadcast::Sender<()>,
+    panel: &Arc<ClSink>,
     status: &Status,
 ) -> anyhow::Result<Ended> {
     // Subscribed before anything opens, so a display change made while the
@@ -246,6 +281,11 @@ async fn attach(
         };
         let (channel, artwork) = spawn_link_stream(stream, link, true);
 
+        // The cover art is a file transfer of its own on the same link, so it is
+        // carried across as it lands rather than waited for: the update that
+        // names the song says only that art is coming.
+        let carrying = tokio::spawn(carry_artwork(artwork, panel.clone()));
+
         let cp = CpConfig {
             wifi_iface: String::new(),
             ssid: cfg.name.clone(),
@@ -284,15 +324,25 @@ async fn attach(
         });
 
         let ended =
-            run_bringup("[cp]", &short(&phone.id), airplay_port, None, rx, &mut changed, status)
+            run_bringup(
+                "[cp]",
+                &short(&phone.id),
+                airplay_port,
+                None,
+                rx,
+                &mut changed,
+                panel,
+                status,
+            )
                 .await;
 
         // Neither half of the link may outlive this round. Aborting the session
         // drops its handle to the link, and the latch is what makes the driver's
-        // parked read return so the tunnel itself closes — see `Latched`.
+        // parked read return so the tunnel itself closes — see `Latched`. The
+        // art has nowhere to go once the link that carried it is gone.
         accessory.abort();
         let _ = accessory.await;
-        drop(artwork);
+        carrying.abort();
         shut.shutdown();
 
         match ended {
@@ -320,6 +370,10 @@ async fn attach(
 /// `changed` fires when what the phone should render has changed, which the
 /// caller turns into a new session.
 ///
+/// `panel` is where what the phone says about itself goes: the bringup hands on
+/// every incoming message, and these are the ones this side acts on rather than
+/// leaves alone.
+///
 /// `status` is told how far the conversation got, which is the only place any of
 /// these steps is known: see `crate::web::status`.
 pub(crate) async fn run_bringup(
@@ -329,6 +383,7 @@ pub(crate) async fn run_bringup(
     ssid: Option<&str>,
     mut rx: mpsc::Receiver<BringupEvent>,
     changed: &mut broadcast::Receiver<()>,
+    panel: &ClSink,
     status: &Status,
 ) -> Ended {
     loop {
@@ -380,12 +435,194 @@ pub(crate) async fn run_bringup(
                 tracing::info!("{prefix} {peer} session closed");
                 return Ended::Finished;
             }
+            // What the phone is playing, which the car's panel is owed. It is
+            // one of the messages the bringup hands on rather than acts on, and
+            // the only one of them that goes any further than the log.
+            Some(BringupEvent::Incoming {
+                msg_id: NOW_PLAYING,
+                frame,
+            }) => match Track::from_iap2(&frame) {
+                // The phone describes one attribute at a time, so this is the
+                // line per message rather than per song: what it just said, not
+                // what is known. `[cl] media info` is the other end of it.
+                //
+                // It also sends this message for things the car has no field
+                // for — whether it is playing, where it is in the song — and
+                // those carry none of the four. A line saying nothing is worse
+                // than no line, so only the ones with something in them are
+                // printed.
+                //
+                // `debug` rather than `info`: an app that writes its lyrics
+                // into the title has the phone describing one every few
+                // seconds, and at `info` that is most of the log.
+                Some(track) => {
+                    if let Some(line) = said(&track) {
+                        tracing::debug!("[cp] media: {line}");
+                    }
+                    panel.playing(Playing::Track(track));
+                }
+                // A song this side cannot read is one the panel is never told
+                // about, and nothing further down would say so.
+                None => tracing::warn!(
+                    "[cp] media: a NowPlayingUpdate that does not decode bytes={}",
+                    frame.len()
+                ),
+            },
+            // And where it is going. The two messages are sent one at a time and
+            // each describes part of the route, so neither is worth anything on
+            // its own: they are handed on as they arrive and put back together
+            // by whoever draws the strip. See `crate::navigation`.
+            Some(BringupEvent::Incoming {
+                msg_id: ROUTE_GUIDANCE | ROUTE_GUIDANCE_MANEUVER,
+                frame,
+            }) => {
+                if let Some(update) = Guidance::from_iap2(&frame) {
+                    panel.guidance(update);
+                }
+            }
             Some(_) => {}
             // The bringup task ended without saying so, which only happens when
             // it was torn down; there is nothing left to watch.
             None => return Ended::Finished,
         }
     }
+}
+
+/// The fields one `NowPlayingUpdate` carried, as key=value pairs.
+///
+/// Only the ones it mentioned: a field it left out is one it did not change,
+/// and printing all five would make every line the same shape and none of them
+/// say anything. The phone sends a handful of these per song, so it is `debug`.
+///
+/// `None` when it mentioned none of them, which the phone does for the messages
+/// that are about what it is doing rather than what it is playing.
+fn said(track: &Track) -> Option<String> {
+    let mut parts: Vec<String> = [
+        ("song", track.song.as_deref()),
+        ("artist", track.artist.as_deref()),
+        ("album", track.album.as_deref()),
+        ("source", track.source.as_deref()),
+    ]
+    .iter()
+    .filter_map(|(name, value)| value.map(|value| format!("{name}={value:?}")))
+    .collect();
+    if let Some(seconds) = track.duration_s {
+        parts.push(format!("duration={seconds}s"));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
+/// The phone's cover art, as it lands, on its way to the car's panel.
+///
+/// It is its own file transfer on the link rather than part of the message that
+/// named the song, so this is where the two are put back together — as far as
+/// they can be: the file says nothing about which song it belongs to, so the
+/// CarLife side takes it as belonging to the newest one, and holds it until a
+/// song turns up to attach it to.
+///
+/// A cover the car's message cannot carry is re-encoded first — see
+/// `crate::artwork` — because the alternative is a song shown with no picture at
+/// all. It is done here rather than on the CarLife side so that the decoding and
+/// the encoding happen off the task that writes the streams: tens of
+/// milliseconds is long enough to be felt in the video.
+pub(crate) async fn carry_artwork(mut artwork: ArtworkRx, panel: Arc<ClSink>) {
+    // An app that re-announces the song it is playing sends its cover again, and
+    // the same picture is not worth decoding twice. The picture is still handed
+    // over — the CarLife side drops one it is already holding — but the work is
+    // not done again.
+    let mut last: Option<((usize, u64), Fitted)> = None;
+
+    while let Some(image) = artwork.recv().await {
+        let seen = (image.len(), fingerprint(&image));
+        let fitted = match &last {
+            Some((before, fitted)) if *before == seen => fitted.clone(),
+            _ => {
+                let started = Instant::now();
+                let budget = proto::MAX_ART;
+                // A join error means the task panicked, or the runtime is going
+                // away with the session. Either way there is no picture to hand
+                // over, and the next cover is still worth carrying.
+                let Ok(fitted) =
+                    tokio::task::spawn_blocking(move || artwork::fit(&image, budget)).await
+                else {
+                    tracing::warn!("[cp] cover dropped: the compression task did not finish");
+                    continue;
+                };
+                report_cover(&fitted, seen.0, started.elapsed());
+                last = Some((seen, fitted.clone()));
+                fitted
+            }
+        };
+
+        match fitted {
+            Fitted::AsIs(bytes) | Fitted::Shrunk { bytes, .. } => {
+                panel.playing(Playing::Artwork(bytes))
+            }
+            // The panel is better left with the song it has than with a picture
+            // the car would refuse the message over.
+            Fitted::GaveUp { .. } => {}
+        }
+    }
+}
+
+/// What became of a cover, said once and at the level it deserves.
+///
+/// A cover that fitted is the ordinary case and worth a line only when someone
+/// is looking for it, so it is `debug`. One that had to be re-encoded is worth
+/// `info`: it is the one place where how large the phone's artwork was, and how
+/// much of it survived, can be seen.
+fn report_cover(fitted: &Fitted, bytes: usize, took: Duration) {
+    let ms = took.as_millis();
+    match fitted {
+        Fitted::AsIs(_) => tracing::debug!("[cp] cover: in={bytes} passthrough"),
+        Fitted::Shrunk {
+            bytes: out,
+            kind,
+            size,
+            quality,
+            tries,
+            orientation,
+        } => {
+            let turned = if *orientation == 1 {
+                String::new()
+            } else {
+                format!(" orientation={orientation}")
+            };
+            tracing::info!(
+                "[cp] cover compressed: src={kind} in={bytes} out={} size={}x{} q={quality} \
+                 tries={tries}{turned} ms={ms}",
+                out.len(),
+                size.0,
+                size.1
+            );
+        }
+        Fitted::GaveUp { why, best, tries } => match best {
+            Some(best) => tracing::warn!(
+                "[cp] cover dropped: in={bytes} reason={why} best={} size={}x{} q={} \
+                 tries={tries} ms={ms}",
+                best.bytes,
+                best.size.0,
+                best.size.1,
+                best.quality
+            ),
+            None => tracing::warn!("[cp] cover dropped: in={bytes} reason={why} ms={ms}"),
+        },
+    }
+}
+
+/// A cheap fingerprint of a file, so the same cover arriving twice is recognised
+/// as the one that was just dealt with.
+///
+/// FNV-1a, which is not a hash to trust an attacker with and does not need to be:
+/// it only ever compares two files the phone itself sent.
+fn fingerprint(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 /// A byte stream that can be made to look like the far end went away.
@@ -494,4 +731,53 @@ async fn av_interface() -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sink::ClOutlet;
+
+    /// The line says what the phone said, and only that: an update that
+    /// mentions one field is one pair, not five with four of them empty. One
+    /// that mentions none is no line at all.
+    #[test]
+    fn a_line_says_only_what_the_phone_said() {
+        let update = Track {
+            song: Some("So What".into()),
+            duration_s: Some(545),
+            ..Track::default()
+        };
+        assert_eq!(
+            said(&update).as_deref(),
+            Some("song=\"So What\" duration=545s")
+        );
+        assert_eq!(said(&Track::default()), None);
+    }
+
+    /// A cover is carried or it is not: one the car's message cannot take never
+    /// reaches the CarLife side, and the ones either side of it still do.
+    #[tokio::test]
+    async fn a_cover_the_car_cannot_take_never_reaches_it() {
+        let outlet = Arc::new(ClOutlet::new());
+        let mut told = outlet.take_playing().expect("the queue");
+        let (tx, rx) = mpsc::unbounded_channel();
+        let carrying = tokio::spawn(carry_artwork(rx, outlet.sink()));
+
+        // Three bytes of a JPEG: small enough to go as it is.
+        let fits = vec![0xff, 0xd8, 0xff];
+        tx.send(fits.clone()).expect("a cover");
+        // Neither a picture nor something the message could carry.
+        tx.send(vec![0x42; 40 * 1024]).expect("a cover");
+        tx.send(fits.clone()).expect("a cover");
+
+        for _ in 0..2 {
+            let item = told.recv().await.expect("a cover");
+            assert_eq!(item, Playing::Artwork(fits.clone()));
+        }
+        assert!(told.try_recv().is_err(), "nothing else was carried");
+
+        drop(tx);
+        carrying.await.expect("the task ends with the link");
+    }
 }
