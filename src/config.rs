@@ -9,7 +9,6 @@
 //! (`bt_address`).
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 fn env(key: &str) -> Option<String> {
     std::env::var(key)
@@ -87,16 +86,6 @@ pub struct Config {
     /// The size in millimetres is derived from this and the canvas the car asks
     /// for, because no CarLife message carries one. See `info.rs`.
     pub ppi: u32,
-    /// How long the phone is given to finish describing a song before the car
-    /// is told about it, in milliseconds.
-    ///
-    /// The phone describes one song over several messages — the title, then the
-    /// artist, then the album — while the car's message is the whole song, so
-    /// one message per attribute would redraw the panel several times for one
-    /// song. Every update restarts this pause, and what goes out when it ends
-    /// is the song as the phone finished describing it. Zero sends each update
-    /// as it arrives.
-    pub media_delay: Duration,
     /// This machine's own Bluetooth address, which is also the identifier
     /// `/info` reports — see `bt_address`.
     pub bt_mac: String,
@@ -131,7 +120,6 @@ impl Config {
         Self {
             auth_dir: Self::resolve_auth_dir(),
             ppi: env_num("CP2CL_PPI", 120),
-            media_delay: Duration::from_millis(env_num("CP2CL_MEDIA_DELAY_MS", 1_000)),
             bt_mac: bt_address(&bt_adapter),
             name: hostname(),
             // Wired stays the default: it needs nothing the operator has to

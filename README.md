@@ -567,7 +567,10 @@ else: `http://<board>/` from anything on the same network. It is the one place
 both halves are visible at once, and they are two halves of one negotiation seen
 from opposite ends: **CarLife连接** is what the head unit is doing,
 **CarPlay连接** is what the phone is doing, and neither end can see the other's
-side.
+side. **正在播放** is what the two agree on: the song the car's panel is showing,
+which belongs to neither half and is the one part of the page someone sitting in
+the car can check against what they see. It is shown only while both ends are
+up — a song on a page whose halves are down describes a moment that has passed.
 
 The port is not a setting, and neither is the page: it is one HTML file with no
 build step, compiled into the binary along with its stylesheet. There is nothing
@@ -588,8 +591,18 @@ every two seconds and redraws from what comes back. That endpoint is the whole
 API, and it answers with the same snapshot the page shows:
 
 ```json
-{ "carlife": { ... }, "carplay": { ... } }
+{ "carlife": { ... }, "carplay": { ... }, "now_playing": { ... } }
 ```
+
+The cover is the one thing not in it. It is a JPEG, fetched from `GET
+/api/cover?id=<hash>`, where the hash is what `now_playing.cover.id` holds: the
+name is the picture, so the page keeps the one it is drawing and downloads
+another only when the car has been given one. A request naming anything else —
+a cover from a song that has finished, or no name at all — is answered with
+`404` rather than with whatever is current, because an answer under the wrong
+name would be one song's picture drawn as another's and cached under it for a
+year. A new song arrives without a cover and puts the last one down — see
+[Now playing](#now-playing).
 
 A field is either a value or `null`, and `null` means the thing it describes has
 not happened yet — a car that has not asked for its six identifiers has six
@@ -646,15 +659,18 @@ as `NowPlayingUpdate` — one attribute per message, with the cover art as a fil
 transfer of its own — while CarLife's `MSG_CMD_MEDIA_INFO` carries the whole song
 in a single message. `src/playing.rs` is where the two shapes are reconciled:
 `Track` folds the phone's partial updates together, and the CarLife session sends
-the message once the folded song has stopped changing.
+the whole of what is known each time one arrives.
 
-One song therefore costs one message rather than one per attribute. Each update
-puts a pause back, and the message goes out when the pause ends — a second by
-default, `CP2CL_MEDIA_DELAY_MS` to change it, and `0` to send every update the
-moment it arrives.
+Every update therefore goes out as it arrives, one message per attribute, which
+is what the phone's own panel does with the same messages: a title, then the
+title and artist, then the three of them. There is no pause and nothing to
+tune — the phone is what decides when the song changes.
 
 The panel gets the song, the artist, the album, its length and where it is
-playing from, plus the cover once the phone has sent one. Three of the car's nine
+playing from, plus the cover once the phone has sent one. A field is written
+only when there is something behind it: one left out carries its default, which
+is the same value an empty one would, so a song without a cover has no
+`albumArt` at all rather than a field of length zero. Three of the car's nine
 fields are left out rather than written as zero. `playlistNum` and `songId` are
 subscription-gated — the phone is not subscribed for `persistent_id` or
 `app_bundle_id` — and iAP2 has no message for the play `mode` at all. An absent
@@ -662,8 +678,16 @@ field and a zero are not the same claim: a `mode` of zero would be single-track
 repeat.
 
 The cover arrives after the update that named the song and names no song itself,
-so it is taken as belonging to the newest one; a title that changes puts it down,
-rather than showing the old song's cover under the new name.
+so it is taken as belonging to the newest one. What puts it down is a song
+carrying a length: the length is what the phone sends when it describes a song
+rather than a change of play state, and it comes with the rest of the new one
+rather than after it, so it is the moment a song has started — and the picture
+held belongs to the one before it. A title that changes without a length keeps
+it, which is what an app that writes its lyrics into the title needs: it renames
+the song for every line, and every one of those is the same song. A file transfer
+that completes with no bytes in it is the phone saying this song has no picture.
+It puts down the cover that is held, and the message that follows carries no
+`albumArt` at all rather than a field with nothing in it to draw.
 
 A cover is only sent while it fits. The song and its cover travel in one
 command-channel message, whose body the car caps at 40 KB, and the reference app

@@ -441,11 +441,33 @@ pub(crate) async fn run_bringup(
             Some(BringupEvent::Incoming {
                 msg_id: NOW_PLAYING,
                 frame,
-            }) => {
-                if let Some(track) = Track::from_iap2(&frame) {
+            }) => match Track::from_iap2(&frame) {
+                // The phone describes one attribute at a time, so this is the
+                // line per message rather than per song: what it just said, not
+                // what is known. `[cl] media info` is the other end of it.
+                //
+                // It also sends this message for things the car has no field
+                // for — whether it is playing, where it is in the song — and
+                // those carry none of the four. A line saying nothing is worse
+                // than no line, so only the ones with something in them are
+                // printed.
+                //
+                // `debug` rather than `info`: an app that writes its lyrics
+                // into the title has the phone describing one every few
+                // seconds, and at `info` that is most of the log.
+                Some(track) => {
+                    if let Some(line) = said(&track) {
+                        tracing::debug!("[cp] media: {line}");
+                    }
                     panel.playing(Playing::Track(track));
                 }
-            }
+                // A song this side cannot read is one the panel is never told
+                // about, and nothing further down would say so.
+                None => tracing::warn!(
+                    "[cp] media: a NowPlayingUpdate that does not decode bytes={}",
+                    frame.len()
+                ),
+            },
             // And where it is going. The two messages are sent one at a time and
             // each describes part of the route, so neither is worth anything on
             // its own: they are handed on as they arrive and put back together
@@ -463,6 +485,34 @@ pub(crate) async fn run_bringup(
             // it was torn down; there is nothing left to watch.
             None => return Ended::Finished,
         }
+    }
+}
+
+/// The fields one `NowPlayingUpdate` carried, as key=value pairs.
+///
+/// Only the ones it mentioned: a field it left out is one it did not change,
+/// and printing all five would make every line the same shape and none of them
+/// say anything. The phone sends a handful of these per song, so it is `debug`.
+///
+/// `None` when it mentioned none of them, which the phone does for the messages
+/// that are about what it is doing rather than what it is playing.
+fn said(track: &Track) -> Option<String> {
+    let mut parts: Vec<String> = [
+        ("song", track.song.as_deref()),
+        ("artist", track.artist.as_deref()),
+        ("album", track.album.as_deref()),
+        ("source", track.source.as_deref()),
+    ]
+    .iter()
+    .filter_map(|(name, value)| value.map(|value| format!("{name}={value:?}")))
+    .collect();
+    if let Some(seconds) = track.duration_s {
+        parts.push(format!("duration={seconds}s"));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
     }
 }
 
@@ -687,6 +737,23 @@ async fn av_interface() -> Option<String> {
 mod tests {
     use super::*;
     use crate::sink::ClOutlet;
+
+    /// The line says what the phone said, and only that: an update that
+    /// mentions one field is one pair, not five with four of them empty. One
+    /// that mentions none is no line at all.
+    #[test]
+    fn a_line_says_only_what_the_phone_said() {
+        let update = Track {
+            song: Some("So What".into()),
+            duration_s: Some(545),
+            ..Track::default()
+        };
+        assert_eq!(
+            said(&update).as_deref(),
+            Some("song=\"So What\" duration=545s")
+        );
+        assert_eq!(said(&Track::default()), None);
+    }
 
     /// A cover is carried or it is not: one the car's message cannot take never
     /// reaches the CarLife side, and the ones either side of it still do.

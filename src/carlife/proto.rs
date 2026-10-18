@@ -279,12 +279,16 @@ pub const MAX_ART: usize = 30 * 1024;
 /// "开始播放或者切换歌曲时" (guide §13.2).
 ///
 /// `CarlifeMediaInfo` is nine fields and the guide calls every one of them
-/// required. Six are written here. The other three — `playlistNum`, `songId` and
-/// `mode` — are not, because the phone has nothing behind them: see
-/// `crate::playing` for which subscription is missing and why a zero would be a
-/// claim rather than a silence. The car's own parser reads a body that stops
-/// early and hands its callbacks the defaults, so an absent field is the same
-/// empty value, said honestly.
+/// required. What goes out is what has a value: the four strings when they are
+/// not empty, `albumArt` when there is a cover, `duration` when the phone has
+/// said it. The other three — `playlistNum`, `songId` and `mode` — never,
+/// because the phone has nothing behind them: see `crate::playing` for which
+/// subscription is missing and why a zero would be a claim rather than a
+/// silence. A field left out carries its default, which is the same value an
+/// empty one would carry, and the car's parser hands its callbacks those
+/// defaults for whatever the body does not say. `albumArt` is written only when
+/// there is a picture: an empty one is not a picture, and a field that says
+/// nothing is better left out than sent with a length of zero.
 ///
 /// `duration` is in seconds, which is the unit the guide gives it, and
 /// `albumArt` is the cover as the phone transferred it — a file, not a bitmap

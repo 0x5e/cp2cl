@@ -285,6 +285,10 @@ where
     // back in is a new session and a new call to this function, which is why the
     // halves are given back on the way out rather than dropped with everything
     // else.
+    // A panel that has just been plugged in has no song on it: what the last
+    // session was showing belongs to a car that is no longer here, and the page
+    // would otherwise go on showing it.
+    status.now_playing_cleared();
     let (mut video, mut media, mut playing, mut guidance, source) = match frames {
         Frames::Live(outlet) => match outlet.take_video() {
             Some(rx) => (
@@ -346,7 +350,6 @@ where
         media_format: None,
         track: Track::default(),
         art: None,
-        media_due: None,
         // A route is described by the phone in messages of its own, so the
         // session starts knowing nothing about one and hears about it as it
         // goes. A car that plugs in mid-route is a car the phone describes the
@@ -407,11 +410,10 @@ where
                 // The CarPlay side has gone; there is nothing left to play.
                 None => media = None,
             },
-            // What the phone is playing, on the command channel. Folded into
-            // what is known rather than written straight out: the phone
-            // describes one song over several messages and the car's message is
-            // the whole song, so the pause after the phone's last word is what
-            // decides when the panel hears about it.
+            // What the phone is playing, on the command channel. Written as it
+            // arrives, like the three above: the phone is what decides when the
+            // song changes, and what the car is told is the whole of what is
+            // known, so a message says only what the phone has said.
             said = recv_playing(&mut playing) => match said {
                 Some(item) => {
                     if let Err(e) = session.send_playing(item).await {
@@ -422,13 +424,6 @@ where
                 // told, which is the last song there was.
                 None => playing = None,
             },
-            // The phone has stopped describing the song, so the car is told the
-            // whole of it.
-            _ = when_due(session.media_due) => {
-                if let Err(e) = session.write_media().await {
-                    break Err(e);
-                }
-            }
             // Where the phone is going, on the command channel. Written as it
             // arrives, like the three above: the phone is what decides when the
             // route changes, and what the strip is told is the whole of what is
@@ -563,15 +558,6 @@ async fn recv_guidance(guidance: &mut Option<mpsc::Receiver<Guidance>>) -> Optio
     }
 }
 
-/// The moment the phone's description of a song is due to be written out, and
-/// never at all when nothing is waiting.
-async fn when_due(deadline: Option<Instant>) {
-    match deadline {
-        Some(at) => tokio::time::sleep_until(at).await,
-        None => std::future::pending().await,
-    }
-}
-
 struct Session<'a, W> {
     writer: W,
     cfg: &'a Config,
@@ -601,11 +587,6 @@ struct Session<'a, W> {
     /// apart from the track because it arrives as a file of its own, after the
     /// update that named the song and names none itself.
     art: Option<Vec<u8>>,
-    /// When the song the phone is describing is to be written out, and `None`
-    /// when nothing is waiting. The phone describes one song over several
-    /// messages, so each of them puts this back: what goes out is the song as
-    /// it finished describing it, not each attribute as it arrives.
-    media_due: Option<Instant>,
     /// The route the phone is guiding along, folded together from the two
     /// messages it describes one with — see `crate::navigation`, which is also
     /// where the phone's turn types become the car's.
@@ -1136,36 +1117,42 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         }
     }
 
-    /// One thing the phone said it is playing, folded into what is known.
+    /// One thing the phone said it is playing, folded into what is known and
+    /// then written out.
     ///
-    /// Nothing is written out here. The phone describes one attribute at a time
-    /// and the car's message is the whole song, so a message per update would
-    /// redraw the panel once per attribute; instead each update puts the write
-    /// back, and the pause after the phone's last word is what lets it go — see
-    /// `write_media`. An update that says nothing new is not even worth that.
+    /// The phone describes one attribute at a time and the car's message is the
+    /// whole song, so every update sends the song as it now stands: the panel
+    /// redraws once per attribute, which is what the phone's own panel does
+    /// with the same messages. An update that says nothing new is not worth a
+    /// message.
     ///
     /// The cover art is the one thing that is not a field of that message's
     /// subject: it is a file, it arrives after the song it belongs to, and a
     /// song the panel has not been told about is not one to attach it to yet.
+    ///
+    /// It is held until the phone sends another, or until a song that carries a
+    /// length says a new one has started — see the arm below for why that is
+    /// the only moment at which a stale cover can be told from an early one.
     async fn send_playing(&mut self, item: Playing) -> Result<()> {
         match item {
             Playing::Track(update) => {
+                // A length is sent for a song and never for a change of play
+                // state, and it arrives with the rest of the new song rather
+                // than after it — so it is what says here that a song has
+                // started. The cover that is held belongs to the one before
+                // it: a file transfer names no song, so there is no later
+                // moment at which the two could be told apart, and a new song
+                // that arrives without a picture would otherwise wear the last
+                // one's. It goes down here, and the song is sent without it.
+                let started = update.duration_s.is_some();
                 let before = self.track.clone();
-                // A title that has changed is another song, and the cover that
-                // is held belongs to the one before it. Only the title: the
-                // phone also corrects the artist and the album of a song that is
-                // still the same one, and its cover is not sent again.
-                // A cover that arrived before the first song is kept for it:
-                // "another" is only a song that replaces a song.
-                let another = update.song.is_some()
-                    && self.track.song.is_some()
-                    && update.song != self.track.song;
                 self.track.merge(update);
-                if self.track == before {
+                if self.track == before && !started {
                     return Ok(());
                 }
-                if another {
+                if started {
                     self.art = None;
+                    self.publish_cover();
                 }
             }
             Playing::Artwork(image) => {
@@ -1184,10 +1171,22 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     );
                     return Ok(());
                 }
+                // A file transfer that carried nothing is the phone saying this
+                // song has no picture. It is not ignored: it takes the place of
+                // the cover that is held — which is what puts the last song's
+                // down — and the message that follows carries no `albumArt` at
+                // all rather than a zero-length one.
                 if self.art.as_deref() == Some(image.as_slice()) {
                     return Ok(());
                 }
+                if image.is_empty() {
+                    tracing::debug!("[cl] media info: an empty cover; the song goes without one");
+                }
                 self.art = Some(image);
+                // The page draws it as soon as it is here rather than when the
+                // song it belongs to goes out: it is the same picture the car
+                // will be given, and a cover often arrives after the title.
+                self.publish_cover();
             }
         }
 
@@ -1196,22 +1195,41 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         if self.track.is_silent() {
             return Ok(());
         }
-        if self.cfg.media_delay.is_zero() {
-            return self.write_media().await;
-        }
-        self.media_due = Some(Instant::now() + self.cfg.media_delay);
-        Ok(())
+        self.publish_song();
+        self.write_media().await
+    }
+
+    /// Puts the song on the status page, which is the one place anyone but the
+    /// car can see it.
+    ///
+    /// Reported before the message is written rather than after: the page is a
+    /// report of what is playing, not of what has been written to the socket.
+    fn publish_song(&self) {
+        let track = &self.track;
+        self.status.with(|s| {
+            s.now_playing.source = track.source.clone();
+            s.now_playing.song = track.song.clone();
+            s.now_playing.artist = track.artist.clone();
+            s.now_playing.album = track.album.clone();
+            s.now_playing.duration_s = track.duration_s;
+        });
+    }
+
+    /// And the cover, which the page draws from a path of its own.
+    ///
+    /// A cover that has just been put down is reported as one: the page draws
+    /// nothing rather than the picture of a song that has finished.
+    fn publish_cover(&self) {
+        self.status
+            .cover_changed(self.art.clone().unwrap_or_default());
     }
 
     /// The whole of what is known about the song, as the car's one message.
     ///
-    /// What `media_due` runs out to, and what a session with no pause to wait
-    /// for calls straight away.
+    /// What `send_playing` calls once the phone's word is folded in.
     async fn write_media(&mut self) -> Result<()> {
-        self.media_due = None;
-        // A song that has been emptied since the write was put back is not one
-        // to tell the panel about: the last one it was told is better than a
-        // blank.
+        // A song that has been emptied since is not one to tell the panel
+        // about: the last one it was told is better than a blank.
         if self.track.is_silent() {
             return Ok(());
         }
@@ -1219,13 +1237,23 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         let artist = self.track.artist.as_deref().unwrap_or_default();
         let album = self.track.album.as_deref().unwrap_or_default();
         let source = self.track.source.as_deref().unwrap_or_default();
-        tracing::info!(
+        // The size rather than a flag, so this line and the car's own can be put
+        // side by side: the panel takes the picture from this message and
+        // nothing else, so a size that does not match is the whole difference.
+        //
+        // `debug` rather than `info`: an app that puts its lyrics in the title
+        // has the phone sending a new one per line, so this is per-event detail
+        // however much it looks like one line per song.
+        let cover = self
+            .art
+            .as_ref()
+            .map_or(0.0, |art| art.len() as f64 / 1024.0);
+        tracing::debug!(
             "[cl] media info: song={song:?} artist={artist:?} album={album:?} \
-             duration={} source={source:?} cover={}",
-            self.track.duration_s.unwrap_or(0),
-            self.art.is_some()
+             duration={} source={source:?} cover={cover:.1}kB",
+            self.track.duration_s.unwrap_or(0)
         );
-        let body = proto::media_info(&self.track, self.art.as_deref());
+        let body = proto::media_info(&self.track, self.art.as_deref().filter(|art| !art.is_empty()));
         self.send(MEDIA_INFO, &body).await
     }
 
@@ -1480,16 +1508,6 @@ mod tests {
             width: 1280,
             height: 720,
             frame_rate: 30,
-        }
-    }
-
-    /// A config that writes the song out the moment it hears about it, so a
-    /// test reads one message per update instead of waiting out the pause that
-    /// normally joins a song's several messages into one.
-    fn immediately() -> Config {
-        Config {
-            media_delay: Duration::ZERO,
-            ..Config::from_env()
         }
     }
 
@@ -1826,7 +1844,7 @@ mod tests {
     /// with the cover art joined onto the song it belongs to when it lands.
     #[tokio::test]
     async fn the_cars_panel_is_told_the_song_that_is_playing() {
-        let cfg = immediately();
+        let cfg = Config::from_env();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let mut screen = |_width: u32, _height: u32, _fps: u32| {};
@@ -1918,7 +1936,7 @@ mod tests {
     /// thrown away when the song turns up.
     #[tokio::test]
     async fn a_cover_that_arrives_before_the_song_is_kept_for_it() {
-        let cfg = immediately();
+        let cfg = Config::from_env();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let mut screen = |_width: u32, _height: u32, _fps: u32| {};
@@ -1969,12 +1987,13 @@ mod tests {
         car.await.unwrap();
     }
 
-    /// The cover that is held belongs to the song it came with, so a new title
-    /// puts it down: the phone does not send the old one's cover for the new
-    /// song, and the panel would otherwise show it under the new name.
+    /// A title that changes without a length is not another song but the same
+    /// one, renamed: an app that puts its lyrics in the title sends one per
+    /// line, and none of them is a song of its own. The cover stays, because
+    /// the song it belongs to has not gone anywhere.
     #[tokio::test]
-    async fn another_song_does_not_keep_the_cover_of_the_one_before_it() {
-        let cfg = immediately();
+    async fn a_line_of_lyrics_keeps_the_cover() {
+        let cfg = Config::from_env();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let mut screen = |_width: u32, _height: u32, _fps: u32| {};
@@ -1988,52 +2007,36 @@ mod tests {
             car.send(HU_INFO, &[]).await;
             car.expect(MD_INFO).await;
 
-            let song = |name: &str| Playing::Track(Track {
-                song: Some(name.into()),
+            let reeperbahn = Track {
+                song: Some("Reeperbahn".into()),
+                artist: Some("Hamburg".into()),
+                album: Some("Beatles".into()),
+                duration_s: Some(180),
                 ..Track::default()
-            });
+            };
 
-            sink.playing(song("Reeperbahn"));
+            sink.playing(Playing::Track(reeperbahn.clone()));
             car.expect(MEDIA_INFO).await;
             sink.playing(Playing::Artwork(vec![0xff, 0xd8]));
             let covered = car.expect(MEDIA_INFO).await;
             assert_eq!(
                 covered.body,
-                proto::media_info(
-                    &Track {
-                        song: Some("Reeperbahn".into()),
-                        ..Track::default()
-                    },
-                    Some(&[0xff, 0xd8])
-                )
+                proto::media_info(&reeperbahn, Some(&[0xff, 0xd8]))
             );
 
-            // Another song, and the message that says so carries no cover.
-            sink.playing(song("Stern"));
-            let renamed = car.expect(MEDIA_INFO).await;
+            // The next line of the lyrics: a title, and nothing else said.
+            sink.playing(Playing::Track(Track {
+                song: Some("Reeperbahn — line two".into()),
+                ..Track::default()
+            }));
+            let told = car.expect(MEDIA_INFO).await;
+            let renamed = Track {
+                song: Some("Reeperbahn — line two".into()),
+                ..reeperbahn.clone()
+            };
             assert_eq!(
-                renamed.body,
-                proto::media_info(
-                    &Track {
-                        song: Some("Stern".into()),
-                        ..Track::default()
-                    },
-                    None
-                )
-            );
-
-            // Until its own arrives.
-            sink.playing(Playing::Artwork(vec![0x89, 0x50]));
-            let its_own = car.expect(MEDIA_INFO).await;
-            assert_eq!(
-                its_own.body,
-                proto::media_info(
-                    &Track {
-                        song: Some("Stern".into()),
-                        ..Track::default()
-                    },
-                    Some(&[0x89, 0x50])
-                )
+                told.body,
+                proto::media_info(&renamed, Some(&[0xff, 0xd8]))
             );
         });
 
@@ -2051,12 +2054,133 @@ mod tests {
         car.await.unwrap();
     }
 
+    /// A file transfer that carried nothing is the phone saying the song has no
+    /// picture. It is kept as the cover that is held, so the one before it goes
+    /// down with it — and the message that follows carries no `albumArt` at all
+    /// rather than a field with nothing in it to draw.
+    #[tokio::test]
+    async fn an_empty_cover_puts_the_last_one_down() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
+
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+        let sink = outlet.sink();
+
+        let song = Track {
+            song: Some("Reeperbahn".into()),
+            ..Track::default()
+        };
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+
+            sink.playing(Playing::Track(song.clone()));
+            car.expect(MEDIA_INFO).await;
+
+            // A picture, which the car is given.
+            let art = vec![0xff, 0xd8, 0xff];
+            sink.playing(Playing::Artwork(art.clone()));
+            let told = car.expect(MEDIA_INFO).await;
+            assert_eq!(told.body, proto::media_info(&song, Some(&art)));
+
+            // And the phone saying there is none takes it back.
+            sink.playing(Playing::Artwork(Vec::new()));
+            let told = car.expect(MEDIA_INFO).await;
+            assert_eq!(told.body, proto::media_info(&song, None));
+        });
+
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            Arc::new(Status::new()),
+        )
+        .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    /// A length is what says a song has started, and the cover that is held
+    /// belongs to the one before it. A file transfer names no song, so the new
+    /// one is sent without a cover rather than wearing the last one's — and the
+    /// page puts its picture down with it.
+    #[tokio::test]
+    async fn a_song_with_a_length_puts_the_last_cover_down() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
+
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+        let sink = outlet.sink();
+
+        let first = Track {
+            song: Some("Reeperbahn".into()),
+            ..Track::default()
+        };
+        let next = Track {
+            song: Some("So What".into()),
+            duration_s: Some(545),
+            ..Track::default()
+        };
+
+        let status = Arc::new(Status::new());
+        let page = status.clone();
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+
+            sink.playing(Playing::Track(first.clone()));
+            car.expect(MEDIA_INFO).await;
+
+            let art = vec![0xff, 0xd8, 0xff];
+            sink.playing(Playing::Artwork(art.clone()));
+            let told = car.expect(MEDIA_INFO).await;
+            assert_eq!(told.body, proto::media_info(&first, Some(&art)));
+            assert!(page.cover().is_some(), "the page has the picture");
+
+            // The next song announces itself with its length.
+            sink.playing(Playing::Track(next.clone()));
+            let told = car.expect(MEDIA_INFO).await;
+            assert_eq!(told.body, proto::media_info(&next, None));
+            assert!(page.cover().is_none(), "and the page puts it down");
+
+            // Its own picture then goes out with it, as any cover does.
+            sink.playing(Playing::Artwork(vec![0x89, 0x50]));
+            let told = car.expect(MEDIA_INFO).await;
+            assert_eq!(told.body, proto::media_info(&next, Some(&[0x89, 0x50])));
+        });
+
+        run(
+            device,
+            &frames,
+            &cfg,
+            &mut screen,
+            EventSink::new(),
+            &mut carplay,
+            status,
+        )
+        .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
     /// The app the phone is playing from is not a song. It is sent with every
     /// change of play state, and a panel emptied by one of those is worse than
     /// one the car never updated.
     #[tokio::test]
     async fn the_play_state_on_its_own_is_not_a_song() {
-        let cfg = immediately();
+        let cfg = Config::from_env();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let mut screen = |_width: u32, _height: u32, _fps: u32| {};
@@ -2109,15 +2233,14 @@ mod tests {
         car.await.unwrap();
     }
 
-    /// The phone describes one song over several messages, and what the car is
-    /// told is the song: nothing goes out while the phone is still talking, and
-    /// then one message carrying the whole of it.
+    /// The phone describes a song one attribute at a time, and each of those is
+    /// sent as it arrives: the car's message is the whole song, so the panel is
+    /// told the song as it stands rather than waiting for the phone to finish
+    /// describing it. It redraws once per attribute, which is what the phone's
+    /// own panel does with the same messages.
     #[tokio::test]
-    async fn the_song_goes_out_once_the_phone_has_stopped_describing_it() {
-        let cfg = Config {
-            media_delay: Duration::from_millis(500),
-            ..Config::from_env()
-        };
+    async fn every_word_from_the_phone_goes_out_at_once() {
+        let cfg = Config::from_env();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let mut screen = |_width: u32, _height: u32, _fps: u32| {};
@@ -2131,24 +2254,46 @@ mod tests {
             car.send(HU_INFO, &[]).await;
             car.expect(MD_INFO).await;
 
-            // The title, the artist, the album: three messages about one song.
+            // The title, and nothing else yet.
             sink.playing(Playing::Track(Track {
                 song: Some("Reeperbahn".into()),
                 ..Track::default()
             }));
+            let told = car.expect(MEDIA_INFO).await;
+            assert_eq!(
+                told.body,
+                proto::media_info(
+                    &Track {
+                        song: Some("Reeperbahn".into()),
+                        ..Track::default()
+                    },
+                    None
+                )
+            );
+
+            // The artist, which goes out with the title already known.
             sink.playing(Playing::Track(Track {
                 artist: Some("Hamburg".into()),
                 ..Track::default()
             }));
+            let told = car.expect(MEDIA_INFO).await;
+            assert_eq!(
+                told.body,
+                proto::media_info(
+                    &Track {
+                        song: Some("Reeperbahn".into()),
+                        artist: Some("Hamburg".into()),
+                        ..Track::default()
+                    },
+                    None
+                )
+            );
+
+            // And the album, which is the last of it.
             sink.playing(Playing::Track(Track {
                 album: Some("Stadt".into()),
                 ..Track::default()
             }));
-
-            // The phone is still talking, so the panel has been told nothing.
-            car.expect_silence(Duration::from_millis(250)).await;
-
-            // And then, once, the song as it was finished being described.
             let told = car.expect(MEDIA_INFO).await;
             assert_eq!(
                 told.body,
@@ -2178,75 +2323,11 @@ mod tests {
         car.await.unwrap();
     }
 
-    /// A message that arrives before the pause is over puts it back, so the song
-    /// goes out after the phone's *last* word rather than its first.
-    #[tokio::test]
-    async fn a_later_message_puts_the_pause_back() {
-        let cfg = Config {
-            media_delay: Duration::from_millis(500),
-            ..Config::from_env()
-        };
-        let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
-
-        let outlet = Arc::new(ClOutlet::new());
-        let frames = Frames::Live(outlet.clone());
-        let sink = outlet.sink();
-
-        let car = tokio::spawn(async move {
-            let mut car = Car { pipe };
-            car.send(HU_INFO, &[]).await;
-            car.expect(MD_INFO).await;
-
-            sink.playing(Playing::Track(Track {
-                song: Some("Reeperbahn".into()),
-                ..Track::default()
-            }));
-            // Half way through the pause, the artist arrives.
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            sink.playing(Playing::Track(Track {
-                artist: Some("Hamburg".into()),
-                ..Track::default()
-            }));
-
-            // Had the pause not been put back, the song would be due 200 ms from
-            // here, carrying the title alone.
-            car.expect_silence(Duration::from_millis(300)).await;
-
-            let told = car.expect(MEDIA_INFO).await;
-            assert_eq!(
-                told.body,
-                proto::media_info(
-                    &Track {
-                        song: Some("Reeperbahn".into()),
-                        artist: Some("Hamburg".into()),
-                        ..Track::default()
-                    },
-                    None
-                )
-            );
-        });
-
-        run(
-            device,
-            &frames,
-            &cfg,
-            &mut screen,
-            EventSink::new(),
-            &mut carplay,
-            Arc::new(Status::new()),
-        )
-        .await
-            .expect("the session ends cleanly");
-        car.await.unwrap();
-    }
-
     /// A cover the car's message cannot carry is left out, and the song is not:
     /// the panel loses the picture, not the song.
     #[tokio::test]
     async fn a_cover_too_large_for_the_cars_message_is_left_out() {
-        let cfg = immediately();
+        let cfg = Config::from_env();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let mut screen = |_width: u32, _height: u32, _fps: u32| {};
