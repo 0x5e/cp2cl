@@ -302,6 +302,9 @@ pub struct Shared {
     /// Set by the CarLife session, once a head unit has said which channel it
     /// is. Read by `GET /info` to pick the icon and the label under it.
     pub channel: SharedChannel,
+    /// Fired when the phone's icon for us is tapped: that icon means the head
+    /// unit's own desktop, so the car is asked for it.
+    pub desktop: tokio::sync::broadcast::Sender<()>,
     /// Fired when what the phone should be rendering has changed. `/info` is
     /// answered once per session, so dropping the session is the only way a
     /// change lands: the phone reconnects, asks again, and gets the new answer.
@@ -365,6 +368,7 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                 let cfg = shared.cfg.clone();
                 let screen = shared.screen.clone();
                 let channel = shared.channel.clone();
+                let desktop = shared.desktop.clone();
                 let restart = shared.restart.subscribe();
                 let shutdown = shared.shutdown.subscribe();
                 let pairings = shared.pairings.clone();
@@ -382,6 +386,7 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                         cfg,
                         screen,
                         channel,
+                        desktop,
                         restart,
                         shutdown,
                         pairings,
@@ -543,6 +548,8 @@ struct Session {
     /// Which channel the car's head unit is, if it has said. Read when
     /// answering `/info`.
     channel: SharedChannel,
+    /// Fired when the phone's icon for us is tapped.
+    desktop: tokio::sync::broadcast::Sender<()>,
     /// Fires when the session should end so the phone re-reads `/info`.
     restart: tokio::sync::broadcast::Receiver<()>,
     /// Fires when the CarLife session that this one feeds has ended, which is
@@ -775,7 +782,7 @@ impl Session {
             // "the stream died" and the phone stops sending video.
             "POST" if path.ends_with("/feedback") => self.feedback().await,
             "POST" if path.ends_with("/command") => {
-                Self::describe("command", &req.body);
+                self.command(req);
                 Ok(Response::new(200))
             }
             _ => Ok(Response::new(200)),
@@ -831,6 +838,48 @@ impl Session {
             screen::CODEC
         );
         Ok(Response::new(200).plist(plist))
+    }
+
+    /// What the phone asks for on `/command`, which is UI behaviour.
+    ///
+    /// `requestUI` is our own icon on the phone's CarPlay screen being tapped.
+    /// On that screen the icon means the head unit's own desktop, so the car is
+    /// asked for it. The one exception is `url: videoplayback:`, which is the
+    /// phone asking for the screen to play video on — CarLife has no way to give
+    /// it, so it is left alone.
+    ///
+    /// `suggestUI` is the phone offering URLs it thinks we might show. Nothing
+    /// here shows them.
+    fn command(&self, req: &Request) {
+        let Ok(dict) = Self::plist_body(&req.body) else {
+            Self::describe("command", &req.body);
+            return;
+        };
+        let params = dict.get("params").and_then(|p| p.as_dictionary());
+        let url = params
+            .and_then(|p| p.get("url"))
+            .and_then(|v| v.as_string())
+            .unwrap_or("");
+        match dict.get("type").and_then(|v| v.as_string()) {
+            Some("requestUI") if url == "videoplayback:" => {
+                tracing::info!("[airplay] requestUI {url}: not handled")
+            }
+            Some("requestUI") => {
+                tracing::info!(
+                    "[airplay] requestUI: our icon was tapped; asking the car for its desktop"
+                );
+                // Nobody to tell is not a failure: the car may have gone.
+                let _ = self.desktop.send(());
+            }
+            Some("suggestUI") => {
+                let urls = params
+                    .and_then(|p| p.get("urls"))
+                    .and_then(|v| v.as_array())
+                    .map_or(0, Vec::len);
+                tracing::info!("[airplay] suggestUI ({urls} urls, not shown)");
+            }
+            _ => Self::describe("command", &req.body),
+        }
     }
 
     /// Prints a request body the phone sent, as one line of JSON.

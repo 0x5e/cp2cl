@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::airplay::{EventSink, SharedChannel};
 use crate::config::Config;
@@ -74,6 +74,7 @@ pub async fn run<F>(
     channel: SharedChannel,
     events: Arc<EventSink>,
     carplay: &mut F,
+    desktop: &broadcast::Sender<()>,
     status: Arc<Status>,
 ) -> Result<()>
 where
@@ -129,6 +130,7 @@ where
                             channel.clone(),
                             events.clone(),
                             carplay,
+                            desktop,
                             status.clone(),
                         )
                         .await

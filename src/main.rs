@@ -104,6 +104,11 @@ async fn main() -> Result<()> {
     // that go with the car it is plugged into.
     let channel: SharedChannel = Arc::new(std::sync::Mutex::new(None));
 
+    // Fired when the phone's icon for us is tapped. A broadcast rather than a
+    // queue: the car can be plugged out and back in, and whoever is listening
+    // at the time is the one that matters.
+    let (desktop, _) = tokio::sync::broadcast::channel(1);
+
     // Input goes out through here whatever produced it. Built now and filled in
     // later: the keys only exist once pair-verify has run.
     let event_sink = EventSink::new();
@@ -184,6 +189,7 @@ async fn main() -> Result<()> {
             audio_codec: Arc::new(Mutex::new(codec)),
             screen: screen.clone(),
             channel: channel.clone(),
+            desktop: desktop.clone(),
             restart: restart.clone(),
             shutdown,
             event_sink: event_sink.clone(),
@@ -266,6 +272,7 @@ async fn main() -> Result<()> {
             channel,
             input,
             &mut report,
+            &desktop,
             reported,
         )
         .await

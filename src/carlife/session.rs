@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio::time::Instant;
 
 use super::{auth, frame, proto};
@@ -56,6 +56,7 @@ const HU_FEATURE_CONFIG_RESPONSE: u32 = 0x0001_8052;
 const HU_ERROR_CODE: u32 = 0x0001_8055;
 
 // What we send.
+const GO_TO_DESKTOP: u32 = 0x0001_0021;
 const MATCH_STATUS: u32 = 0x0001_0002;
 const MD_INFO: u32 = 0x0001_0004;
 const VIDEO_ENCODER_INIT_DONE: u32 = 0x0001_0008;
@@ -269,6 +270,9 @@ pub type ScreenReport<'a> = &'a mut (dyn FnMut(u32, u32, u32) + Send);
 /// `channel` is where the channel number the car reports is kept, for `/info` to
 /// read: a head unit that names itself gets the icon and label that go with the
 /// make it belongs to.
+///
+/// `desktop` fires when the phone's icon for us is tapped. On the phone that
+/// icon stands for the car's own interface, so the car is asked to show it.
 pub async fn run<S, F>(
     stream: S,
     frames: &Frames,
@@ -277,12 +281,16 @@ pub async fn run<S, F>(
     channel: SharedChannel,
     events: Arc<EventSink>,
     carplay: &mut F,
+    desktop: &broadcast::Sender<()>,
     status: Arc<Status>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     F: FnMut(bool),
 {
+    // Taken first, so a tap that lands while the session is still being built is
+    // not missed.
+    let mut desktop = desktop.subscribe();
 
     // A session is what drains the bridge, so it takes all four receiving halves
     // for as long as it runs: one channel carries pictures, one the phone's
@@ -444,6 +452,13 @@ where
                 // The CarPlay side has gone; the strip keeps what it was last
                 // told, which is the last turn there was.
                 None => guidance = None,
+            },
+            // A tap on the phone's icon for us. The phone shows that icon in
+            // place of the car's own interface, so the car is told to show it.
+            _ = desktop.recv() => {
+                if let Err(e) = session.send(GO_TO_DESKTOP, &[]).await {
+                    break Err(e);
+                }
             },
             // Only a tick moves the schedule forward, so a busy stream of
             // messages cannot starve the video channel.
@@ -1532,6 +1547,12 @@ mod tests {
         Arc::new(Mutex::new(None))
     }
 
+    /// The signal a tap on the phone's icon arrives on, for a test that does not
+    /// tap.
+    fn no_tap() -> broadcast::Sender<()> {
+        broadcast::channel(1).0
+    }
+
     /// The car's statistics, which is where the channel number it is judged by
     /// arrives.
     fn statistics(channel: &str) -> Vec<u8> {
@@ -1561,11 +1582,47 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
             .expect("the session ends cleanly");
         car.await.unwrap()
+    }
+
+    /// A tap on the phone's icon reaches the car as `MSG_CMD_GO_TO_DESKTOP`, with
+    /// no body: on the phone that icon stands for the car's own interface, so
+    /// the car is asked to show it.
+    #[tokio::test]
+    async fn a_tap_on_our_icon_asks_the_car_for_its_desktop() {
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let (tap, _) = broadcast::channel(1);
+        let tapping = tap.clone();
+        let mut carplay = |_: bool| {};
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.handshake(asked()).await;
+            tapping.send(()).expect("the session is listening");
+            car.expect(GO_TO_DESKTOP).await
+        });
+
+        run(
+            device,
+            &Frames::None,
+            &Config::from_env(),
+            &mut |_, _, _| {},
+            no_icon(),
+            EventSink::new(),
+            &mut carplay,
+            &tap,
+            Arc::new(Status::new()),
+        )
+        .await
+            .expect("the session ends cleanly");
+
+        let message = car.await.expect("the car saw it");
+        assert!(message.body.is_empty(), "the command carries no body");
     }
 
     #[tokio::test]
@@ -1648,6 +1705,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
@@ -1679,6 +1737,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
@@ -1721,6 +1780,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
@@ -1759,6 +1819,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
@@ -1859,6 +1920,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
@@ -1953,6 +2015,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
@@ -2009,6 +2072,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
@@ -2077,6 +2141,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
@@ -2132,6 +2197,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
@@ -2200,6 +2266,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             status,
         )
         .await
@@ -2259,6 +2326,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
@@ -2350,6 +2418,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
@@ -2401,6 +2470,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
@@ -2465,6 +2535,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
@@ -2559,6 +2630,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
@@ -2624,6 +2696,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
@@ -2667,6 +2740,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
@@ -2720,6 +2794,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
@@ -2773,6 +2848,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
@@ -2814,6 +2890,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
@@ -2878,6 +2955,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
@@ -2914,6 +2992,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
@@ -2961,6 +3040,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
@@ -2991,6 +3071,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
@@ -3041,6 +3122,7 @@ mod tests {
             no_icon(),
             EventSink::new(),
             &mut carplay,
+            &no_tap(),
             Arc::new(Status::new()),
         )
         .await
