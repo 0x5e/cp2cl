@@ -26,9 +26,11 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::airplay::{EventSink, SharedChannel};
+use crate::assets;
 use crate::config::Config;
 use crate::web::Status;
 
+use super::auth;
 use super::desc;
 use super::session::{self, Frames};
 use super::usb::{Endpoints, Usb};
@@ -98,6 +100,11 @@ where
 
     tracing::info!("[cl-usb] waiting for a head unit to enumerate the device");
 
+    // The key the car's challenge is answered with, built in beside the icon and
+    // the page. Read once rather than per session: it is one key, and a car
+    // plugged out and back in finds what the session before it had.
+    let auth = assets::text(auth::KEY_FILE).and_then(auth::Signer::from_pem);
+
     let (events_tx, mut events_rx) = mpsc::channel(4);
     // The endpoint files come out of `usb` as they came from the kernel, and are
     // wrapped here: a read on one of them waits for the host, which is what
@@ -126,6 +133,7 @@ where
                             pair,
                             frames,
                             &cfg,
+                            auth.clone(),
                             &mut *screen,
                             channel.clone(),
                             events.clone(),

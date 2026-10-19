@@ -48,13 +48,13 @@ git submodule update --init --recursive
 
 cargo build --release
 
-export CP2CL_AUTH_DIR=./authentication         # MFi credentials, and the CarLife key
 ./target/release/cp2cl
 ```
 
-Run it from the repository root: `authentication/` is read relative to the
-working directory, and that is the only thing it needs from there. The board is
-built in a container instead, since it cannot build this itself — see
+Run it from anywhere: the credentials are compiled into the binary, and the
+working directory is not read at all. They come from `assets/authentication/` at
+build time — see [Credentials](#credentials). The board is built in a container
+instead, since it cannot build this itself — see
 [Cross-compiling for the board](#cross-compiling-for-the-board).
 
 Then plug the phone in and unlock it. You should see:
@@ -108,8 +108,8 @@ nothing resolved through NSS or mDNS resolves here. Neither the CarPlay nor the
 CarLife path resolves a name.
 
 The result is `target/armv7-unknown-linux-musleabihf/release/cp2cl`. Copy it to
-the board and run it there; it reads `authentication/` relative to the working
-directory, and everything else comes from the environment — see
+the board and run it there; it needs no files of its own, and everything it takes
+from outside comes from the environment — see
 [Running it on the board](#running-it-on-the-board).
 
 ### What the phone renders at
@@ -180,11 +180,30 @@ panel, so a larger canvas draws proportionally *smaller* CarPlay controls. Touch
 is mapped through the canvas rather than the panel size for the same reason.
 Nothing sets it at the moment, so the car's own pixels are asked for as they are.
 
+## Credentials
+
+Two private keys and a certificate go into the build, and all three are read from
+`assets/authentication/` by a fixed name. `build.rs` puts every file under
+`assets/` into the binary, so a build takes whatever is in that directory at the
+time and the executable needs nothing beside it afterwards:
+
+| File | What it is |
+|---|---|
+| `identity.pk8` | the MFi private key, PKCS#8 DER |
+| `certificate.p7b` | the matching MFi certificate |
+| `carlife_md_rsa_private.pem` | the CarLife app's own RSA key, which answers the car's challenge |
+
+None of them are ours to publish, so the directory is ignored by git and a fresh
+clone has none of it. That is a supported way to build: without the MFi pair the
+phone identifies us and then refuses to authenticate, and without the CarLife key
+the car's challenge goes unanswered. Both absences are logged rather than fatal,
+and everything else — the device, the streams, the status page — works without
+them.
+
 ## Environment
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CP2CL_AUTH_DIR` | `./authentication` | MFi and CarLife credentials (identity.pk8, certificate.p7b, carlife_md_rsa_private.pem) |
 | `CP2CL_PPI` | `120` | the panel's density, in pixels per inch |
 | `CP2CL_LOG_LEVEL` | `info` | log level: `error`, `warn`, `info`, `debug` |
 | `CP2CL_WIRELESS` | off | take CarPlay over Wi-Fi instead of USB |
@@ -515,14 +534,13 @@ the controller — is done by the program, and is a no-op where it is not loaded
 ### Running it on the board
 
 There is no package and no unit: the binary is copied over and run in the
-foreground. The one thing it reads from its working directory — the MFi
-credentials — is copied over beside it:
+foreground. It is the whole program — the credentials are inside it — so there is
+nothing else to copy:
 
 ```bash
 # From the checkout, after the cross-build above.
-ssh root@192.168.4.1 'mkdir -p /root/cp2cl/authentication'
+ssh root@192.168.4.1 'mkdir -p /root/cp2cl'
 scp target/armv7-unknown-linux-musleabihf/release/cp2cl root@192.168.4.1:/root/cp2cl/
-scp authentication/* root@192.168.4.1:/root/cp2cl/authentication/
 ```
 
 Then, on the board:
@@ -554,8 +572,8 @@ up, whether the device was composed, and what a head unit asked. See
 The car may ask this device to prove it is a phone, with a challenge only an
 actual phone can answer. That answer is made with the CarLife app's own private
 RSA key, which the car checks against Baidu's published half, so
-`authentication/carlife_md_rsa_private.pem` is where the key goes; without it the
-challenge is reported and left unanswered rather than guessed at. The other
+`assets/authentication/carlife_md_rsa_private.pem` is where the key goes; without
+it the challenge is reported and left unanswered rather than guessed at. The other
 direction is ours to decide: the car names a channel number along with its
 statistics, and is told whether a phone would serve it. `src/carlife/auth.rs`
 holds both halves, and a head unit has accepted the answer to its challenge.

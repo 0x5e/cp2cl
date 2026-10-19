@@ -72,10 +72,6 @@ fn read_hostname(path: &Path) -> String {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Where the credentials are read from, by fixed name: the MFi pair, and the
-    /// phone's CarLife key. Which files those are is not a setting — see
-    /// `carlife::auth`.
-    pub auth_dir: Option<PathBuf>,
     /// The panel's density, in pixels per inch, which is what decides how finely
     /// the phone draws: it is told a physical size and turns that back into a
     /// dpi. Inflating it is the whole difference between a sharp picture and a
@@ -118,7 +114,6 @@ impl Config {
     pub fn from_env() -> Self {
         let bt_adapter = env_or("CP2CL_BT_ADAPTER", "hci0");
         Self {
-            auth_dir: Self::resolve_auth_dir(),
             ppi: env_num("CP2CL_PPI", 120),
             bt_mac: bt_address(&bt_adapter),
             name: hostname(),
@@ -131,32 +126,6 @@ impl Config {
             input_file: env("CP2CL_INPUT_FILE").map(PathBuf::from),
             bt_adapter,
         }
-    }
-
-    /// Look for credentials next to the binary, then in the working directory,
-    /// then wherever CP2CL_AUTH_DIR points. Same idea as LIVI's resolveAuthDir,
-    /// minus Electron: order is explicit override first, then a couple of
-    /// sensible spots so `cargo run` works from a clone with credentials
-    /// dropped in `authentication/`.
-    fn resolve_auth_dir() -> Option<PathBuf> {
-        let mut candidates: Vec<PathBuf> = Vec::new();
-        if let Some(dir) = env("CP2CL_AUTH_DIR") {
-            candidates.push(PathBuf::from(dir));
-        }
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                candidates.push(dir.join("authentication"));
-            }
-        }
-        candidates.push(PathBuf::from("authentication"));
-        candidates.push(PathBuf::from("assets/authentication"));
-        candidates
-            .into_iter()
-            .find(|dir| Self::has_credentials(dir))
-    }
-
-    fn has_credentials(dir: &Path) -> bool {
-        dir.join("identity.pk8").is_file() && dir.join("certificate.p7b").is_file()
     }
 }
 

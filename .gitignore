@@ -1,8 +1,9 @@
 target/
 Cargo.lock.orig
 
-# MFi credentials — a private key, never commit these.
-authentication/
+# Credentials — private keys, never commit these. They are read at build time and
+# embedded, so a clone without them builds and runs, just without authentication.
+assets/authentication/
 *.pk8
 *.p7b
 *.p12

@@ -156,7 +156,7 @@ async fn main() -> Result<()> {
 
     // Built before the receiver starts because both halves need it: iAP2 to
     // answer the phone's challenge, and airplay to answer /auth-setup.
-    let auth = SharedCoprocessor::new(mfi_signer(&cfg)?);
+    let auth = SharedCoprocessor::new(mfi_signer()?);
 
     // Whether the CarPlay half is open for the phone at all. It starts shut and
     // the car's session is the only thing that opens it: nothing is published
@@ -294,33 +294,28 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Local credentials when they exist, a dead end with a clear message otherwise.
+/// Local credentials when they are built in, a dead end with a clear message otherwise.
 ///
 /// Wired CarPlay still runs the full MFi challenge, so without credentials the
 /// phone identifies us and then refuses to authenticate. Saying so up front
 /// beats the cryptic 0xAA04 that comes back later.
-fn mfi_signer(cfg: &Config) -> Result<Box<dyn AuthCoprocessor + Send>> {
-    match &cfg.auth_dir {
-        Some(dir) => match LocalCoprocessor::load(dir) {
-            Ok(signer) => {
-                tracing::info!(
-                    "[cp2cl] local MFi credentials loaded from {}",
-                    dir.display()
-                );
-                Ok(Box::new(signer))
-            }
-            Err(e) => Err(anyhow::anyhow!(
-                "credentials in {} could not be used: {e}",
-                dir.display()
-            )),
-        },
-        None => {
-            tracing::warn!(
-                "[cp2cl] no MFi credentials found; the phone will reject us at \
-                 authentication. Put identity.pk8 + certificate.p7b in ./authentication \
-                 or set CP2CL_AUTH_DIR."
-            );
-            Ok(Box::new(NoCoprocessor))
-        }
-    }
+fn mfi_signer() -> Result<Box<dyn AuthCoprocessor + Send>> {
+    let (Some(key), Some(cert)) = (
+        assets::get("authentication/identity.pk8"),
+        assets::get("authentication/certificate.p7b"),
+    ) else {
+        tracing::warn!(
+            "[cp2cl] no MFi credentials built in; the phone will reject us at authentication. \
+             Put identity.pk8 + certificate.p7b in assets/authentication and rebuild."
+        );
+        return Ok(Box::new(NoCoprocessor));
+    };
+    let signer = LocalCoprocessor::load(key, cert)
+        .context("the built-in MFi credentials could not be used")?;
+    tracing::info!(
+        "[cp2cl] built-in MFi credentials loaded ({} + {} bytes)",
+        key.len(),
+        cert.len()
+    );
+    Ok(Box::new(signer))
 }

@@ -258,6 +258,10 @@ pub type ScreenReport<'a> = &'a mut (dyn FnMut(u32, u32, u32) + Send);
 /// any reason. On the board that switch is what starts and stops the whole
 /// CarPlay half; see `main`.
 ///
+/// `auth` is the key the car's challenge is answered with. It comes from the
+/// caller rather than from a file: the key is built into the binary, and a
+/// session that cannot answer is one handed `None`.
+///
 /// `screen` is told the size the car asked to be rendered at, as width, height
 /// and frame rate. The car is the one that knows its own screen, so this is where
 /// what the phone is asked to render comes from; `main` is what does something
@@ -277,6 +281,7 @@ pub async fn run<S, F>(
     stream: S,
     frames: &Frames,
     cfg: &Config,
+    auth: Option<auth::Signer>,
     screen: ScreenReport<'_>,
     channel: SharedChannel,
     events: Arc<EventSink>,
@@ -374,10 +379,9 @@ where
         subscribed: false,
         navi: None,
         shown: None,
-        // Read here rather than once for the program: a car plugged out and back
-        // in is a new session, and a key that has gone missing since is worth
-        // saying so each time the car asks for an answer.
-        auth: auth::Signer::load(cfg.auth_dir.as_deref()),
+        // Built in beside the icon and the page, so the same key answers every
+        // session — a car plugged out and back in finds what the first one did.
+        auth,
         next_tick: Instant::now(),
         up: false,
         last_touch: None,
@@ -629,9 +633,9 @@ struct Session<'a, W> {
     /// last told to take one down. The action of the next message follows from
     /// what this holds and what is known now.
     shown: Option<proto::NextTurn>,
-    /// The key the car's challenge is answered with, when the operator has put
-    /// one where credentials are looked for. `None` is a session that cannot
-    /// answer it, which is said out loud when the car asks.
+    /// The key the car's challenge is answered with, when one was built in.
+    /// `None` is a session that cannot answer it, which is said out loud when the
+    /// car asks.
     auth: Option<auth::Signer>,
     next_tick: Instant,
     up: bool,
@@ -923,8 +927,8 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         });
         let Some(key) = self.auth.as_ref() else {
             tracing::warn!(
-                "[cl] the car asked us to authenticate and there is no key to answer it with; \
-                 put the phone's key in ./authentication or set CP2CL_AUTH_DIR"
+                "[cl] the car asked us to authenticate and no key was built in; \
+                 put the phone's key in assets/authentication and rebuild"
             );
             return Ok(());
         };
@@ -1435,7 +1439,6 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
 mod tests {
     use super::*;
     use crate::sink::{AudioCodec, MediaSink, StreamEvent};
-    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use tokio::io::DuplexStream;
 
@@ -1578,6 +1581,7 @@ mod tests {
             device,
             &Frames::None,
             &Config::from_env(),
+            None,
             &mut |_, _, _| {},
             no_icon(),
             EventSink::new(),
@@ -1611,6 +1615,7 @@ mod tests {
             device,
             &Frames::None,
             &Config::from_env(),
+            None,
             &mut |_, _, _| {},
             no_icon(),
             EventSink::new(),
@@ -1640,32 +1645,27 @@ mod tests {
         assert!(!verdict("10011100".into()).await);
     }
 
-    /// A key of this test's own on disk, which is all `run` asks for. Not the
-    /// real one: what is under test is the road the challenge travels.
-    fn a_key_on_disk() -> (PathBuf, rsa::RsaPrivateKey) {
+    /// A key of this test's own, in the shape `run` is handed one. Not the real
+    /// key: what is under test is the road the challenge travels.
+    fn a_key_of_its_own() -> (String, rsa::RsaPrivateKey) {
         use rsa::pkcs8::EncodePrivateKey;
         let key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 1024).expect("a key");
         let pem = key
             .to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)
-            .expect("the key writes as PEM");
-        let dir = std::env::temp_dir().join("cp2cl-session-auth-test");
-        std::fs::create_dir_all(&dir).expect("a directory to hold it");
-        std::fs::write(dir.join(auth::KEY_FILE), pem.as_bytes()).expect("the key is written");
-        (dir, key)
+            .expect("the key writes as PEM")
+            .to_string();
+        (pem, key)
     }
 
-    /// The car's challenge is answered with the key the operator put in, and the
-    /// answer is one the car's own check takes.
+    /// The car's challenge is answered with the key the session was given, and
+    /// the answer is one the car's own check takes.
     #[tokio::test]
     async fn the_cars_challenge_is_answered_with_the_key_that_was_put_in() {
         use base64::engine::general_purpose::STANDARD as BASE64;
         use base64::Engine as _;
 
-        let (dir, key) = a_key_on_disk();
-        let cfg = Config {
-            auth_dir: Some(dir),
-            ..Config::from_env()
-        };
+        let (pem, key) = a_key_of_its_own();
+        let cfg = Config::from_env();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let challenge = "9f2c1a_4.6.0";
@@ -1701,6 +1701,7 @@ mod tests {
             device,
             &Frames::None,
             &cfg,
+            auth::Signer::from_pem(&pem),
             &mut |_, _, _| {},
             no_icon(),
             EventSink::new(),
@@ -1733,6 +1734,7 @@ mod tests {
             device,
             &Frames::None,
             &cfg,
+            None,
             &mut |_, _, _| {},
             no_icon(),
             EventSink::new(),
@@ -1776,6 +1778,7 @@ mod tests {
             device,
             &Frames::None,
             &cfg,
+            None,
             &mut screen,
             no_icon(),
             EventSink::new(),
@@ -1815,6 +1818,7 @@ mod tests {
             device,
             &Frames::None,
             &cfg,
+            None,
             &mut screen,
             no_icon(),
             EventSink::new(),
@@ -1916,6 +1920,7 @@ mod tests {
             device,
             &frames,
             &cfg,
+            None,
             &mut screen,
             no_icon(),
             EventSink::new(),
@@ -2011,6 +2016,7 @@ mod tests {
             device,
             &frames,
             &cfg,
+            None,
             &mut screen,
             no_icon(),
             EventSink::new(),
@@ -2068,6 +2074,7 @@ mod tests {
             device,
             &frames,
             &cfg,
+            None,
             &mut screen,
             no_icon(),
             EventSink::new(),
@@ -2137,6 +2144,7 @@ mod tests {
             device,
             &frames,
             &cfg,
+            None,
             &mut screen,
             no_icon(),
             EventSink::new(),
@@ -2193,6 +2201,7 @@ mod tests {
             device,
             &frames,
             &cfg,
+            None,
             &mut screen,
             no_icon(),
             EventSink::new(),
@@ -2262,6 +2271,7 @@ mod tests {
             device,
             &frames,
             &cfg,
+            None,
             &mut screen,
             no_icon(),
             EventSink::new(),
@@ -2322,6 +2332,7 @@ mod tests {
             device,
             &frames,
             &cfg,
+            None,
             &mut screen,
             no_icon(),
             EventSink::new(),
@@ -2414,6 +2425,7 @@ mod tests {
             device,
             &frames,
             &cfg,
+            None,
             &mut screen,
             no_icon(),
             EventSink::new(),
@@ -2466,6 +2478,7 @@ mod tests {
             device,
             &frames,
             &cfg,
+            None,
             &mut screen,
             no_icon(),
             EventSink::new(),
@@ -2531,6 +2544,7 @@ mod tests {
             device,
             &frames,
             &cfg,
+            None,
             &mut screen,
             no_icon(),
             EventSink::new(),
@@ -2626,6 +2640,7 @@ mod tests {
             device,
             &frames,
             &cfg,
+            None,
             &mut screen,
             no_icon(),
             EventSink::new(),
@@ -2692,6 +2707,7 @@ mod tests {
             device,
             &frames,
             &cfg,
+            None,
             &mut screen,
             no_icon(),
             EventSink::new(),
@@ -2736,6 +2752,7 @@ mod tests {
             device,
             &Frames::None,
             &cfg,
+            None,
             &mut |_, _, _| {},
             no_icon(),
             EventSink::new(),
@@ -2790,6 +2807,7 @@ mod tests {
             device,
             &frames,
             &cfg,
+            None,
             &mut screen,
             no_icon(),
             EventSink::new(),
@@ -2844,6 +2862,7 @@ mod tests {
             device,
             &frames,
             &cfg,
+            None,
             &mut screen,
             no_icon(),
             EventSink::new(),
@@ -2886,6 +2905,7 @@ mod tests {
             device,
             &frames,
             &cfg,
+            None,
             &mut |_, _, _| {},
             no_icon(),
             EventSink::new(),
@@ -2951,6 +2971,7 @@ mod tests {
             device,
             &frames,
             &cfg,
+            None,
             &mut |_, _, _| {},
             no_icon(),
             EventSink::new(),
@@ -2964,15 +2985,12 @@ mod tests {
     }
 
     /// A challenge with no key behind it is left alone rather than answered with
-    /// something the car would only reject. The key is named here rather than
+    /// something the car would only reject. The absence is passed in rather than
     /// looked for, so that the test says the same thing whether or not the
-    /// machine it runs on has one.
+    /// machine it runs on was built with a key.
     #[tokio::test]
     async fn a_challenge_with_no_key_behind_it_is_left_alone() {
-        let cfg = Config {
-            auth_dir: None,
-            ..Config::from_env()
-        };
+        let cfg = Config::from_env();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
 
@@ -2988,6 +3006,7 @@ mod tests {
             device,
             &Frames::None,
             &cfg,
+            None,
             &mut |_, _, _| {},
             no_icon(),
             EventSink::new(),
@@ -3036,6 +3055,7 @@ mod tests {
             device,
             &frames,
             &cfg,
+            None,
             &mut |_, _, _| {},
             no_icon(),
             EventSink::new(),
@@ -3067,6 +3087,7 @@ mod tests {
             device,
             &frames,
             &cfg,
+            None,
             &mut |_, _, _| {},
             no_icon(),
             EventSink::new(),
@@ -3118,6 +3139,7 @@ mod tests {
             device,
             &Frames::None,
             &cfg,
+            None,
             &mut |_, _, _| {},
             no_icon(),
             EventSink::new(),
