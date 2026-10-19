@@ -22,6 +22,10 @@ iap2-mfi = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-mfi" }
 iap2-csm = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-csm" }
 # `CpConfig::channel` is a `livi_wifi::Channel`, and LIVI does not re-export it.
 livi-wifi = { path = "vendor/LIVI/native/livi-helperd/crates/livi-wifi" }
+# Paging a paired phone is one BlueZ D-Bus call, and LIVI's own paging loop is
+# tied to the state its app keeps. Same version LIVI resolves, so it unifies
+# into one build. See `src/wireless/page.rs`.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
 # Needed directly to name `idevice::ReadWrite` in our own function signatures.
 # Same version LIVI resolves, so it unifies into one build.
 idevice = "0.1"
