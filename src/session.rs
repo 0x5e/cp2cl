@@ -34,7 +34,8 @@ use livi_runtime::ident::Identity;
 // privately, so it has to be named through the module that defines it.
 use livi_runtime::ident::Transport;
 use livi_runtime::mfi_async::SharedCoprocessor;
-use livi_runtime::vehicle::Vehicle;
+use livi_runtime::vehicle::{Fuels, Vehicle};
+use livi_wifi::Channel;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{broadcast, mpsc};
 
@@ -266,6 +267,7 @@ async fn attach(
             name: cfg.name.clone(),
             ssid: cfg.name.clone(),
             bt_mac: parse_mac(&cfg.bt_mac),
+            fuels: Fuels::default(),
         };
         // The session task owns both of these for as long as it runs, and a
         // restart means running it again — so neither may be moved out of the
@@ -290,8 +292,7 @@ async fn attach(
             wifi_iface: String::new(),
             ssid: cfg.name.clone(),
             passphrase: "00000000".into(),
-            channel: 36,
-            security_type: iap2_csm::messages::wifi::SecurityType::WpaWpa2,
+            channel: Channel::of_number(36),
             airplay_port,
             source_version: "320.17".into(),
             public_key: String::new(),
@@ -636,6 +637,7 @@ fn fingerprint(bytes: &[u8]) -> u64 {
 pub(crate) struct Latched<S> {
     inner: S,
     shut: Arc<Shut>,
+    trace: Trace,
 }
 
 impl<S> Latched<S> {
@@ -644,9 +646,48 @@ impl<S> Latched<S> {
         let latch = Self {
             inner,
             shut: shut.clone(),
+            trace: Trace::default(),
         };
         (latch, shut)
     }
+}
+
+/// The first chunks of a cable session in both directions, as the log shows them.
+///
+/// LIVI's link driver used to print these; the driver no longer does, and this is
+/// where the same first look at a cable that never identifies is kept. Only the
+/// first few are printed, and only at debug level: enough to see whether the
+/// phone answered at all, not enough to drown a working session.
+#[derive(Default)]
+struct Trace {
+    chunks_in: usize,
+    chunks_out: usize,
+}
+
+const TRACE_CHUNKS: usize = 20;
+const TRACE_BYTES: usize = 32;
+
+impl Trace {
+    fn inbound(&mut self, data: &[u8]) {
+        self.chunks_in += 1;
+        if self.chunks_in <= TRACE_CHUNKS {
+            tracing::debug!("[link] in  {} bytes {}", data.len(), hex(data));
+        }
+    }
+
+    fn outbound(&mut self, data: &[u8]) {
+        self.chunks_out += 1;
+        if self.chunks_out <= TRACE_CHUNKS {
+            tracing::debug!("[link] out {} bytes {}", data.len(), hex(data));
+        }
+    }
+}
+
+/// At most the first `TRACE_BYTES`, so one chunk cannot fill the log.
+fn hex(data: &[u8]) -> String {
+    let shown: Vec<String> = data.iter().take(TRACE_BYTES).map(|b| format!("{b:02x}")).collect();
+    let more = if data.len() > TRACE_BYTES { " …" } else { "" };
+    format!("{}{more}", shown.join(" "))
 }
 
 /// The switch end of a `Latched`: hand it to whoever needs to end the session.
@@ -682,10 +723,16 @@ impl<S: AsyncRead + Unpin> AsyncRead for Latched<S> {
         if this.shut.closed.load(Ordering::SeqCst) {
             return ended_of_file();
         }
+        let filled = buf.filled().len();
         match Pin::new(&mut this.inner).poll_read(cx, buf) {
             Poll::Pending => {
                 *this.shut.parked.lock().unwrap() = Some(cx.waker().clone());
                 Poll::Pending
+            }
+            Poll::Ready(Ok(())) => {
+                let got = buf.filled().len() - filled;
+                this.trace.inbound(&buf.filled()[filled..filled + got]);
+                Poll::Ready(Ok(()))
             }
             other => other,
         }
@@ -702,7 +749,11 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Latched<S> {
         if this.shut.closed.load(Ordering::SeqCst) {
             return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
         }
-        Pin::new(&mut this.inner).poll_write(cx, buf)
+        let polled = Pin::new(&mut this.inner).poll_write(cx, buf);
+        if let Poll::Ready(Ok(n)) = &polled {
+            this.trace.outbound(&buf[..*n]);
+        }
+        polled
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {

@@ -20,6 +20,8 @@ iap2-wired = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-wired" }
 iap2-usbmux = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-usbmux" }
 iap2-mfi = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-mfi" }
 iap2-csm = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-csm" }
+# `CpConfig::channel` is a `livi_wifi::Channel`, and LIVI does not re-export it.
+livi-wifi = { path = "vendor/LIVI/native/livi-helperd/crates/livi-wifi" }
 # Needed directly to name `idevice::ReadWrite` in our own function signatures.
 # Same version LIVI resolves, so it unifies into one build.
 idevice = "0.1"

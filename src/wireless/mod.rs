@@ -16,14 +16,14 @@
 //! the channel it opens.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use iap2_csm::messages::wifi::SecurityType;
 use livi_runtime::bringup::{run_accessory, CpConfig, OnCable};
 use livi_runtime::driver::LinkChannel;
 use livi_runtime::ident::{Identity, Transport};
 use livi_runtime::mfi_async::SharedCoprocessor;
-use livi_runtime::vehicle::Vehicle;
+use livi_runtime::vehicle::{Fuels, Vehicle};
+use livi_wifi::{Channel, OnAir, Security};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::config::Config;
@@ -34,6 +34,18 @@ use crate::web::Status;
 mod linux;
 
 pub use linux::watch;
+
+/// What the access point is on air with, for the bringup to ask about.
+///
+/// `AskOnAir` is a bare `fn` — no argument, no captures — so there is nowhere to
+/// hand it the interface. The session puts the answer here before the bringup
+/// starts and the bringup reads it back, which is what makes the start session
+/// describe the network the phone is actually joining rather than a guess.
+static ON_AIR: Mutex<Option<OnAir>> = Mutex::new(None);
+
+fn on_air() -> Option<OnAir> {
+    ON_AIR.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
 
 /// Runs the iAP2 half of one wireless session on a channel that is already up,
 /// and says whether the phone should be asked back for another one.
@@ -95,14 +107,25 @@ pub(crate) async fn run_session(
         name: cfg.name.clone(),
         ssid: ap.ssid.clone(),
         bt_mac,
+        // Nothing here knows what the car runs on, so no fuel type is claimed:
+        // the phone is told the accessory has no range to report.
+        fuels: Fuels::default(),
     };
+
+    // What the phone is about to be told, kept where the bringup can ask for it.
+    // The start session derives the Wi-Fi security from this: a WPA2 network is
+    // named by leaving the field out, a WPA3 or transition one is not.
+    *ON_AIR.lock().unwrap_or_else(|e| e.into_inner()) = Some(OnAir {
+        ssid: ap.ssid.clone(),
+        channel: Channel::of_number(ap.channel.into()),
+        security: ap.security,
+    });
 
     let cp = CpConfig {
         wifi_iface: cfg.wifi_iface.clone(),
         ssid: ap.ssid.clone(),
         passphrase: ap.passphrase,
-        channel: ap.channel,
-        security_type: SecurityType::WpaWpa2,
+        channel: Channel::of_number(ap.channel.into()),
         airplay_port,
         source_version: "320.17".into(),
         public_key: String::new(),
@@ -117,7 +140,8 @@ pub(crate) async fn run_session(
         // Left to whoever knows the network: the accessory's identifier is then
         // the MAC of the interface named above, read off that interface.
         ap_mac: None,
-        ap_on_air: None,
+        // The network the phone joins, as hostapd runs it — see `ON_AIR`.
+        ap_on_air: Some(on_air),
         // Nothing here watches the cable: a phone seen over Bluetooth is taken
         // as a wireless one, and if it is plugged in as well the wired watcher
         // is the one that will pick it up.
@@ -212,6 +236,8 @@ struct AccessPoint {
     ssid: String,
     passphrase: String,
     channel: u8,
+    /// What the access point asks a phone to authenticate with.
+    security: Security,
 }
 
 /// What a hostapd configuration gives `key`, if it gives one. Its format is one
@@ -249,6 +275,9 @@ fn parse_access_point(text: &str) -> Result<AccessPoint, String> {
             )?
             .to_string(),
         channel: channel.ok_or("`channel` is not set")?,
+        // Read off `wpa_key_mgmt`, the same way hostapd runs it: WPA-PSK alone
+        // is WPA2, WPA-PSK and SAE together is transition, SAE alone is WPA3.
+        security: Security::of_hostapd(text),
     })
 }
 
@@ -341,6 +370,7 @@ mod tests {
                 ssid: "car".into(),
                 passphrase: "12345678".into(),
                 channel: 36,
+                security: Security::Wpa2,
             }
         );
     }

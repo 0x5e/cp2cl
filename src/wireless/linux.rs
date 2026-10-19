@@ -46,28 +46,46 @@ pub async fn watch(
         }
     }
 
-    let (conn, mut incoming) = match livi_runtime::bt::start(&cfg.bt_adapter, &cfg.name, true).await
-    {
-        Ok(started) => started,
-        Err(e) => {
-            tracing::error!(
-                "[cp-wifi] bluetooth did not start on {}: {e}. Is bluetoothd \
+    let (conn, mut incoming, held) =
+        match livi_runtime::bt::start(&cfg.bt_adapter, &cfg.name, true).await {
+            Ok(started) => started,
+            Err(e) => {
+                tracing::error!(
+                    "[cp-wifi] bluetooth did not start on {}: {e}. Is bluetoothd \
                      running, and is {} the adapter?",
-                cfg.bt_adapter, cfg.bt_adapter
-            );
-            return;
-        }
-    };
+                    cfg.bt_adapter,
+                    cfg.bt_adapter
+                );
+                return;
+            }
+        };
     // The D-Bus connection owns the registered profiles. Dropping it
     // unregisters them, so it has to be kept alive for as long as we are
-    // listening — hence the binding rather than a bare `_`.
-    let _conn = conn;
+    // listening — it is also what puts the controllers back at the end.
     tracing::info!(
         "[cp-wifi] publishing the iAP service on {} as {:?}; pair the phone now",
         cfg.bt_adapter, cfg.name
     );
 
-    while let Some(IncomingConn { fd, peer_mac }) = incoming.recv().await {
+    // The channel never closes while we hold the connection that owns the
+    // profiles, so being told to stop is the only way out of the loop — and the
+    // one moment the controllers have to be put back. Without the handler the
+    // default action still ends the process, only without the putting back.
+    let mut stop = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .inspect_err(|e| tracing::warn!("[cp-wifi] no SIGTERM handler: {e}"))
+        .ok();
+
+    loop {
+        let next = match &mut stop {
+            Some(sig) => tokio::select! {
+                next = incoming.recv() => next,
+                _ = sig.recv() => None,
+            },
+            None => incoming.recv().await,
+        };
+        let Some(IncomingConn { fd, peer_mac }) = next else {
+            break;
+        };
         let peer = short(&peer_mac);
         tracing::info!("[cp-wifi] {peer} opened a channel");
         // Over Bluetooth there is no serial to be had: the peer is an address
@@ -111,6 +129,11 @@ pub async fn watch(
             tracing::info!("[cp-wifi] waiting for the phone to open the channel again");
         }
     }
+
+    // Nothing is listening any more: the profiles went with the channel, and the
+    // controllers go back to the name and discoverability they were found with.
+    livi_runtime::bt::let_go(&conn, &cfg.bt_adapter, &held).await;
+    tracing::info!("[cp-wifi] the iAP service is down, {} is as it was", cfg.bt_adapter);
 }
 
 /// This machine's Bluetooth address, which the phone checks against the one it
