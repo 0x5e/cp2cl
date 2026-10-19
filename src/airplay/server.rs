@@ -1473,7 +1473,14 @@ impl Session {
             if socket.read_exact(&mut body).await.is_err() {
                 break;
             }
-            rx.feed(&header, &body);
+            // The codec description is the one message that says which profile
+            // and level the stream is in, and it says it once.
+            if let Some(format) = rx.feed(&header, &body) {
+                status.with(|s| {
+                    s.video.profile = Some(format.profile);
+                    s.video.level = Some(format.level);
+                });
+            }
             frames += 1;
         }
         sink.push(StreamEvent::ScreenActive(false));

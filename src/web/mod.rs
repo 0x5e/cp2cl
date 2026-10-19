@@ -298,20 +298,32 @@ mod tests {
     }
 
     /// A coding is a constant of the receiver, not of the page: the answer has to
-    /// carry it, and the page has to read it from there.
+    /// carry it, and the page has to read it from there. The profile and the
+    /// level are the stream's own, so both halves say the same ones — there is
+    /// one video stream and the car is given it unchanged.
     #[test]
     fn the_page_reads_the_coding_from_the_answer() {
-        assert!(
-            page_text().contains("d.video.codec"),
-            "the page reads the field"
-        );
+        assert!(page_text().contains("d.video"), "the page reads the field");
         assert!(!page_text().contains("H.264"), "and names no coding itself");
-        let body = Status::new().json();
+        let status = Status::new();
+        let body = status.json();
         assert_eq!(
             body["carplay"]["video"]["codec"],
             crate::airplay::screen::CODEC,
             "which is what the snapshot carries"
         );
+        assert!(body["carplay"]["video"]["profile"].is_null(), "nothing described yet");
+        assert_eq!(body["carlife"]["video"]["codec"], crate::airplay::screen::CODEC);
+
+        status.with(|s| {
+            s.video.profile = Some("Baseline".to_string());
+            s.video.level = Some("3.1".to_string());
+        });
+        let body = status.json();
+        for half in ["carplay", "carlife"] {
+            assert_eq!(body[half]["video"]["profile"], "Baseline");
+            assert_eq!(body[half]["video"]["level"], "3.1");
+        }
     }
 
     /// The panel is the car's, so the page shows its physical size on the car's

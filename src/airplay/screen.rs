@@ -68,14 +68,21 @@ impl VideoReceiver {
     }
 
     /// Handles one complete message, having already split it into header + body.
-    pub fn feed(&mut self, header: &[u8], body: &[u8]) {
+    ///
+    /// Answers with the coding when the message was the codec description, and
+    /// with nothing for every other message: the profile and the level are said
+    /// once, in that one message, and are worth reporting where the page can
+    /// read them.
+    pub fn feed(&mut self, header: &[u8], body: &[u8]) -> Option<H264Format> {
         let opcode = header[4];
         match opcode {
             1 => {
                 match parse_video_config(body) {
                     Some(config) => {
                         tracing::info!(
-                            "[video] config: {} parameter set(s), {}-byte NAL lengths",
+                            "[video] config: {} level {}, {} parameter set(s), {}-byte NAL lengths",
+                            config.format.profile,
+                            config.format.level,
                             config.parameter_sets.len(),
                             config.nal_length_size
                         );
@@ -83,6 +90,7 @@ impl VideoReceiver {
                         self.sink.push(StreamEvent::VideoConfig {
                             parameter_sets: config.parameter_sets,
                         });
+                        Some(config.format)
                     }
                     None => {
                         // The only config this side can use is H.264's avcC, which
@@ -96,6 +104,7 @@ impl VideoReceiver {
                             body.len(),
                             hex::encode(&body[..body.len().min(32)])
                         );
+                        None
                     }
                 }
             }
@@ -111,7 +120,7 @@ impl VideoReceiver {
                         self.counter += 1;
                         let nal = self.nal_length_size;
                         let Some(annex_b) = length_prefixed_to_annex_b(&plain, nal) else {
-                            return;
+                            return None;
                         };
                         if !annex_b.is_empty() {
                             let keyframe = is_key_frame(&annex_b);
@@ -136,10 +145,33 @@ impl VideoReceiver {
                         tracing::warn!("[video] frame {} failed to open: {e}", self.counter);
                     }
                 }
+                // A frame says nothing about the coding: that came in the
+                // description, and it has not changed since.
+                None
             }
-            other => tracing::warn!(opcode = other, "unknown video opcode"),
+            other => {
+                tracing::warn!(opcode = other, "unknown video opcode");
+                None
+            }
         }
     }
+}
+
+/// The coding itself, as the codec description names it.
+///
+/// An avcC record writes both down in its first three bytes — `profile_idc`,
+/// the constraint flags and `level_idc`, which are the same three an annex-B
+/// SPS carries after its NAL header — so nothing has to be read out of the
+/// parameter set bit by bit. Which of them a phone picks is its own decision,
+/// and it is the one thing about the stream that cannot be named in advance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct H264Format {
+    /// `Baseline`, `Main`, `High`, … A profile the table below does not name is
+    /// reported by its number rather than guessed at.
+    pub profile: String,
+    /// As H.264 writes it: `3.1`, `4`, and `1b` for the one level whose name is
+    /// not its number.
+    pub level: String,
 }
 
 /// What the codec description says.
@@ -150,6 +182,8 @@ struct VideoConfig {
     /// assumed: guessing four when the stream uses two garbles every frame, and
     /// the decoder calls it "probably corrupt input".
     nal_length_size: usize,
+    /// The profile and the level the record declares.
+    format: H264Format,
 }
 
 /// Locates the avcC record inside the config blob and pulls SPS/PPS out of it.
@@ -164,6 +198,7 @@ fn parse_video_config(body: &[u8]) -> Option<VideoConfig> {
         Some(VideoConfig {
             parameter_sets: params,
             nal_length_size,
+            format: h264_format(avcc[1], avcc[2], avcc[3]),
         })
     };
     for i in 4..body.len().saturating_sub(4) {
@@ -173,6 +208,36 @@ fn parse_video_config(body: &[u8]) -> Option<VideoConfig> {
     }
     // Fall back: a bare avcC with no fourcc in front.
     finish(body)
+}
+
+/// Names the profile and the level from the three bytes that hold them.
+///
+/// `constraints` is the second of them, which is a byte of flags rather than a
+/// number: the one that matters here is `constraint_set3_flag`, which is what
+/// makes level 1b 1b. The other flag worth knowing about is `constraint_set1`,
+/// which turns Baseline into *constrained* Baseline — a subset rather than a
+/// profile of its own, and not worth ten characters on a page read at arm's
+/// length.
+fn h264_format(profile_idc: u8, constraints: u8, level_idc: u8) -> H264Format {
+    let profile = match profile_idc {
+        66 => "Baseline".to_string(),
+        77 => "Main".to_string(),
+        88 => "Extended".to_string(),
+        100 => "High".to_string(),
+        110 => "High 10".to_string(),
+        122 => "High 4:2:2".to_string(),
+        244 => "High 4:4:4".to_string(),
+        other => format!("profile {other}"),
+    };
+    let level = match level_idc {
+        // The one level whose name is not its number: 1b is level_idc 11 with
+        // `constraint_set3_flag` set, and it is not 1.1.
+        11 if constraints & 0x10 != 0 => "1b".to_string(),
+        // Whole levels are written without a fraction — 40 is 4, not 4.0.
+        whole if whole % 10 == 0 => (whole / 10).to_string(),
+        other => format!("{}.{}", other / 10, other % 10),
+    };
+    H264Format { profile, level }
 }
 
 /// Converts an avcC record into annex-B SPS/PPS chunks.
@@ -286,5 +351,44 @@ fn start_code_length(bytes: &[u8], index: usize) -> usize {
         3
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The description names the profile and the level outright, and that is
+    /// what the page shows: reading them out of the SPS itself would be the
+    /// same three bytes after more work.
+    #[test]
+    fn the_codec_description_names_the_profile_and_the_level() {
+        // Four bytes of nothing in front of the fourcc, which is where the
+        // search starts: a bare record is the fallback, not the usual shape.
+        let mut body = vec![0u8; 4];
+        body.extend_from_slice(b"avcC");
+        // version, Baseline with constraint_set1, level 3.1, NAL length 4,
+        // one SPS of two bytes, and no PPS.
+        body.extend_from_slice(&[1, 0x42, 0xe0, 0x1f, 0xff, 0xe1, 0x00, 0x02, 0x67, 0x00, 0x00]);
+
+        let config = parse_video_config(&body).expect("an avcC record");
+        assert_eq!(
+            config.format,
+            H264Format {
+                profile: "Baseline".to_string(),
+                level: "3.1".to_string(),
+            }
+        );
+        assert_eq!(config.nal_length_size, 4);
+    }
+
+    /// The two names that are not simply their number.
+    #[test]
+    fn the_profiles_and_levels_are_named_as_h264_names_them() {
+        assert_eq!(h264_format(66, 0x40, 40).profile, "Baseline", "constrained or not");
+        assert_eq!(h264_format(100, 0, 40).profile, "High");
+        assert_eq!(h264_format(100, 0, 40).level, "4", "a whole level has no fraction");
+        assert_eq!(h264_format(77, 0x10, 11).level, "1b", "which is not 1.1");
+        assert_eq!(h264_format(200, 0, 51).profile, "profile 200");
     }
 }

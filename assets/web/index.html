@@ -7,6 +7,10 @@
 <title>cp2cl 状态</title>
 <link rel="stylesheet" href="/vendor/weui.min.css">
 <style>
+  /* 这一页没有横向内容，横向手势留给浏览器：整页左右滑不再跟着回弹。
+     只动 overscroll，不碰 overflow：给 html/body 加 overflow-x 会让 body
+     变成滚动容器，手机上整页就划不动了。 */
+  html,body{overscroll-behavior-x:none}
   .page{padding:4px 0 calc(28px + env(safe-area-inset-bottom))}
   .weui-cells__title{margin-top:22px}
   .weui-cells__title:first-child{margin-top:14px}
@@ -59,6 +63,29 @@ function clock(seconds) {
   if (seconds === null || seconds === undefined) return null;
   const total = Math.max(0, Math.round(Number(seconds)));
   return Math.floor(total / 60) + ":" + String(total % 60).padStart(2, "0");
+}
+
+/* 编码格式的细节：后端给了什么就串什么，没给的一律不写。
+   一段就是一串短词，两段用的是同一个函数，所以两边的写法一致。 */
+function detail(...parts) {
+  const shown = parts.filter(p => p !== null && p !== undefined && p !== "");
+  return shown.length ? shown.join(" ") : null;
+}
+/* 视频：编码名之后是档次与级别，两个都是后端从码流描述里读出来的。
+   级别写成 L3.1：一行要在手机屏上放得下，Level 那五个字母不值当。 */
+function video(v) {
+  return detail(v.codec, v.profile, v.level && "L" + v.level);
+}
+/* 采样率按千赫写：44100 少两个字符，读起来还更快。 */
+function rate(hz) {
+  return hz ? Math.round(hz / 10) / 100 + " kHz" : null;
+}
+/* 声道的名字用英文：这一行里全是拉丁字母与数字，中文只在这里冒头反而更扎眼。 */
+function channels(n) {
+  if (!n) return null;
+  if (n === 1) return "Mono";
+  if (n === 2) return "Stereo";
+  return n + " ch";
 }
 
 /* 渠道号 → 厂商名映射（来自逆向报告 CARLIFE_AUTH.md §2.4）。
@@ -126,6 +153,13 @@ const CARLIFE_ROWS = [
   ["CUID", d => d.statistic && d.statistic.cuid],
   ["渠道号", d => d.statistic && channelLabel(d.statistic.channel)],
   ["分辨率", d => size(d.agreed)],
+  /* 视频是手机那条流原样转过来的，所以档次与级别也是手机的。 */
+  ["视频编码", d => video(d.video)],
+  /* 音频是解码后的 PCM，位宽、采样率与声道数都是我们告诉车机的那三个数。 */
+  ["音频编码", d => d.media
+    ? detail(d.media.bits ? "PCM " + d.media.bits + "-bit" : "PCM",
+             rate(d.media.rate), channels(d.media.channels))
+    : null],
   /* 车机那一侧的物理尺寸：车机的像素乘以面板密度，密度是本机设的，见 CP2CL_PPI。 */
   ["物理尺寸", d => d.physical
     ? d.physical.width_mm + " × " + d.physical.height_mm + " mm"
@@ -138,9 +172,10 @@ const CARPLAY_ROWS = [
   ["会话状态", d => bool(CARPLAY_UP(d), "已建立", "未建立"), d => CARPLAY_UP(d) ? "ok" : null],
   ["接入方式", d => bool(d.wireless, "WiFi", "USB")],
   ["分辨率", d => d.screen ? size(d.screen) : null],
-  ["视频编码格式", d => d.video.codec],
-  ["音频编码格式", d => d.audio.length
-    ? d.audio.map(a => a.codec).join(" / ")
+  ["视频编码", d => video(d.video)],
+  /* 手机的媒体、通话、语音助手是三路流，编码与参数各不相同，各占一段。 */
+  ["音频编码", d => d.audio.length
+    ? d.audio.map(a => detail(a.codec, rate(a.rate), channels(a.channels))).join(" / ")
     : null],
 ];
 

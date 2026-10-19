@@ -107,6 +107,7 @@ impl Status {
             s.carplay.video = Video::default();
             s.carplay.audio.clear();
             s.carplay.mic = None;
+            s.video = VideoFormat::default();
         });
     }
 }
@@ -123,11 +124,32 @@ pub struct Snapshot {
     pub carlife: Carlife,
     /// The phone's half: an iPhone talking iAP2 and AirPlay to us.
     pub carplay: Carplay,
+    /// The one video stream, and the coding it is in.
+    ///
+    /// One stream and not two: the phone encodes it and the CarLife video
+    /// channel forwards it unchanged, so the profile and the level describe
+    /// what the car decodes just as much as what the phone sends. Kept here
+    /// rather than in either half for that reason, and written from the codec
+    /// description the phone sends — see `airplay::screen`.
+    pub video: VideoFormat,
     /// What the two halves agree on: the song the phone is playing, which is
     /// the one thing here that belongs to neither end. It is what the car's
     /// panel is showing, so it is also the only part of this a person sitting
     /// in the car can see for themselves.
     pub now_playing: NowPlaying,
+}
+
+/// The coding of the video stream, as far as the stream says so itself.
+///
+/// Empty until the phone has described it: the coding's name is a property of
+/// this receiver, but which profile and level a phone picked is its own
+/// decision and is only known once it has said.
+#[derive(Debug, Clone, Default)]
+pub struct VideoFormat {
+    /// `Baseline`, `Constrained Baseline`, `Main`, `High`, …
+    pub profile: Option<String>,
+    /// `3.1`, `4`, `1b`.
+    pub level: Option<String>,
 }
 
 /// The song on the car's panel.
@@ -436,8 +458,8 @@ pub struct Mic {
 impl Snapshot {
     fn json(&self) -> Value {
         json!({
-            "carlife": self.carlife.json(),
-            "carplay": self.carplay.json(),
+            "carlife": self.carlife.json(&self.video),
+            "carplay": self.carplay.json(&self.video),
             "now_playing": self.now_playing.json(),
         })
     }
@@ -462,7 +484,7 @@ impl NowPlaying {
 }
 
 impl Carlife {
-    fn json(&self) -> Value {
+    fn json(&self, video: &VideoFormat) -> Value {
         json!({
             "usb": {
                 "enumerated": self.usb.enumerated,
@@ -501,13 +523,22 @@ impl Carlife {
             "media": self
                 .media
                 .map(|(rate, channels)| json!({ "rate": rate, "channels": channels, "bits": 16 })),
+            // What the video channel carries is the phone's stream, untouched,
+            // so the coding and its profile are the same ones the phone named
+            // rather than anything the car asked for — it asks for a size and a
+            // rate and nothing else.
+            "video": {
+                "codec": crate::airplay::screen::CODEC,
+                "profile": video.profile,
+                "level": video.level,
+            },
             "error_bytes": self.error_bytes,
         })
     }
 }
 
 impl Carplay {
-    fn json(&self) -> Value {
+    fn json(&self, video: &VideoFormat) -> Value {
         json!({
             "wireless": self.wireless,
             "phone": self.phone,
@@ -549,8 +580,12 @@ impl Carplay {
                 // A coding is a property of this receiver rather than of the
                 // session it happens to be carrying, so it is named where the
                 // config parser is and reported from there: the page reads it
-                // like any other field instead of knowing one of its own.
+                // like any other field instead of knowing one of its own. The
+                // profile and the level are not like that — the phone picks
+                // them, and they arrive with the codec description.
                 "codec": crate::airplay::screen::CODEC,
+                "profile": video.profile,
+                "level": video.level,
                 "messages": self.video.messages,
                 "frames": self.video.frames,
             },
