@@ -4,7 +4,7 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## v0.8.0 alpha — 待发布
+## v0.8.0 alpha — 2026-10-20
 
 ### 新增
 
