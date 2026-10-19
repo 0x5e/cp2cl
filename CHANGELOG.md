@@ -8,6 +8,8 @@
 
 ### 新增
 
+- 手机端 CarPlay 主屏上多出一格车机图标，下方是车型名称：`GET /info` 应答新增 `oemIconVisible`、`oemIconLabel` 与 `oemIcons`，256 与 512 两档、`prerendered`，PNG 内联在应答里而不是另起一次下载。车型由车机在 `MSG_CMD_HU_STATISTIC_INFO` 中报的渠道号决定：`assets/carlife_channel_map.json` 查出标签，图片按 `<标签>-<尺寸>.png` 取；没有标签的渠道用 `App` 与 `Default-*`（`23b2843`）。
+- 点击那一格回到车机自己的界面：手机在控制通道发 `requestUI`，回 200 后向车机发 `MSG_CMD_GO_TO_DESKTOP`（`0x00010021`，无 body）；`url` 为 `videoplayback:` 的不处理，`suggestUI` 只记一行日志（`bc62411`）。
 - 状态页：80 端口提供单页，分「CarLife 连接」与「CarPlay 连接」两段，每 2 秒轮询 `GET /api/status` 重绘；页面与 WeUI 样式表内置进二进制，不依赖外部文件、CDN 或环境变量（`7512259`）。
 - 桥接手机的正在播放到车机面板：`NowPlayingUpdate` → `MSG_CMD_MEDIA_INFO`，每条更新即时发送；`playlistNum`、`songId`、`mode` 留空，无对应源。封面随歌曲走：带时长的更新即清空，只改标题的不清除；大小为 0 的封面视为这首歌没有封面，消息里不写 `albumArt`；超过 30 KB 时先重编码（baseline JPEG、4:2:0、去元数据），仍放不下才不发（`2e8d4db`）。
 - 状态页新增「正在播放」一节：来源、歌曲、艺人、专辑、时长（分:秒）与封面，仅在车机与手机两端都连接时显示；封面由 `GET /api/cover?id=<哈希>` 单独取，只回答当前那张，新的 CarLife 会话开始时清空（`2e8d4db`）。
@@ -15,10 +17,12 @@
 
 ### 变更
 
+- 可执行文件携带的资源统一收到 `assets/`：图标、渠道映射表、状态页与其样式表。`build.rs` 遍历该目录生成「名字 → `include_bytes!`」的表，`src/assets.rs` 按相对路径取；内容仍在只读段，运行时不解包到临时目录，板子上也不需要额外文件（`5ab3f50`）。
+- 新增一套车型图标不再需要改代码：放两张 PNG 进 `assets/icons/`，再在映射表里给对应渠道号加一个 `label`（`5ab3f50`、`23b2843`）。
 - 日志级别变量由 `CP2CL_LOG` 更名为 `CP2CL_LOG_LEVEL`，可选值收窄为 `error`、`warn`、`info`、`debug`（`2f10b36`）。
 - 日志行时间戳改为本地时间 `HH:MM:SS.mmm`，不再输出日期与时区（`e41c37c`）。
 - 链路断开时的日志写明未被应答的消息名与 id、所在会话，以及重传次数与等待时长，不再只有包序号（`1923594`）。
-- `POST /command`、`SETUP`、`TEARDOWN` 的请求体整包打印，单行 JSON；`Data` 只取前 32 字节 hex，键按字母序（`ce12a91`）。
+- `POST /command` 中不认识的类型、以及 `SETUP`、`TEARDOWN` 的请求体整包打印，单行 JSON；`Data` 只取前 32 字节 hex，键按字母序（`ce12a91`、`bc62411`）。
 - axum 重新引入，只开 `http1` 与 `tokio` 两个 feature，仅服务于状态页（`7512259`）。
 - 状态页两段各自以「会话状态」打头，未连接时该段其余各项留空。
 - 状态页的视频编码格式不再由页面写死，改由后端返回，常量定义在 `airplay::screen::CODEC`。
