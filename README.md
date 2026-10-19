@@ -577,7 +577,7 @@ build step, compiled into the binary along with its stylesheet. There is nothing
 to install beside the program and nothing to fetch — which matters here, because
 the board's access point deliberately announces no gateway, so there is no route
 for a CDN to be reached over — see [Wireless CarPlay](#wireless-carplay).
-`src/web/index.html` is the page, `src/web/mod.rs` the router, and
+`assets/web/index.html` is the page, `src/web/mod.rs` the router, and
 `src/web/status.rs` the snapshot behind it.
 
 Port 80 is below 1024, so it takes root to bind; the board runs the program as
@@ -798,8 +798,12 @@ this a derivative work, so cp2cl inherits that.
 | `src/commands.rs` | the vocabulary of input |
 | `src/web/status.rs` | the snapshot both halves report into, and the JSON behind `/api/status` |
 | `src/web/mod.rs` | the status page's router and listener |
-| `src/web/index.html` | the page itself — one file, two sections, polling |
-| `src/web/vendor/weui.min.css` | its stylesheet, vendored so the page needs no network |
+| `src/assets.rs` | the lookup over `assets/`: what the binary carries besides code |
+| `assets/` | the icons, the channel table and the status page — `build.rs` includes every file here, so adding one is enough to be able to ask for it by name |
+| `assets/icons/` | the icon `GET /info` puts on the phone's screen, two sizes per make, `Default-*` for the rest |
+| `assets/carlife_channel_map.json` | the head unit's channel number, and the label worth showing for it |
+| `assets/web/index.html` | the page itself — one file, two sections, polling |
+| `assets/web/vendor/weui.min.css` | its stylesheet, vendored so the page needs no network |
 | `docker/` | the image that cross-compiles for the board, and the CMake toolchain it needs |
 | `board/` | the firmware half: the access point and its unit, laid out as the filesystem they land on |
 

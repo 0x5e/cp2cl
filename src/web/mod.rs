@@ -38,11 +38,18 @@ use axum::routing::get;
 use axum::Router;
 use tokio::net::TcpListener;
 
-/// The page, and the stylesheet it names. Both are read at compile time, so
-/// there is nothing to install alongside the binary and nothing to fetch over a
-/// network the board may not have.
-const PAGE: &str = include_str!("index.html");
-const WEUI: &str = include_str!("vendor/weui.min.css");
+/// The page, and the stylesheet it names. Both live in `assets/web`, so they are
+/// built into the binary with everything else: there is nothing to install
+/// alongside it and nothing to fetch over a network the board may not have.
+const PAGE_NAME: &str = "web/index.html";
+const WEUI_NAME: &str = "web/vendor/weui.min.css";
+
+/// One of those two, which is in the binary because `build.rs` put every file
+/// under `assets/` there. A name it does not have is a build that lost a file,
+/// and that is worth saying out loud rather than answering with nothing.
+fn embedded(name: &str) -> &'static str {
+    crate::assets::text(name).unwrap_or_else(|| panic!("assets/{name} is not in the binary"))
+}
 
 const HTML: &str = "text/html; charset=utf-8";
 const CSS: &str = "text/css; charset=utf-8";
@@ -86,11 +93,11 @@ pub async fn serve(listener: TcpListener, status: Arc<Status>) {
 }
 
 async fn page() -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, HTML)], PAGE)
+    ([(header::CONTENT_TYPE, HTML)], embedded(PAGE_NAME))
 }
 
 async fn stylesheet() -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, CSS)], WEUI)
+    ([(header::CONTENT_TYPE, CSS)], embedded(WEUI_NAME))
 }
 
 /// The one endpoint the page reads.
@@ -161,17 +168,28 @@ async fn not_found() -> impl IntoResponse {
 mod tests {
     use super::*;
 
+    /// The page and its stylesheet, as the binary carries them.
+    fn page_text() -> &'static str {
+        embedded(PAGE_NAME)
+    }
+    fn weui_text() -> &'static str {
+        embedded(WEUI_NAME)
+    }
+
     /// The page and its stylesheet both have to be in the binary: a board with
     /// no route to the internet has nothing else to fall back on.
     #[test]
     fn the_page_and_its_stylesheet_are_both_compiled_in() {
-        assert!(PAGE.contains("/api/status"), "the page reads the endpoint");
         assert!(
-            PAGE.contains("/vendor/weui.min.css"),
+            page_text().contains("/api/status"),
+            "the page reads the endpoint"
+        );
+        assert!(
+            page_text().contains("/vendor/weui.min.css"),
             "and names the stylesheet"
         );
         assert!(
-            WEUI.contains(".weui-cells"),
+            weui_text().contains(".weui-cells"),
             "which is the one that was vendored"
         );
     }
@@ -191,17 +209,20 @@ mod tests {
     /// path of its own: a picture is drawn, not read out of the JSON.
     #[test]
     fn the_page_reads_the_song_from_its_own_part() {
-        assert!(PAGE.contains("data.now_playing"), "the page reads the part");
         assert!(
-            PAGE.contains("/api/cover?id="),
+            page_text().contains("data.now_playing"),
+            "the page reads the part"
+        );
+        assert!(
+            page_text().contains("/api/cover?id="),
             "and fetches the cover itself, by the name it was given"
         );
         assert!(
-            PAGE.contains("BOTH_UP"),
+            page_text().contains("BOTH_UP"),
             "and shows the section only while both ends are up"
         );
         assert!(
-            PAGE.contains("duration_s"),
+            page_text().contains("duration_s"),
             "the page writes the length itself, from seconds"
         );
         let body = Status::new().json();
@@ -280,8 +301,11 @@ mod tests {
     /// carry it, and the page has to read it from there.
     #[test]
     fn the_page_reads_the_coding_from_the_answer() {
-        assert!(PAGE.contains("d.video.codec"), "the page reads the field");
-        assert!(!PAGE.contains("H.264"), "and names no coding itself");
+        assert!(
+            page_text().contains("d.video.codec"),
+            "the page reads the field"
+        );
+        assert!(!page_text().contains("H.264"), "and names no coding itself");
         let body = Status::new().json();
         assert_eq!(
             body["carplay"]["video"]["codec"],
@@ -294,7 +318,10 @@ mod tests {
     /// side, next to the size the car named, and reads it from the answer.
     #[test]
     fn the_page_reads_the_panel_size_from_the_cars_half() {
-        assert!(PAGE.contains("d.physical"), "the page reads the field");
+        assert!(
+            page_text().contains("d.physical"),
+            "the page reads the field"
+        );
         let status = Status::new();
         status.with(|s| s.carlife.physical = Some((407, 229)));
         let body = status.json();

@@ -13,6 +13,7 @@
 mod aac;
 mod airplay;
 mod artwork;
+mod assets;
 mod carlife;
 mod commands;
 mod config;
