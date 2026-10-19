@@ -37,4 +37,4 @@ mod server;
 
 pub use self::event::EventSink;
 pub use self::mic::MicSink;
-pub use self::server::{serve, AudioClock, ScreenParams, Shared, SharedScreen};
+pub use self::server::{serve, AudioClock, ScreenParams, Shared, SharedChannel, SharedScreen};

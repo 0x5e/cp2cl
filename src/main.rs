@@ -36,7 +36,7 @@ use tokio::sync::Mutex;
 
 use crate::airplay::clock::SyncedClock;
 use crate::airplay::pairing::Pairings;
-use crate::airplay::{AudioClock, EventSink, MicSink, ScreenParams, SharedScreen};
+use crate::airplay::{AudioClock, EventSink, MicSink, ScreenParams, SharedChannel, SharedScreen};
 use crate::config::Config;
 use crate::sink::{AudioCodec, ClOutlet, ClSink, MediaSink};
 
@@ -98,6 +98,11 @@ async fn main() -> Result<()> {
     // head unit has said what its screen is, and `GET /info` is answered from it.
     // Until then nothing has, and the default stands.
     let screen: SharedScreen = Arc::new(std::sync::Mutex::new(None));
+
+    // Which channel the head unit on the other end is, once it has said. `GET
+    // /info` is answered from it, so the phone is shown the icon and the label
+    // that go with the car it is plugged into.
+    let channel: SharedChannel = Arc::new(std::sync::Mutex::new(None));
 
     // Input goes out through here whatever produced it. Built now and filled in
     // later: the keys only exist once pair-verify has run.
@@ -178,6 +183,7 @@ async fn main() -> Result<()> {
             audio_sink,
             audio_codec: Arc::new(Mutex::new(codec)),
             screen: screen.clone(),
+            channel: channel.clone(),
             restart: restart.clone(),
             shutdown,
             event_sink: event_sink.clone(),
@@ -253,8 +259,16 @@ async fn main() -> Result<()> {
     let input = event_sink;
     let reported = status.clone();
     tokio::spawn(async move {
-        if let Err(e) =
-            carlife::serve(carried, &frames, &mut named, input, &mut report, reported).await
+        if let Err(e) = carlife::serve(
+            carried,
+            &frames,
+            &mut named,
+            channel,
+            input,
+            &mut report,
+            reported,
+        )
+        .await
         {
             // `{e:#}` and not `{e}`: the outer message says what we were doing
             // and the causes under it hold the errno, which is the part that

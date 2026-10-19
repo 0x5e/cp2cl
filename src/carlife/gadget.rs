@@ -25,7 +25,7 @@ use anyhow::{anyhow, Context, Result};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::mpsc;
 
-use crate::airplay::EventSink;
+use crate::airplay::{EventSink, SharedChannel};
 use crate::config::Config;
 use crate::web::Status;
 
@@ -71,6 +71,7 @@ pub async fn run<F>(
     cfg: Arc<Config>,
     frames: &Frames,
     screen: session::ScreenReport<'_>,
+    channel: SharedChannel,
     events: Arc<EventSink>,
     carplay: &mut F,
     status: Arc<Status>,
@@ -125,6 +126,7 @@ where
                             frames,
                             &cfg,
                             &mut *screen,
+                            channel.clone(),
                             events.clone(),
                             carplay,
                             status.clone(),

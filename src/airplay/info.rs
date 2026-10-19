@@ -7,6 +7,9 @@
 //!
 //! Values here are taken from LIVI's `getInfo.ts`, which is a known-good answer.
 
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
 use plist::{dictionary::Dictionary, Value};
 
 use super::bplist::to_binary;
@@ -45,6 +48,10 @@ pub struct Static {
     /// The display's density, in pixels per inch. The physical size the phone is
     /// told follows from it and the canvas above.
     pub ppi: u32,
+    /// The channel number the head unit reported, when it has reported one. It
+    /// picks the label and the icon the phone shows for us on its CarPlay
+    /// screen.
+    pub channel: Option<String>,
 }
 
 pub fn build(static_: &Static) -> Result<Vec<u8>, plist::Error> {
@@ -83,7 +90,76 @@ pub fn build(static_: &Static) -> Result<Vec<u8>, plist::Error> {
         Value::Array(vec![display_entry(static_)]),
     );
     d.insert("hidDevices".into(), hid_devices(static_));
+    // The icon the phone draws for us on its CarPlay screen, and the label under
+    // it. The head unit's channel number decides both: a make we ship a picture
+    // for gets its own, everything else gets the default.
+    let label = oem_label(static_.channel.as_deref());
+    d.insert("oemIconVisible".into(), Value::Boolean(true));
+    d.insert("oemIconLabel".into(), Value::String(label.into()));
+    d.insert("oemIcons".into(), Value::Array(oem_icons(label)));
     to_binary(&Value::Dictionary(d))
+}
+
+/// The label under our icon when no channel has named one.
+const DEFAULT_LABEL: &str = "App";
+
+/// The channel number a head unit reports, and the label worth showing for it.
+///
+/// The table is `assets/carlife_channel_map.json`, the page's own mapping with a
+/// `label` added where a make has one. Only those labels are kept: `code` names
+/// the head unit family on the page and is not part of this answer.
+static CHANNEL_LABELS: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+fn channel_labels() -> &'static HashMap<String, String> {
+    CHANNEL_LABELS.get_or_init(|| {
+        let table = crate::assets::text("carlife_channel_map.json")
+            .expect("the channel map is built into the binary");
+        let map: HashMap<String, HashMap<String, String>> =
+            serde_json::from_str(table).expect("the channel map is valid JSON");
+        map.into_iter()
+            .filter_map(|(channel, entry)| Some((channel, entry.get("label")?.clone())))
+            .collect()
+    })
+}
+
+/// The label the phone shows under our icon for `channel`.
+pub fn oem_label(channel: Option<&str>) -> &'static str {
+    channel
+        .and_then(|c| channel_labels().get(c.trim()))
+        .map_or(DEFAULT_LABEL, String::as_str)
+}
+
+/// The PNG of our icon for `label`, at `size` pixels square.
+///
+/// A make we ship a picture for is `icons/<label>-<size>.png` in `assets/`;
+/// anything else is `icons/Default-<size>.png`. Both are in the binary, so this
+/// is a lookup rather than a file read — and adding a make is a matter of
+/// dropping two pictures in, not of adding a branch here.
+fn icon(label: &str, size: u32) -> &'static [u8] {
+    let named = format!("icons/{label}-{size}.png");
+    let fallback = format!("icons/Default-{size}.png");
+    crate::assets::get(&named)
+        .or_else(|| crate::assets::get(&fallback))
+        .unwrap_or_else(|| panic!("neither {named} nor {fallback} is in the binary"))
+}
+
+/// Our icon in the two sizes the phone may ask for, as `/info` carries it.
+///
+/// `prerendered` says each picture is already at the size it claims, so the
+/// phone draws it as it is rather than scaling it first.
+fn oem_icons(label: &str) -> Vec<Value> {
+    [256, 512]
+        .into_iter()
+        .map(|size| {
+            let mut entry = Dictionary::new();
+            let pixels = Value::Integer(i64::from(size).into());
+            entry.insert("imageData".into(), Value::Data(icon(label, size).to_vec()));
+            entry.insert("widthPixels".into(), pixels.clone());
+            entry.insert("heightPixels".into(), pixels);
+            entry.insert("prerendered".into(), Value::Boolean(true));
+            Value::Dictionary(entry)
+        })
+        .collect()
 }
 
 fn resource(id: i64) -> Value {
@@ -402,5 +478,33 @@ mod tests {
 
     fn offered_entry(value: &Value, type_: i64, audio_type: &str) -> i64 {
         offered(value, type_, audio_type).expect("that entry is offered")
+    }
+
+    /// A channel with a label of its own gets that label and the matching
+    /// picture; every other channel, and no channel at all, gets the default.
+    #[test]
+    fn a_channel_names_its_own_icon() {
+        assert_eq!(oem_label(Some("20062100")), "Mercedes");
+        assert_eq!(oem_label(Some(" 20062100 ")), "Mercedes");
+        assert_eq!(oem_label(Some("20012100")), DEFAULT_LABEL);
+        assert_eq!(oem_label(None), DEFAULT_LABEL);
+        assert_ne!(icon("Mercedes", 256), icon(DEFAULT_LABEL, 256));
+
+        let icons = oem_icons("Mercedes");
+        assert_eq!(icons.len(), 2);
+        let first = icons[0].as_dictionary().expect("an icon is a dictionary");
+        assert_eq!(
+            first.get("widthPixels").and_then(Value::as_signed_integer),
+            Some(256)
+        );
+        assert_eq!(
+            first.get("prerendered").and_then(Value::as_boolean),
+            Some(true)
+        );
+        let png = first
+            .get("imageData")
+            .and_then(Value::as_data)
+            .expect("the picture is carried");
+        assert_eq!(&png[..4], b"\x89PNG");
     }
 }

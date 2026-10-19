@@ -285,6 +285,11 @@ impl ScreenParams {
 /// means no head unit has named a screen yet, and the default stands.
 pub type SharedScreen = Arc<std::sync::Mutex<Option<ScreenParams>>>;
 
+/// The channel number the head unit reported, as the CarLife session writes it
+/// out of `MSG_CMD_HU_STATISTIC_INFO`. `None` means no head unit has reported
+/// one, and the default icon stands.
+pub type SharedChannel = Arc<std::sync::Mutex<Option<String>>>;
+
 /// Everything the airplay side needs, owned once and shared per connection.
 pub struct Shared {
     pub cfg: Arc<Config>,
@@ -294,6 +299,9 @@ pub struct Shared {
     /// Set by the CarLife session, once a head unit has named its own screen.
     /// Read by `GET /info`.
     pub screen: SharedScreen,
+    /// Set by the CarLife session, once a head unit has said which channel it
+    /// is. Read by `GET /info` to pick the icon and the label under it.
+    pub channel: SharedChannel,
     /// Fired when what the phone should be rendering has changed. `/info` is
     /// answered once per session, so dropping the session is the only way a
     /// change lands: the phone reconnects, asks again, and gets the new answer.
@@ -356,6 +364,7 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                 status.with(|s| s.carplay.airplay.peer = Some(peer.to_string()));
                 let cfg = shared.cfg.clone();
                 let screen = shared.screen.clone();
+                let channel = shared.channel.clone();
                 let restart = shared.restart.subscribe();
                 let shutdown = shared.shutdown.subscribe();
                 let pairings = shared.pairings.clone();
@@ -372,6 +381,7 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                     let mut session = Session {
                         cfg,
                         screen,
+                        channel,
                         restart,
                         shutdown,
                         pairings,
@@ -530,6 +540,9 @@ struct Session {
     cfg: Arc<Config>,
     /// What the car asked for, if it has asked. Read when answering `/info`.
     screen: SharedScreen,
+    /// Which channel the car's head unit is, if it has said. Read when
+    /// answering `/info`.
+    channel: SharedChannel,
     /// Fires when the session should end so the phone re-reads `/info`.
     restart: tokio::sync::broadcast::Receiver<()>,
     /// Fires when the CarLife session that this one feeds has ended, which is
@@ -808,6 +821,7 @@ impl Session {
             height,
             fps,
             ppi,
+            channel: self.channel.lock().ok().and_then(|c| c.clone()),
         })
         .map_err(|e| e.to_string())?;
         // H.264 is the only family on offer: CarLife carries an elementary
@@ -821,10 +835,10 @@ impl Session {
 
     /// Prints a request body the phone sent, as one line of JSON.
     ///
-    /// Nothing on `/command` is acted on — it is the phone asking the accessory
-    /// for a UI behaviour — so the body is the whole of what there is to know,
-    /// and every one of them is printed. The per-second requests never reach
-    /// here: `/feedback` is answered before this and OPTIONS carries no body.
+    /// Used for the commands nothing here acts on: the body is then the whole of
+    /// what there is to know, and every one of them is printed. The per-second
+    /// requests never reach here: `/feedback` is answered before this and
+    /// OPTIONS carries no body.
     fn describe(what: &str, body: &[u8]) {
         match Self::plist_body(body) {
             Ok(dict) => tracing::info!("[airplay] {what} body: {}", to_json(&dict)),
@@ -1239,11 +1253,12 @@ impl Session {
                         codec,
                         name: audio_type,
                     });
-                    let id = self
-                        .audio_clock
-                        .lock()
-                        .await
-                        .open(stream_type, stream_id, codec.rate(), latency);
+                    let id = self.audio_clock.lock().await.open(
+                        stream_type,
+                        stream_id,
+                        codec.rate(),
+                        latency,
+                    );
                     let sink = self.audio_sink.clone();
                     let clock = self.audio_clock.clone();
                     let status = self.status.clone();
@@ -1352,7 +1367,8 @@ impl Session {
     /// Registers a running stream under the type the phone will name it with.
     /// A type that is already open is replaced rather than left to rot, because
     /// the phone may re-open a stream without tearing the old one down.
-    fn open_pump(        &mut self,
+    fn open_pump(
+        &mut self,
         stream_type: i64,
         task: tokio::task::JoinHandle<()>,
         control: Option<UdpSocket>,
@@ -1626,9 +1642,7 @@ impl Session {
         // in `/feedback` is one the phone keeps asking about.
         clock.lock().await.close(id);
         sink.push(StreamEvent::AudioStopped { stream_type });
-        tracing::info!(
-            "[airplay] audio stream closed after {packets} packets, {missing} missing"
-        );
+        tracing::info!("[airplay] audio stream closed after {packets} packets, {missing} missing");
         // The counters only exist here, and the stream is over, so this is the
         // last moment they can be reported at all.
         status.with(|s| {

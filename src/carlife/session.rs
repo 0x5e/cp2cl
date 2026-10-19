@@ -28,7 +28,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use super::{auth, frame, proto};
-use crate::airplay::{info, EventSink, ScreenParams};
+use crate::airplay::{info, EventSink, ScreenParams, SharedChannel};
 use crate::commands::{Command, TouchContact, PHONE_DROP, PHONE_HOOK_SWITCH, PHONE_MUTE};
 use crate::config::Config;
 use crate::navigation::{turn_kind, Guidance};
@@ -265,11 +265,16 @@ pub type ScreenReport<'a> = &'a mut (dyn FnMut(u32, u32, u32) + Send);
 /// `events` is where the car's touch and panel keys go. It is the CarPlay side's
 /// own sink, so a key pressed on the car arrives at the phone by exactly the road
 /// a key from anywhere else would; the phone cannot tell them apart.
+///
+/// `channel` is where the channel number the car reports is kept, for `/info` to
+/// read: a head unit that names itself gets the icon and label that go with the
+/// make it belongs to.
 pub async fn run<S, F>(
     stream: S,
     frames: &Frames,
     cfg: &Config,
     screen: ScreenReport<'_>,
+    channel: SharedChannel,
     events: Arc<EventSink>,
     carplay: &mut F,
     status: Arc<Status>,
@@ -278,6 +283,7 @@ where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     F: FnMut(bool),
 {
+
     // A session is what drains the bridge, so it takes all four receiving halves
     // for as long as it runs: one channel carries pictures, one the phone's
     // sound, and the last two what the phone says about itself — the song it is
@@ -342,6 +348,7 @@ where
         writer,
         cfg,
         screen,
+        channel,
         events,
         source,
         channel_touched: None,
@@ -563,6 +570,8 @@ struct Session<'a, W> {
     cfg: &'a Config,
     /// Told the size the car asked to be rendered at, whenever it changes.
     screen: ScreenReport<'a>,
+    /// Where the channel number the car reports is written, for `/info` to read.
+    channel: SharedChannel,
     /// Where the car's touch and panel keys go.
     events: Arc<EventSink>,
     source: Source,
@@ -690,6 +699,11 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                         connect_time: info.connect_time,
                     });
                 });
+                // `/info` is answered from this: the channel picks the icon and
+                // the label the phone shows for us.
+                if let Ok(mut reported) = self.channel.lock() {
+                    *reported = Some(info.channel.to_string());
+                }
                 // The other half of the authentication: the car's channel number
                 // is what the phone judges it by, and the judgement is what this
                 // message answers with. A verdict either way is sent — the car is
@@ -1511,6 +1525,13 @@ mod tests {
         }
     }
 
+    /// Where `/info` reads the channel number from. A test that is about
+    /// something else leaves it empty, which is what a car that has not reported
+    /// one looks like.
+    fn no_icon() -> SharedChannel {
+        Arc::new(Mutex::new(None))
+    }
+
     /// The car's statistics, which is where the channel number it is judged by
     /// arrives.
     fn statistics(channel: &str) -> Vec<u8> {
@@ -1537,12 +1558,13 @@ mod tests {
             &Frames::None,
             &Config::from_env(),
             &mut |_, _, _| {},
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
         )
         .await
-        .expect("the session ends cleanly");
+            .expect("the session ends cleanly");
         car.await.unwrap()
     }
 
@@ -1623,12 +1645,13 @@ mod tests {
             &Frames::None,
             &cfg,
             &mut |_, _, _| {},
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
         )
         .await
-        .expect("the session ends cleanly");
+            .expect("the session ends cleanly");
         car.await.unwrap();
     }
 
@@ -1653,12 +1676,13 @@ mod tests {
             &Frames::None,
             &cfg,
             &mut |_, _, _| {},
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
         )
         .await
-        .expect("the session ends cleanly");
+            .expect("the session ends cleanly");
         car.await.unwrap();
 
         assert_eq!(*switches.lock().unwrap(), vec![true, false]);
@@ -1694,12 +1718,13 @@ mod tests {
             &Frames::None,
             &cfg,
             &mut screen,
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
         )
         .await
-        .expect("the session ends cleanly");
+            .expect("the session ends cleanly");
         car.await.unwrap();
 
         assert_eq!(*screens.lock().unwrap(), vec![(1920, 480, 24)]);
@@ -1731,12 +1756,13 @@ mod tests {
             &Frames::None,
             &cfg,
             &mut screen,
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
         )
         .await
-        .expect("the session ends cleanly");
+            .expect("the session ends cleanly");
         car.await.unwrap();
     }
 
@@ -1830,12 +1856,13 @@ mod tests {
             &frames,
             &cfg,
             &mut screen,
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
         )
         .await
-        .expect("the session ends cleanly");
+            .expect("the session ends cleanly");
         car.await.unwrap();
     }
 
@@ -1923,6 +1950,7 @@ mod tests {
             &frames,
             &cfg,
             &mut screen,
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
@@ -1978,6 +2006,7 @@ mod tests {
             &frames,
             &cfg,
             &mut screen,
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
@@ -2045,6 +2074,7 @@ mod tests {
             &frames,
             &cfg,
             &mut screen,
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
@@ -2099,6 +2129,7 @@ mod tests {
             &frames,
             &cfg,
             &mut screen,
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
@@ -2166,6 +2197,7 @@ mod tests {
             &frames,
             &cfg,
             &mut screen,
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             status,
@@ -2224,6 +2256,7 @@ mod tests {
             &frames,
             &cfg,
             &mut screen,
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
@@ -2314,6 +2347,7 @@ mod tests {
             &frames,
             &cfg,
             &mut screen,
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
@@ -2364,6 +2398,7 @@ mod tests {
             &frames,
             &cfg,
             &mut screen,
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
@@ -2427,6 +2462,7 @@ mod tests {
             &frames,
             &cfg,
             &mut screen,
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
@@ -2520,6 +2556,7 @@ mod tests {
             &frames,
             &cfg,
             &mut screen,
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
@@ -2584,6 +2621,7 @@ mod tests {
             &frames,
             &cfg,
             &mut screen,
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
@@ -2626,12 +2664,13 @@ mod tests {
             &Frames::None,
             &cfg,
             &mut |_, _, _| {},
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
         )
         .await
-        .expect("the session ends cleanly");
+            .expect("the session ends cleanly");
         car.await.unwrap();
     }
 
@@ -2678,6 +2717,7 @@ mod tests {
             &frames,
             &cfg,
             &mut screen,
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
@@ -2730,6 +2770,7 @@ mod tests {
             &frames,
             &cfg,
             &mut screen,
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
@@ -2740,7 +2781,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_files_access_units_go_out_in_order_and_start_over_at_the_end() {        let cfg = Config::from_env();
+    async fn the_files_access_units_go_out_in_order_and_start_over_at_the_end() {
+        let cfg = Config::from_env();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
 
@@ -2769,12 +2811,13 @@ mod tests {
             &frames,
             &cfg,
             &mut |_, _, _| {},
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
         )
         .await
-        .expect("the session ends cleanly");
+            .expect("the session ends cleanly");
         car.await.unwrap();
     }
 
@@ -2832,12 +2875,13 @@ mod tests {
             &frames,
             &cfg,
             &mut |_, _, _| {},
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
         )
         .await
-        .expect("the session ends cleanly");
+            .expect("the session ends cleanly");
         car.await.unwrap();
     }
 
@@ -2867,12 +2911,13 @@ mod tests {
             &Frames::None,
             &cfg,
             &mut |_, _, _| {},
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
         )
         .await
-        .expect("the session ends cleanly");
+            .expect("the session ends cleanly");
         car.await.unwrap();
     }
 
@@ -2913,12 +2958,13 @@ mod tests {
             &frames,
             &cfg,
             &mut |_, _, _| {},
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
         )
         .await
-        .expect("the session ends cleanly");
+            .expect("the session ends cleanly");
         car.await.unwrap();
         pushing.await.unwrap();
     }
@@ -2942,20 +2988,25 @@ mod tests {
             &frames,
             &cfg,
             &mut |_, _, _| {},
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
         )
         .await
-        .expect("the session ends cleanly");
+            .expect("the session ends cleanly");
         car.await.unwrap();
 
         // The next session after the car is plugged back in gets receivers that
         // still work, which means the first ones were handed back rather than
         // dropped with the session.
-        let rx = outlet.take_video().expect("the video channel was handed back");
+        let rx = outlet
+            .take_video()
+            .expect("the video channel was handed back");
         outlet.return_video(rx);
-        let rx = outlet.take_media().expect("the media channel was handed back");
+        let rx = outlet
+            .take_media()
+            .expect("the media channel was handed back");
         outlet.return_media(rx);
         let rx = outlet
             .take_playing()
@@ -2987,12 +3038,13 @@ mod tests {
             &Frames::None,
             &cfg,
             &mut |_, _, _| {},
+            no_icon(),
             EventSink::new(),
             &mut carplay,
             Arc::new(Status::new()),
         )
         .await
-        .expect("the session ends cleanly");
+            .expect("the session ends cleanly");
         car.await.unwrap();
     }
 
@@ -3020,7 +3072,10 @@ mod tests {
             command_for(KEY_PHONE_CALL),
             Some(Command::Telephony(PHONE_HOOK_SWITCH))
         );
-        assert_eq!(command_for(KEY_PHONE_END), Some(Command::Telephony(PHONE_DROP)));
+        assert_eq!(
+            command_for(KEY_PHONE_END),
+            Some(Command::Telephony(PHONE_DROP))
+        );
         assert_eq!(command_for(KEY_MUTE), Some(Command::Telephony(PHONE_MUTE)));
     }
 
@@ -3028,7 +3083,9 @@ mod tests {
     /// settings. They are the head unit's business, and a phone gets nothing.
     #[test]
     fn the_keys_that_are_the_cars_own_go_no_further() {
-        for key in [0x04, 0x05, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x11, 0x12, 0x1D] {
+        for key in [
+            0x04, 0x05, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x11, 0x12, 0x1D,
+        ] {
             assert_eq!(command_for(key), None, "key {key:#04x}");
         }
     }
