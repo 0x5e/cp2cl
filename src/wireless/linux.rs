@@ -1,10 +1,10 @@
 //! Linux: BlueZ publishes the service and hands us the phone's RFCOMM socket.
 //!
 //! This is LIVI's `livi_runtime::bt` doing all of it — registering the iAP
-//! server profile, the iAP client profile with `AutoConnect` (so a phone that
-//! has paired before is paged back on its own), the CarPlay profile, and an
-//! agent that answers the pairing prompt. All that is left for us is draining
-//! the channel of sockets it produces.
+//! server profile, the iAP client profile, the CarPlay profile, and an agent
+//! that answers the pairing prompt. All that is left for us is draining the
+//! channel of sockets it produces — and calling a paired phone back, since a
+//! phone never returns to an accessory on its own: see `page`.
 
 use std::sync::Arc;
 
@@ -14,7 +14,7 @@ use livi_runtime::driver::spawn_link;
 use livi_runtime::mfi_async::SharedCoprocessor;
 use tokio::sync::broadcast;
 
-use super::{parse_mac, ready, run_session, short};
+use super::{page, parse_mac, ready, run_session, short};
 use crate::config::{bt_address, Config};
 use crate::session::{carry_artwork, Ended};
 use crate::sink::ClSink;
@@ -76,6 +76,10 @@ pub async fn watch(
         .ok();
 
     loop {
+        // Only while nothing is on the link: a phone that is already coming in
+        // does not need calling, and one that is mid-session must not be paged
+        // again on top of it.
+        let paging = tokio::spawn(page::run(conn.clone(), cfg.bt_adapter.clone()));
         let next = match &mut stop {
             Some(sig) => tokio::select! {
                 next = incoming.recv() => next,
@@ -83,6 +87,7 @@ pub async fn watch(
             },
             None => incoming.recv().await,
         };
+        paging.abort();
         let Some(IncomingConn { fd, peer_mac }) = next else {
             break;
         };
@@ -109,8 +114,8 @@ pub async fn watch(
         // goes to the car's panel the same way the song it belongs to does.
         let carrying = tokio::spawn(carry_artwork(artwork, panel.clone()));
         // Ending the session drops the descriptor, which is the only way a
-        // BlueZ channel ever closes; the profile's `AutoConnect` is what brings
-        // the phone back.
+        // BlueZ channel ever closes; paging the phone again is what brings it
+        // back, and the loop above starts that over.
         let ended = run_session(
             &cfg,
             auth.clone(),

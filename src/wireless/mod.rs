@@ -32,6 +32,7 @@ use crate::sink::ClSink;
 use crate::web::Status;
 
 mod linux;
+mod page;
 
 pub use linux::watch;
 

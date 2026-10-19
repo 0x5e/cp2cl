@@ -385,6 +385,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "x25519-dalek",
+ "zbus",
  "zune-core",
  "zune-jpeg",
  "zune-png",

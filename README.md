@@ -246,7 +246,11 @@ What it needs:
 
 `livi_runtime::bt` registers the iAP and CarPlay profiles with BlueZ and hands us
 the phone's RFCOMM socket. None of that is ours — it is LIVI's code called
-directly.
+directly. Paging the phone is ours (`src/wireless/page.rs`): an iPhone does not
+return to a wireless CarPlay accessory by itself, so while nothing is connected
+the paired phone is called back every few seconds. Pairing once in the OS is
+enough; tapping the machine in the phone's Bluetooth settings is not needed
+afterwards.
 
 Two things worth knowing if it does not connect. The device class matters — the
 controller has to advertise itself as in-car audio/video, or the phone does not
