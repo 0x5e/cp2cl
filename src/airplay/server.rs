@@ -7,6 +7,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -70,6 +71,21 @@ const BUFFERED_AUDIO: u8 = 102;
 /// The pacer works in the phone's counter and has no need of this; the report
 /// reads that counter back as a rate with it.
 const FRAME_SAMPLES: u32 = 1024;
+
+/// How long the phone may go unheard before its session is taken as over.
+///
+/// A phone that leaves the network does not close anything: it stops talking,
+/// and no part of the socket says so — `read` keeps waiting and no FIN arrives.
+/// What is left is the clock exchange, which runs once a second and which the
+/// phone answers, plus the per-second requests it makes of us. Silence past this
+/// is the only evidence there is that it is gone. The same number LIVI's own
+/// stack ends a silent session on.
+const PHONE_SILENT: Duration = Duration::from_secs(10);
+
+/// How often that silence is looked at. It reads one timestamp, so it is cheap;
+/// a second is short enough that the answer arrives while it is still worth
+/// having.
+const SILENCE_CHECK: Duration = Duration::from_secs(1);
 
 /// How late a frame may be before the pacer stops resuming the schedule it was
 /// following and takes that frame as the new zero.
@@ -345,6 +361,12 @@ pub struct Shared {
 /// CarPlay session end when the car's CarLife session does, which is the
 /// behaviour the bridge is supposed to have.
 pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Receiver<bool>) {
+    // Which connection is the current one, as a number that only goes up. A
+    // phone that drops off the network and comes straight back leaves its old
+    // connection behind — half open and silent — and that session must not go on
+    // to declare the phone gone once a newer one is talking to it. See
+    // `Wakeup::Silent`.
+    let newest = Arc::new(AtomicU64::new(0));
     loop {
         if !*gate.borrow() {
             tracing::info!("[airplay] holding: the CarLife session is not up");
@@ -365,11 +387,14 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                 let status = shared.status.clone();
                 tracing::info!("[airplay] {peer} connected");
                 status.with(|s| s.carplay.airplay.peer = Some(peer.to_string()));
+                let serial = newest.fetch_add(1, Ordering::SeqCst) + 1;
+                let current = newest.clone();
                 let cfg = shared.cfg.clone();
                 let screen = shared.screen.clone();
                 let channel = shared.channel.clone();
                 let desktop = shared.desktop.clone();
                 let restart = shared.restart.subscribe();
+                let restart_tx = shared.restart.clone();
                 let shutdown = shared.shutdown.subscribe();
                 let pairings = shared.pairings.clone();
                 let video_sink = shared.video_sink.clone();
@@ -388,6 +413,7 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                         channel,
                         desktop,
                         restart,
+                        restart_tx,
                         shutdown,
                         pairings,
                         video_sink,
@@ -414,6 +440,9 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                         write_ctr: 0,
                         cseq: 0,
                         feedback_log: String::new(),
+                        heard: Arc::new(std::sync::Mutex::new(None)),
+                        serial,
+                        newest: current,
                         status,
                     };
                     if let Err(e) = session.run(socket).await {
@@ -552,6 +581,11 @@ struct Session {
     desktop: tokio::sync::broadcast::Sender<()>,
     /// Fires when the session should end so the phone re-reads `/info`.
     restart: tokio::sync::broadcast::Receiver<()>,
+    /// The sending end of that same signal, kept because the silence check is
+    /// one of the things that can want a session over: a phone that has gone
+    /// has to be asked to come back, and only the iAP2 half can ask it. See
+    /// `Wakeup::Silent`.
+    restart_tx: tokio::sync::broadcast::Sender<()>,
     /// Fires when the CarLife session that this one feeds has ended, which is
     /// also the end of this one.
     shutdown: tokio::sync::broadcast::Receiver<()>,
@@ -594,6 +628,14 @@ struct Session {
     /// The last `/feedback` summary printed, so the line only appears when the
     /// set of streams changes rather than once a second.
     feedback_log: String,
+    /// When the phone was last heard from, by either of the two channels that
+    /// hear it: a request on this connection, or an answer on the timing port.
+    /// Written by both, read by the silence check in `run`.
+    heard: Arc<std::sync::Mutex<Option<Instant>>>,
+    /// Which connection this is, and the counter that says which one is current.
+    /// Only the current one may decide the phone has gone.
+    serial: u64,
+    newest: Arc<AtomicU64>,
     /// Where the status page reads this connection from. Reported to and never
     /// read back: see `crate::web::status`.
     status: Arc<Status>,
@@ -611,6 +653,9 @@ enum Wakeup {
     Restart,
     /// The CarLife session ended and this one has nothing left to feed.
     Shutdown,
+    /// The phone stopped answering. Over Wi-Fi this is what a phone that left
+    /// the network looks like: no bytes, no error, no end of file.
+    Silent,
 }
 
 impl Session {
@@ -620,6 +665,11 @@ impl Session {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (mut reader, mut writer) = socket.into_split();
         let mut buf = [0u8; 8192];
+        // A phone that leaves the network leaves the connection open behind it,
+        // so whether the session is still worth having is a question about the
+        // phone rather than about the socket. See `PHONE_SILENT`.
+        let mut silence = tokio::time::interval(SILENCE_CHECK);
+        silence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             let wakeup = tokio::select! {
@@ -636,9 +686,15 @@ impl Session {
                     Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => Wakeup::Shutdown,
                     Err(broadcast::error::RecvError::Closed) => continue,
                 },
+                _ = silence.tick() => Wakeup::Silent,
             };
             let n = match wakeup {
-                Wakeup::Read(n) => n,
+                Wakeup::Read(n) => {
+                    if n > 0 {
+                        self.heard_now();
+                    }
+                    n
+                }
                 Wakeup::Restart => {
                     tracing::info!(
                         "[airplay] {}: what to render changed; dropping the session so \
@@ -653,6 +709,42 @@ impl Session {
                 Wakeup::Shutdown => {
                     tracing::info!("[airplay] {}: the CarLife session is over", self.peer);
                     self.close_streams().await;
+                    return Ok(());
+                }
+                // Nothing has arrived for long enough that the phone is not
+                // coming back on this connection. Its streams are dead already
+                // and this session has nothing left to feed, but ending it here
+                // is only half the job: a phone that dropped off the network
+                // will not knock again until it is asked, and the asking is the
+                // iAP2 half's — a fresh session is what carries the start
+                // message. So the restart is asked for rather than waited out.
+                Wakeup::Silent => {
+                    // Most ticks find the phone where it should be, and the
+                    // session goes on being waited on.
+                    if !self.silent() {
+                        continue;
+                    }
+                    // Unless it came back on a new connection while this one was
+                    // going quiet. Then it is not gone, and this session is the
+                    // stale one: its streams died with the old connection, but
+                    // the ones that replaced them are live, so it lets go of its
+                    // own without telling anyone what the screen is doing.
+                    if self.newest.load(Ordering::SeqCst) != self.serial {
+                        tracing::debug!(
+                            "[airplay] {} went quiet after a newer connection took over",
+                            self.peer
+                        );
+                        self.abandon_streams();
+                        return Ok(());
+                    }
+                    tracing::info!(
+                        "[airplay] {} has been silent for {}s; the phone is gone, \
+                         asking for a new session",
+                        self.peer,
+                        PHONE_SILENT.as_secs()
+                    );
+                    self.close_streams().await;
+                    let _ = self.restart_tx.send(());
                     return Ok(());
                 }
             };
@@ -693,6 +785,27 @@ impl Session {
                 writer.write_all(&out).await?;
             }
         }
+    }
+
+    /// Notes that the phone has just said something, on whichever of the two
+    /// channels heard it.
+    fn heard_now(&self) {
+        if let Ok(mut at) = self.heard.lock() {
+            *at = Some(Instant::now());
+        }
+    }
+
+    /// Whether the phone has been quiet for longer than `PHONE_SILENT`.
+    ///
+    /// Nothing is judged before it has been heard at least once. A session that
+    /// has not got as far as the clock exchange has no heartbeat to miss, and
+    /// ending it would be a guess rather than an observation.
+    fn silent(&self) -> bool {
+        self.heard
+            .lock()
+            .ok()
+            .and_then(|at| *at)
+            .is_some_and(|at| at.elapsed() > PHONE_SILENT)
     }
 
     fn next_request(
@@ -936,6 +1049,18 @@ impl Session {
         }
     }
 
+    /// Lets go of the streams without saying anything about them.
+    ///
+    /// For a session a newer connection has already replaced: its streams died
+    /// with the old connection, but the sink and the audio clock now belong to
+    /// the session that took over, and telling them the screen stopped is the
+    /// one thing that would break it.
+    fn abandon_streams(&mut self) {
+        for (_, pump) in self.pumps.drain() {
+            pump.task.abort();
+        }
+    }
+
     /// Closes one stream, named the way the phone names it.
     ///
     /// Aborting the pump is the only way a UDP stream ever ends, and it means
@@ -1133,8 +1258,8 @@ impl Session {
             // out.
             let _ = socket.set_nodelay(true);
             let (read, write) = socket.into_split();
-            sink.attach_writer(write).await;
-            pump_events(read, read_key, responder).await;
+            let id = sink.attach_writer(write).await;
+            pump_events(read, read_key, responder, id).await;
         });
 
         let timing_port = self.spawn_timing(peer_timing_port).await?;
@@ -1739,6 +1864,7 @@ impl Session {
         let rx = socket.clone();
         let rx_clock = self.timing.clone();
         let rx_status = self.status.clone();
+        let rx_heard = self.heard.clone();
         let reader = tokio::spawn(async move {
             let mut buf = [0u8; 64];
             loop {
@@ -1747,6 +1873,12 @@ impl Session {
                 };
                 if n < 32 {
                     continue;
+                }
+                // Either direction of the exchange is the phone being there, and
+                // this is the heartbeat the silence check leans on: the phone
+                // answers once a second for as long as it has a network.
+                if let Ok(mut at) = rx_heard.lock() {
+                    *at = Some(Instant::now());
                 }
                 if buf[1] == TIMING_REQUEST {
                     let mut resp = [0u8; 32];
