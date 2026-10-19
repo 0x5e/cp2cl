@@ -41,7 +41,12 @@ const AXIS_DEFLECT: i8 = 127;
 pub struct EventSink {
     key: Mutex<Option<SymKey>>,
     counter: Mutex<u64>,
-    writer: Mutex<Option<OwnedWriteHalf>>,
+    /// The write half of the newest event connection, with the number that
+    /// identifies it. The number is what keeps a session that has ended from
+    /// taking the channel its successor is using — see `detach_writer`.
+    writer: Mutex<Option<(u64, OwnedWriteHalf)>>,
+    /// Handed out per attach, so two channels are never mistaken for each other.
+    next: std::sync::atomic::AtomicU64,
 }
 
 impl EventSink {
@@ -50,6 +55,7 @@ impl EventSink {
             key: Mutex::new(None),
             counter: Mutex::new(0),
             writer: Mutex::new(None),
+            next: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -59,9 +65,10 @@ impl EventSink {
         *self.key.lock().await = SymKey::from_bytes(&raw).ok();
     }
 
-    /// Hands over the write half of the connection the phone opened. Until that
-    /// arrives there is nowhere to put a report.
-    pub(crate) async fn attach_writer(&self, writer: OwnedWriteHalf) {
+    /// Hands over the write half of the connection the phone opened, and says
+    /// which connection it is. Until that arrives there is nowhere to put a
+    /// report.
+    pub(crate) async fn attach_writer(&self, writer: OwnedWriteHalf) -> u64 {
         // A new connection means the phone starts counting from zero again, so
         // ours has to as well or it cannot open what we send. The wired phone
         // connects once and never notices; the wireless one reconnects after
@@ -70,7 +77,9 @@ impl EventSink {
         if was != 0 {
             tracing::info!("[event] new event channel; write counter reset from {was}");
         }
-        *self.writer.lock().await = Some(writer);
+        let id = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        *self.writer.lock().await = Some((id, writer));
+        id
     }
 
     pub async fn dispatch(self: &Arc<Self>, cmd: Command) -> std::io::Result<()> {
@@ -80,7 +89,7 @@ impl EventSink {
             return Ok(());
         };
         let mut guard = self.writer.lock().await;
-        let Some(writer) = guard.as_mut() else {
+        let Some((_, writer)) = guard.as_mut() else {
             tracing::warn!("[event] phone has not opened the event channel yet");
             return Ok(());
         };
@@ -100,8 +109,16 @@ impl EventSink {
     /// — alive on its own. One descriptor per session, for as long as the
     /// process runs, is exactly the kind of thing that only shows up as "it
     /// stopped working some hours later".
-    pub(crate) async fn detach_writer(&self) {
-        *self.writer.lock().await = None;
+    ///
+    /// Only if it is still the one this `id` was given: a session that ended
+    /// leaves its pump running until its own socket dies, which can be after
+    /// the phone has opened the next channel — and clearing that one would take
+    /// the live session down with it, 100 ms after its `/info`.
+    pub(crate) async fn detach_writer(&self, id: u64) {
+        let mut guard = self.writer.lock().await;
+        if guard.as_ref().is_some_and(|(held, _)| *held == id) {
+            *guard = None;
+        }
     }
 
     /// Answers one request the phone posted us on the event channel.
@@ -115,7 +132,7 @@ impl EventSink {
             return Ok(());
         };
         let mut guard = self.writer.lock().await;
-        let Some(writer) = guard.as_mut() else {
+        let Some((_, writer)) = guard.as_mut() else {
             return Ok(());
         };
         let mut counter = self.counter.lock().await;
@@ -125,10 +142,14 @@ impl EventSink {
 }
 
 /// Reads the phone's side of the event connection and answers every request.
+///
+/// `id` is the number `attach_writer` gave the write half of this same
+/// connection, so ending here can only give up that one.
 pub(crate) async fn pump_events(
     mut read: OwnedReadHalf,
     read_key: SymKey,
     sink: Arc<EventSink>,
+    id: u64,
 ) {
     let mut buf = [0u8; 4096];
     let mut enc: Vec<u8> = Vec::new();
@@ -171,7 +192,7 @@ pub(crate) async fn pump_events(
             }
         }
     }
-    sink.detach_writer().await;
+    sink.detach_writer(id).await;
     tracing::info!("[airplay] event channel closed");
 }
 
