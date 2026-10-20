@@ -49,6 +49,10 @@ fn uptime() -> Duration {
 
 /// A line is `<seconds since boot> <LEVEL> [<area>]\t<event name> <fields>`.
 ///
+/// Where the writer takes them, the stamp is written grey and the level in its
+/// own colour: both are glanced at rather than read, unlike the name and the
+/// fields that follow them.
+///
 /// The bracketed area is the module column, and it is read off the event name
 /// rather than passed in: a call site cannot then say one thing in a column and
 /// another in the name, and the name is left whole for `grep`.
@@ -76,10 +80,14 @@ where
         let mut said = Said::default();
         event.record(&mut said);
 
+        let colours = w.has_ansi_escapes();
+        if colours {
+            w.write_str(GREY)?;
+        }
         Clock.format_time(&mut w)?;
-        if w.has_ansi_escapes() {
-            let (open, shut) = level_colour(level);
-            write!(w, " {open}{level:>5}{shut} ")?;
+        if colours {
+            w.write_str(RESET)?;
+            write!(w, " {}{level:>5}{RESET} ", level_colour(level))?;
         } else {
             write!(w, " {level:>5} ")?;
         }
@@ -105,8 +113,15 @@ fn area_of(message: &str) -> Option<&str> {
     (named && !rest.is_empty()).then_some(area)
 }
 
-fn level_colour(level: Level) -> (&'static str, &'static str) {
-    let open = if level == Level::ERROR {
+/// The grey the stamp is written in, and the escape that closes it.
+///
+/// Greyed because it is what is read past: how long ago something happened is
+/// looked up, while what happened is read.
+const GREY: &str = "\x1b[90m";
+const RESET: &str = "\x1b[0m";
+
+fn level_colour(level: Level) -> &'static str {
+    if level == Level::ERROR {
         "\x1b[31m"
     } else if level == Level::WARN {
         "\x1b[33m"
@@ -116,8 +131,7 @@ fn level_colour(level: Level) -> (&'static str, &'static str) {
         "\x1b[34m"
     } else {
         "\x1b[35m"
-    };
-    (open, "\x1b[0m")
+    }
 }
 
 /// Everything an event carries: the message, and whatever else was recorded
@@ -151,7 +165,7 @@ mod tests {
     use std::io;
     use std::sync::{Arc, Mutex};
 
-    use super::{area_of, Line};
+    use super::{area_of, Line, GREY, RESET};
 
     #[test]
     fn the_area_is_the_first_segment_of_the_event_name() {
@@ -189,6 +203,19 @@ mod tests {
             line.find(name).unwrap() - line.find('[').unwrap()
         };
         assert_eq!(column(&short, "cl.encoder"), column(&long, "airplay.held"));
+    }
+
+    #[test]
+    fn the_stamp_is_the_only_grey_part_of_the_line() {
+        let text = render("cl.encoder state=started");
+        let rest = text.strip_prefix(GREY).expect("the stamp is grey");
+        let (stamp, rest) = rest.split_once(RESET).expect("the grey is shut");
+        assert!(
+            stamp.chars().all(|c| c.is_ascii_digit() || c == '.'),
+            "{stamp:?}"
+        );
+        assert!(rest.starts_with(" \x1b[32m"), "{rest:?}");
+        assert_eq!(text.matches(RESET).count(), 2, "{text:?}");
     }
 
     /// One line as the layer would have written it.
