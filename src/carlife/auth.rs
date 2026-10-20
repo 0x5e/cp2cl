@@ -2,9 +2,9 @@
 //!
 //! The car satisfies itself that what is plugged into it is Baidu's own CarLife,
 //! and the phone satisfies itself that the car is one it should serve. Each is
-//! one message each way, and neither is optional: a car whose challenge goes
-//! unanswered treats the device as something else altogether, and a car whose
-//! channel the phone does not accept is told so.
+//! one message each way: a car whose challenge goes unanswered treats the device
+//! as something else altogether, and a car whose channel the phone does not accept
+//! is told so.
 //!
 //! The car's half is asymmetric cryptography. Baidu generates one key pair, keeps
 //! the private half for its app and gives the public half to the head units built
@@ -12,7 +12,9 @@
 //! through that private key. Answering is therefore a matter of holding the key,
 //! which is the app's own, extracted from the APK, because Baidu does not hand
 //! that half out. It is built into the binary from `assets/authentication/` and
-//! `Signer` puts the challenge through it.
+//! `Signer` puts the challenge through it. A build that cannot carry it skips the
+//! challenge instead: the head unit is left unauthenticated, asks again every half
+//! minute, and the streams run either way.
 //!
 //! The phone's half has no secret in it: the car sends its channel number along
 //! with its statistics, an app accepts it when it looks like one of the numbers

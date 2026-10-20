@@ -103,7 +103,22 @@ where
     // The key the car's challenge is answered with, built in beside the icon and
     // the page. Read once rather than per session: it is one key, and a car
     // plugged out and back in finds what the session before it had.
-    let auth = assets::text(auth::KEY_FILE).and_then(auth::Signer::from_pem);
+    //
+    // Without it the car is left unauthenticated rather than failed: the
+    // challenge is skipped, the head unit asks again in half a minute and is
+    // skipped again, and the streams run either way. The key is Baidu's and not
+    // every build is going to carry it, so this is said once here and never
+    // again.
+    let auth = match assets::text(auth::KEY_FILE) {
+        Some(pem) => auth::Signer::from_pem(pem),
+        None => {
+            tracing::warn!(
+                "[cl] {} is not built in; the car's authentication is skipped",
+                auth::KEY_FILE
+            );
+            None
+        }
+    };
 
     let (events_tx, mut events_rx) = mpsc::channel(4);
     // The endpoint files come out of `usb` as they came from the kernel, and are

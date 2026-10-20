@@ -579,7 +579,8 @@ The car may ask this device to prove it is a phone, with a challenge only an
 actual phone can answer. That answer is made with the CarLife app's own private
 RSA key, which the car checks against Baidu's published half, so
 `assets/authentication/carlife_md_rsa_private.pem` is where the key goes; without
-it the challenge is reported and left unanswered rather than guessed at. The other
+it the challenge is reported and left unanswered rather than guessed at, the car
+asks again every half minute, and the session runs on. The other
 direction is ours to decide: the car names a channel number along with its
 statistics, and is told whether a phone would serve it. `src/carlife/auth.rs`
 holds both halves, and a head unit has accepted the answer to its challenge.

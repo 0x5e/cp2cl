@@ -277,7 +277,7 @@ pub type ScreenReport<'a> = &'a mut (dyn FnMut(u32, u32, u32) + Send);
 ///
 /// `auth` is the key the car's challenge is answered with. It comes from the
 /// caller rather than from a file: the key is built into the binary, and a
-/// session that cannot answer is one handed `None`.
+/// session handed `None` skips the challenge and runs on rather than failing.
 ///
 /// `screen` is told the size the car asked to be rendered at, as width, height
 /// and frame rate. The car is the one that knows its own screen, so this is where
@@ -826,6 +826,10 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 self.status.with(|s| s.carlife.accepted = Some(passed));
                 if passed {
                     tracing::info!("[cl] the car accepted us");
+                } else if self.auth.is_none() {
+                    // The answer to a challenge that was skipped, which is
+                    // nothing the operator was not already told at startup.
+                    tracing::debug!("[cl] the car did not accept us, as expected without a key");
                 } else {
                     tracing::warn!(
                         "[cl] the car did not accept us; the guide has it disconnecting here"
@@ -992,6 +996,10 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     /// it cannot check is no better off than one given none — except that it was
     /// lied to. The car does not get to hear about the failure either way; it
     /// works it out for itself, and says so with `HU_AUTHEN_RESULT`.
+    ///
+    /// A session handed no key skips the exchange altogether and carries on. The
+    /// head unit asks again every half minute and is skipped again, so the line
+    /// is `debug`: the operator was told once, where the key was read.
     async fn answer(&mut self, challenge: &str) -> Result<()> {
         // Reported before it is attempted, so that a challenge nothing can
         // answer shows up as asked-and-unanswered rather than as never asked.
@@ -1000,9 +1008,8 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             s.carlife.challenge_answered = Some(false);
         });
         let Some(key) = self.auth.as_ref() else {
-            tracing::warn!(
-                "[cl] the car asked us to authenticate and no key was built in; \
-                 put the phone's key in assets/authentication and rebuild"
+            tracing::debug!(
+                "[cl] the car's challenge {challenge:?} is skipped: no key is built in"
             );
             return Ok(());
         };
@@ -3278,14 +3285,17 @@ mod tests {
     }
 
     /// A challenge with no key behind it is left alone rather than answered with
-    /// something the car would only reject. The absence is passed in rather than
-    /// looked for, so that the test says the same thing whether or not the
-    /// machine it runs on was built with a key.
+    /// something the car would only reject, and the session carries on: the head
+    /// unit asks again every half minute and is skipped again. The absence is
+    /// passed in rather than looked for, so that the test says the same thing
+    /// whether or not the machine it runs on was built with a key.
     #[tokio::test]
     async fn a_challenge_with_no_key_behind_it_is_left_alone() {
         let cfg = Config::from_env();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
+        let status = Arc::new(Status::new());
+        let reported = status.clone();
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
@@ -3293,6 +3303,10 @@ mod tests {
             proto::put_str(&mut challenge, 1, "A_B");
             car.send(HU_AUTHEN_REQUEST, &challenge).await;
             car.expect_silence(Duration::from_millis(500)).await;
+
+            // Still there: the next question is answered as it would have been.
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
         });
 
         run(
@@ -3305,11 +3319,17 @@ mod tests {
             EventSink::new(),
             &mut carplay,
             &no_tap(),
-            Arc::new(Status::new()),
+            reported,
         )
         .await
             .expect("the session ends cleanly");
         car.await.unwrap();
+
+        assert_eq!(
+            status.json()["carlife"]["challenge_answered"],
+            false,
+            "the challenge is reported as asked and unanswered"
+        );
     }
 
     #[tokio::test]
