@@ -11,6 +11,9 @@
 //! made of, and which ones. The count is written as none and no `$GPGSV` is
 //! produced, because a number made up here is one the phone would navigate by.
 //! The horizontal error it does report, and that becomes the HDOP.
+//!
+//! A car that loses its fix does not fall silent, and neither does this: the
+//! pair is sent again with nothing in it — see `no_fix`.
 
 use super::proto::CarGps;
 
@@ -54,6 +57,29 @@ pub fn sentences(fix: &CarGps, gcj02: bool) -> Option<String> {
     let rmc = format!(
         "GPRMC,{time},A,{lat_ddmm},{lat_hemi},{lng_ddmm},{lng_hemi},{knots:.2},{course:.2},{date},,"
     );
+    Some(format!(
+        "${gga}*{}\r\n${rmc}*{}\r\n",
+        checksum(&gga),
+        checksum(&rmc)
+    ))
+}
+
+/// What to send when the car has lost its fix.
+///
+/// A receiver that has lost its satellites does not fall silent: it keeps
+/// reporting, with a fix quality of none. A phone told only where the car was
+/// keeps using that position — for as long as it stays connected, which on a
+/// wireless CarPlay link is longer than the car. So the loss is said out loud,
+/// in the two sentences the phone already takes, with no position in them: the
+/// quality and the `V` are what say there is nothing to report, and the last
+/// position is not where the car is.
+///
+/// `at` is only read for its clock, and a clock that was never set is no clock,
+/// so a fix that was worth sending is the only thing that can be withdrawn.
+pub fn no_fix(at: &CarGps) -> Option<String> {
+    let (time, date) = clock(at)?;
+    let gga = format!("GPGGA,{time},,,,,0,00,99.9,,,,,,");
+    let rmc = format!("GPRMC,{time},V,,,,,,,{date},,");
     Some(format!(
         "${gga}*{}\r\n${rmc}*{}\r\n",
         checksum(&gga),
@@ -214,6 +240,26 @@ mod tests {
         assert!(sentences(&CarGps { year: 0, ..fix() }, false).is_none());
         assert!(sentences(&CarGps { month: 0, ..fix() }, false).is_none());
         assert!(sentences(&CarGps { latitude: 95_000_000, ..fix() }, false).is_none());
+    }
+
+    /// A car that has had a fix and lost it is not a car that was never there:
+    /// it is a car whose position is not to be used any more, and the pair says
+    /// so with a fix quality of none and no position at all.
+    #[test]
+    fn a_lost_fix_is_said_out_loud() {
+        let said = no_fix(&fix()).expect("a fix that was sent has a clock");
+        assert_eq!(
+            said,
+            "$GPGGA,143357.00,,,,,0,00,99.9,,,,,,*58\r\n\
+             $GPRMC,143357.00,V,,,,,,,201026,,*1F\r\n"
+        );
+        for line in said.lines() {
+            let (body, said) = line[1..].split_once('*').expect("a sentence names its checksum");
+            assert_eq!(checksum(body), said, "in {line}");
+        }
+        // A clock the car never set is not one to stamp a sentence with, here
+        // any more than above.
+        assert!(no_fix(&CarGps { year: 0, ..fix() }).is_none());
     }
 
     /// The datum shift is hundreds of metres in China and nothing outside it,

@@ -282,10 +282,11 @@ negotiation, and the heartbeat that keeps the channel alive — the video channe
 carrying CarPlay's frames from the moment the car starts the encoder, the media
 channel, carrying the phone's sound with the AAC-LC taken off it on the way, the
 vehicle data channel, which is asked for the car's position as soon as the
-session is up and hands that position on to the phone as the NMEA sentences it
-maps by, and the car's own touch and panel keys, which reach the phone as the
-events a phone understands. What is not: the two voice channels, which are the
-car's own and stay empty, and the phone's microphone, which nothing feeds.
+session is up, hands that position on to the phone as the NMEA sentences it maps
+by, and takes it back when the car loses it, and the car's own touch and panel
+keys, which reach the phone as the events a phone understands. What is not: the
+two voice channels, which are the car's own and stay empty, and the phone's
+microphone, which nothing feeds.
 
 ### Trying it without a car
 
@@ -910,8 +911,10 @@ this a derivative work, so cp2cl inherits that.
 * The panel is told *which* song is playing but not where in it: the progress
   bar's message is not sent. See [Now playing](#now-playing).
 * The car's position reaches the phone as `$GPGGA` and `$GPRMC`, and only while
-  the car has a fix. `$GPGSV` is not sent at all: which satellites the fix was
-  made of is not something the car reports, and a made-up sky is worse than none.
+  the car has a fix; a car that loses it says so in the same pair, so the phone
+  stops using the last position rather than keeping it. `$GPGSV` is not sent at
+  all: which satellites the fix was made of is not something the car reports, and
+  a made-up sky is worse than none.
 * `up`/`down` overshoot. The knob's absolute Y axis is a *position* to the phone
   rather than a step, so a full throw scrolls several rows. Wired it is reliable,
   wireless it is intermittent. The knob's wheel axis cannot stand in for it: that

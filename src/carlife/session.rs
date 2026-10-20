@@ -406,6 +406,7 @@ where
         next_tick: Instant::now(),
         position_seen: false,
         delivered: false,
+        handed: None,
         // Nothing is assumed about the datum before the car has named one, and a
         // fix that arrives before it would not be subscribed to anyway.
         gcj02: false,
@@ -540,6 +541,9 @@ where
             outlet.return_guidance(rx);
         }
     }
+    // The car has gone, and its position went with it: a phone still connected
+    // to us would otherwise keep using the last place the car was.
+    session.take_back_from_phone();
     if session.up {
         carplay(false);
         tracing::info!("cl.session_over action=close_carplay");
@@ -726,6 +730,10 @@ struct Session<'a, W> {
     /// Whether a position has been handed to the phone at all, which is the
     /// other half of that evidence: the car spoke, and the phone was told.
     delivered: bool,
+    /// The last fix the phone was given, kept because a position has to be taken
+    /// back as well as given: the phone holds it until it is told otherwise, and
+    /// the sentences that take it back are stamped with the clock it came with.
+    handed: Option<proto::CarGps>,
     /// Whether the car reports its coordinates in GCJ-02 rather than WGS84. The
     /// car names one of the two when it is asked to start reporting, and the
     /// phone's maps are in the datum the satellites are in.
@@ -1082,17 +1090,40 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     ///
     /// What the phone does with the sentences is its own business — it asks for
     /// the ones it wants, and LIVI writes out only those. A car that reports no
-    /// fix has nothing to hand over, and one whose clock is unset nothing to
-    /// stamp the sentences with — both are left to the phone's own position
-    /// rather than given a made-up one.
+    /// fix has nothing to hand over and is told apart from one whose clock is
+    /// unset: the first is a position the phone may already hold and has to give
+    /// up, the second leaves the phone to its own position rather than to a
+    /// made-up one, and there is nothing to say.
     fn hand_to_phone(&mut self, fix: &proto::CarGps) {
+        if fix.antenna_state != 1 {
+            self.take_back_from_phone();
+            return;
+        }
         let Some(block) = gps::sentences(fix, self.gcj02) else {
             return;
         };
         self.push_location(&block);
+        self.handed = Some(*fix);
         if !self.delivered {
             self.delivered = true;
             tracing::info!("cl.car_gps_handed sentences={}", block.lines().count());
+        }
+    }
+
+    /// The car's fix, gone: the phone is told so, once.
+    ///
+    /// Only ever said after a fix went out — a phone given nothing has nothing
+    /// to give up. Where the car has gone altogether, the caller is the end of
+    /// the session, and the phone outlives it: CarPlay here is wireless, and
+    /// what it keeps of a car that has driven off is the last place it was told.
+    fn take_back_from_phone(&mut self) {
+        let Some(at) = self.handed.take() else {
+            return;
+        };
+        // What went out had a clock, so the sentences that take it back have one.
+        if let Some(block) = gps::no_fix(&at) {
+            self.push_location(&block);
+            tracing::info!("cl.car_gps_withdrawn");
         }
     }
 
@@ -3375,6 +3406,107 @@ mod tests {
         let said = feed.location.borrow().1.clone();
         assert!(said.starts_with("$GPGGA,"), "{said}");
         assert!(said.contains("\r\n$GPRMC,"), "{said}");
+    }
+
+    /// A car that loses its fix has not gone quiet, and the phone is not left to
+    /// work that out: without being told, it keeps using the last position it
+    /// was given for as long as it stays connected.
+    #[tokio::test]
+    async fn a_lost_fix_takes_the_position_back() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let vehicle = Arc::new(Vehicle::default());
+        let feed = vehicle.feed();
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+            car.send(HU_STATISTIC_INFO, &statistics("20062100")).await;
+            car.expect(MD_AUTHEN_RESULT).await;
+            car.expect(FEATURE_CONFIG_REQUEST).await;
+            car.expect(CAR_DATA_SUBSCRIBE).await;
+            car.send(HU_CAR_DATA_SUBSCRIBE_DONE, &vehicle_list(&[(0, 1)]))
+                .await;
+            car.expect(CAR_DATA_SUBSCRIBE_START).await;
+
+            car.send(HU_CAR_GPS, &position()).await;
+            // The tunnel, or a garage: the receiver says it has nothing.
+            car.send(HU_CAR_GPS, &position_with(-1)).await;
+            car.send(HU_GO_TO_FOREGROUND, &[]).await;
+            car.expect(GO_TO_FOREGROUND_RESPONSE).await;
+        });
+
+        run(
+            device,
+            &Frames::None,
+            &cfg,
+            None,
+            &mut |_, _, _| {},
+            no_icon(),
+            EventSink::new(),
+            &mut carplay,
+            &no_tap(),
+            Arc::new(Status::new()),
+            vehicle,
+        )
+        .await
+        .expect("the session ends cleanly");
+        car.await.unwrap();
+
+        let said = feed.location.borrow().1.clone();
+        assert!(said.contains(",0,00,"), "the fix quality is none: {said}");
+        assert!(said.contains(",V,"), "and RMC says the same: {said}");
+        assert!(!said.contains("3019.0728"), "and no position is left: {said}");
+    }
+
+    /// The car drives off and the position goes with it: the phone is still
+    /// there, on a wireless link that outlives the car's.
+    #[tokio::test]
+    async fn the_position_goes_when_the_car_does() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let vehicle = Arc::new(Vehicle::default());
+        let feed = vehicle.feed();
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+            car.send(HU_STATISTIC_INFO, &statistics("20062100")).await;
+            car.expect(MD_AUTHEN_RESULT).await;
+            car.expect(FEATURE_CONFIG_REQUEST).await;
+            car.expect(CAR_DATA_SUBSCRIBE).await;
+            car.send(HU_CAR_DATA_SUBSCRIBE_DONE, &vehicle_list(&[(0, 1)]))
+                .await;
+            car.expect(CAR_DATA_SUBSCRIBE_START).await;
+
+            car.send(HU_CAR_GPS, &position()).await;
+            // And then the cable: the pipe closes behind the fix.
+        });
+
+        run(
+            device,
+            &Frames::None,
+            &cfg,
+            None,
+            &mut |_, _, _| {},
+            no_icon(),
+            EventSink::new(),
+            &mut carplay,
+            &no_tap(),
+            Arc::new(Status::new()),
+            vehicle,
+        )
+        .await
+        .expect("the session ends cleanly");
+        car.await.unwrap();
+
+        let said = feed.location.borrow().1.clone();
+        assert!(said.contains(",0,00,"), "the position was taken back: {said}");
+        assert!(!said.contains("3019.0728"), "and none is left: {said}");
     }
 
     /// A turn the two vocabularies have no word in common for goes out without
