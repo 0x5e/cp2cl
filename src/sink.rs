@@ -4,8 +4,14 @@
 //! session. The events below carry the *description* of a stream as well as its
 //! bytes, because the phone sends the codec's parameter sets after the stream has
 //! already started, and a consumer has to know where to put them.
+//!
+//! The phone's audio does not all go to one place. The music is the car's media
+//! channel; the navigation prompt is its Navi TTS channel; a call and the voice
+//! assistant are channels of the car's own, which this bridge has nothing to say
+//! to. Which is which is decided by the name the phone gives the stream in its
+//! SETUP — see `is_media` and `is_navigation`.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
@@ -99,6 +105,22 @@ impl AudioCodec {
     }
 }
 
+/// Which of the phone's streams is feeding one of the car's channels: the type
+/// the phone names it with, and the instance it opened for it.
+///
+/// The type on its own is not enough, and that is the one thing about stream
+/// identity worth stating outright. The phone opens a fresh stream for every
+/// track change and every prompt, and it re-uses the type number when it does;
+/// the teardown for the instance it replaced arrives *after* the replacement has
+/// said hello often enough to matter. The two sides of a track change are then
+/// two streams with one name, and anything that treats the name as the identity
+/// closes the new one when the old one is named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamId {
+    pub stream_type: u8,
+    pub connection_id: i64,
+}
+
 /// One thing a stream produced, on its way to the car.
 ///
 /// The events carry the *description* of a stream as well as its bytes, because
@@ -126,10 +148,9 @@ pub enum StreamEvent {
     /// The screen stream opened or closed. Says whether a session is up at all.
     ScreenActive(bool),
     /// An audio stream's format. `name` is the phone's own `audioType` from the
-    /// SETUP — `media`, `telephony`, `speechrecognition` — which the car hears
-    /// as its own separate channels.
+    /// SETUP, which decides which of the car's channels the stream feeds.
     AudioConfig {
-        stream_type: u8,
+        stream: StreamId,
         codec: AudioCodec,
         name: String,
     },
@@ -140,11 +161,13 @@ pub enum StreamEvent {
     /// the media channel takes PCM and the phone sends AAC-LC, so that one is
     /// decoded on the way past. See `airplay::audio`.
     AudioPacket {
-        stream_type: u8,
+        stream: StreamId,
         timestamp_us: u64,
         data: Vec<u8>,
     },
-    AudioStopped { stream_type: u8 },
+    /// One instance of a stream has ended. Which instance it was matters: see
+    /// `StreamId`.
+    AudioStopped { stream: StreamId },
 }
 
 /// Wherever a decoded stream ends up.
@@ -175,24 +198,82 @@ pub enum Media {
     Ended,
 }
 
-/// The phone's name for the one audio stream the car's media channel carries.
+/// One thing on its way to the car's Navi TTS channel, which is where the
+/// phone's navigation prompt goes.
 ///
-/// The other two it sends are `telephony` and `speechrecognition`, which are a
-/// call and a voice assistant: the car has its own channels for both, and they
-/// are not this one.
+/// The shape is the media channel's, because the car's messages are: a format,
+/// then samples in it, then an end. What is not the same is what happens when
+/// the end is missed — a head unit that took the channel up holds the music
+/// down until it is told the prompt is over, so `Ended` is sent on a timeout as
+/// well as when the phone says so. See `carlife::session`.
+#[derive(Debug)]
+pub enum Navi {
+    /// What the samples that follow are, which the car hears as
+    /// `MSG_NAVI_TTS_INIT` before it is given any of them.
+    Format { rate: u32, channels: u16 },
+    /// 16-bit signed little-endian PCM, in the format above.
+    Pcm { timestamp_ms: u32, data: Vec<u8> },
+    /// The prompt is over, or is taken to be.
+    Ended,
+}
+
+/// The phone's name for the one audio stream the car's media channel carries.
 const MEDIA_STREAM: &str = "media";
+
+/// Whether this stream is the music.
+pub fn is_media(name: &str) -> bool {
+    name == MEDIA_STREAM
+}
+
+/// Whether this stream is a navigation prompt.
+///
+/// The phone names the music, a call and the voice assistant, and it labels a
+/// prompt as `default` or `alert` — or, on a wired session, does not label it at
+/// all, which the SETUP turns into `default`. So everything that is neither the
+/// music nor one of the two things the car does itself is a prompt, and writing
+/// it that way is shorter than a list of names that keeps growing: LIVI reads
+/// the same field the same way, and calls the leftovers `Alert`.
+///
+/// The two that are left out are a call and Siri. The car has channels of its
+/// own for both, and nothing here is bridged to them.
+pub fn is_navigation(name: &str) -> bool {
+    !is_media(name) && !matches!(name, "telephony" | "speechrecognition")
+}
+
+/// Which of the car's channels an audio stream feeds.
+enum Role {
+    Media,
+    Navi,
+    /// The car's own: a call or the voice assistant.
+    Other,
+}
+
+fn role(name: &str) -> Role {
+    if is_media(name) {
+        Role::Media
+    } else if is_navigation(name) {
+        Role::Navi
+    } else {
+        Role::Other
+    }
+}
 
 /// How many access units may wait for the car. Bounded and dropped past, so a
 /// session that is behind glitches instead of accumulating latency.
 const CL_BACKLOG: usize = 8;
 
-/// The two channels towards the car, and their receiving halves.
+/// The three streams towards the car, and their receiving halves.
 ///
 /// The car's session is what drains these, and it comes and goes with the car:
 /// both receiving halves are handed out when a session starts and given back
 /// when it ends, so the next one gets them. Frames that arrive in between have
 /// nobody to go to and are dropped, which is what the sink says once rather
 /// than per frame.
+///
+/// The media and navigation channels are separate on purpose. They are separate
+/// at the car — one is music and one is speech, and the car mixes them itself —
+/// and keeping them apart here is what lets a prompt arrive without the music
+/// stopping.
 ///
 /// There are two more queues beside them for what the phone is playing and for
 /// where it is going — see `playing` and `guidance` — because a session takes
@@ -203,6 +284,8 @@ pub struct ClOutlet {
     video_rx: Mutex<Option<mpsc::Receiver<Vec<u8>>>>,
     media_tx: mpsc::Sender<Media>,
     media_rx: Mutex<Option<mpsc::Receiver<Media>>>,
+    navi_tx: mpsc::Sender<Navi>,
+    navi_rx: Mutex<Option<mpsc::Receiver<Navi>>>,
     playing_tx: mpsc::Sender<Playing>,
     playing_rx: Mutex<Option<mpsc::Receiver<Playing>>>,
     guidance_tx: mpsc::Sender<Guidance>,
@@ -213,6 +296,7 @@ impl ClOutlet {
     pub fn new() -> Self {
         let (video_tx, video_rx) = mpsc::channel(CL_BACKLOG);
         let (media_tx, media_rx) = mpsc::channel(CL_BACKLOG);
+        let (navi_tx, navi_rx) = mpsc::channel(CL_BACKLOG);
         let (playing_tx, playing_rx) = mpsc::channel(CL_BACKLOG);
         let (guidance_tx, guidance_rx) = mpsc::channel(CL_BACKLOG);
         Self {
@@ -220,6 +304,8 @@ impl ClOutlet {
             video_rx: Mutex::new(Some(video_rx)),
             media_tx,
             media_rx: Mutex::new(Some(media_rx)),
+            navi_tx,
+            navi_rx: Mutex::new(Some(navi_rx)),
             playing_tx,
             playing_rx: Mutex::new(Some(playing_rx)),
             guidance_tx,
@@ -237,14 +323,18 @@ impl ClOutlet {
         Arc::new(ClSink {
             video: self.video_tx.clone(),
             media: self.media_tx.clone(),
+            navi: self.navi_tx.clone(),
             playing: self.playing_tx.clone(),
             guidance: self.guidance_tx.clone(),
             pending: Mutex::new(Vec::new()),
-            media_stream: AtomicU8::new(NO_STREAM),
+            media_stream: Mutex::new(None),
+            navi_stream: Mutex::new(None),
             no_video_reader: AtomicBool::new(false),
             video_behind: AtomicBool::new(false),
             no_media_reader: AtomicBool::new(false),
             media_behind: AtomicBool::new(false),
+            no_navi_reader: AtomicBool::new(false),
+            navi_behind: AtomicBool::new(false),
             playing_dropped: AtomicBool::new(false),
             guidance_dropped: AtomicBool::new(false),
         })
@@ -274,8 +364,19 @@ impl ClOutlet {
         }
     }
 
+    /// The navigation half, on the same terms as the two above.
+    pub fn take_navi(&self) -> Option<mpsc::Receiver<Navi>> {
+        self.navi_rx.lock().ok()?.take()
+    }
+
+    pub fn return_navi(&self, rx: mpsc::Receiver<Navi>) {
+        if let Ok(mut guard) = self.navi_rx.lock() {
+            *guard = Some(rx);
+        }
+    }
+
     /// What the phone is playing. Taken and given back on the same terms as the
-    /// two above.
+    /// three above.
     pub fn take_playing(&self) -> Option<mpsc::Receiver<Playing>> {
         self.playing_rx.lock().ok()?.take()
     }
@@ -287,7 +388,7 @@ impl ClOutlet {
     }
 
     /// Where the phone is going. Taken and given back on the same terms as the
-    /// three above.
+    /// four above.
     pub fn take_guidance(&self) -> Option<mpsc::Receiver<Guidance>> {
         self.guidance_rx.lock().ok()?.take()
     }
@@ -299,31 +400,57 @@ impl ClOutlet {
     }
 }
 
-/// No audio stream is feeding the media channel. No stream type is numbered
-/// below a hundred, so this cannot be mistaken for one.
-const NO_STREAM: u8 = 0;
+/// Whether one of the car's channels is being fed from this stream.
+fn feeding(slot: &Mutex<Option<StreamId>>, stream: StreamId) -> bool {
+    slot.lock().map(|held| *held == Some(stream)).unwrap_or(false)
+}
+
+/// Points a channel at a stream. A stream that opens replaces what the channel
+/// was on, which is what the phone does when it moves its music to a new one.
+fn feed(slot: &Mutex<Option<StreamId>>, stream: StreamId) {
+    if let Ok(mut held) = slot.lock() {
+        *held = Some(stream);
+    }
+}
+
+/// Lets go of a channel if this is the stream feeding it, and says whether it
+/// was — an instance that ends after its replacement took over has nothing to
+/// say to the car.
+fn starve(slot: &Mutex<Option<StreamId>>, stream: StreamId) -> bool {
+    match slot.lock() {
+        Ok(mut held) if *held == Some(stream) => {
+            *held = None;
+            true
+        }
+        _ => false,
+    }
+}
 
 /// Where the CarPlay streams go when the car is the one reading them.
 pub struct ClSink {
     video: mpsc::Sender<Vec<u8>>,
     media: mpsc::Sender<Media>,
+    navi: mpsc::Sender<Navi>,
     playing: mpsc::Sender<Playing>,
     guidance: mpsc::Sender<Guidance>,
     /// Parameter sets from the newest codec description, put in front of the
     /// next frame. Held outside the queue deliberately: the queue can be full,
     /// and a dropped SPS/PPS costs everything that follows it.
     pending: Mutex<Vec<u8>>,
-    /// Which of the phone's audio streams the media channel is being fed from,
-    /// once one of them has said it is the music. A packet carries no name —
-    /// only the stream's opening does — so this is what the ones that follow
-    /// are measured against.
-    media_stream: AtomicU8,
+    /// Which instance of which stream each of the two audio channels is being
+    /// fed from. A packet carries no name — only the stream's opening does — so
+    /// this is what the ones that follow are measured against. The two are kept
+    /// apart so that one stream ending cannot take the other channel with it.
+    media_stream: Mutex<Option<StreamId>>,
+    navi_stream: Mutex<Option<StreamId>>,
     /// Each of these is said once. A stream that keeps arriving with nowhere to
     /// go would otherwise print a line per frame.
     no_video_reader: AtomicBool,
     video_behind: AtomicBool,
     no_media_reader: AtomicBool,
     media_behind: AtomicBool,
+    no_navi_reader: AtomicBool,
+    navi_behind: AtomicBool,
     /// And once for what the phone is playing, which is dropped in its own way.
     playing_dropped: AtomicBool,
     /// And once for where it is going, which is dropped the same way.
@@ -381,6 +508,16 @@ impl ClSink {
             "media",
             &self.no_media_reader,
             &self.media_behind,
+        );
+    }
+
+    fn send_navi(&self, item: Navi) {
+        Self::send(
+            &self.navi,
+            item,
+            "navi",
+            &self.no_navi_reader,
+            &self.navi_behind,
         );
     }
 
@@ -442,45 +579,70 @@ impl MediaSink for ClSink {
                 access_unit.extend_from_slice(&data);
                 self.send_video(access_unit);
             }
-            // Only the music is the car's media channel, and which stream that
-            // is is said once, when the stream opens.
+            // Which of the car's channels a stream feeds is said once, when the
+            // stream opens, and by the name the phone gave it.
             StreamEvent::AudioConfig {
-                stream_type,
+                stream,
                 codec,
                 name,
-            } => {
-                if name != MEDIA_STREAM {
-                    tracing::debug!("[cl] the {name} audio stream is not the car's media channel");
-                    return;
+            } => match role(&name) {
+                Role::Media => {
+                    feed(&self.media_stream, stream);
+                    // The format the car is told is the one the phone
+                    // negotiated. Decoding does not change the rate or the
+                    // channel count, so those are the two numbers the PCM under
+                    // it arrives with; see `aac`.
+                    self.send_media(Media::Format {
+                        rate: codec.rate(),
+                        channels: codec.channels(),
+                    });
                 }
-                self.media_stream.store(stream_type, Ordering::Relaxed);
-                // The format the car is told is the one the phone negotiated.
-                // Decoding does not change the rate or the channel count, so
-                // those are the two numbers the PCM under it arrives with; see
-                // `aac`.
-                self.send_media(Media::Format {
-                    rate: codec.rate(),
-                    channels: codec.channels(),
-                });
-            }
+                Role::Navi => {
+                    feed(&self.navi_stream, stream);
+                    // Here decoding does change both: the prompt arrives as
+                    // Opus at 48 kHz and the car is given 16 kHz mono. The
+                    // codec on the event is what the car gets, not what the
+                    // phone sends — see `airplay::audio::delivered`.
+                    self.send_navi(Navi::Format {
+                        rate: codec.rate(),
+                        channels: codec.channels(),
+                    });
+                }
+                Role::Other => {
+                    tracing::debug!(
+                        "[cl] the {name} audio stream is the car's own, and is not bridged"
+                    );
+                }
+            },
             StreamEvent::AudioPacket {
-                stream_type,
+                stream,
                 timestamp_us,
                 data,
             } => {
-                if stream_type != self.media_stream.load(Ordering::Relaxed) {
-                    return;
+                let at = (timestamp_us / 1_000) as u32;
+                if feeding(&self.media_stream, stream) {
+                    self.send_media(Media::Pcm {
+                        timestamp_ms: at,
+                        data,
+                    });
+                } else if feeding(&self.navi_stream, stream) {
+                    self.send_navi(Navi::Pcm {
+                        timestamp_ms: at,
+                        data,
+                    });
                 }
-                self.send_media(Media::Pcm {
-                    timestamp_ms: (timestamp_us / 1_000) as u32,
-                    data,
-                });
             }
-            StreamEvent::AudioStopped { stream_type } => {
-                if stream_type != self.media_stream.swap(NO_STREAM, Ordering::Relaxed) {
-                    return;
+            // One instance ended. If it is the one the channel is on, the
+            // channel ends with it; if it is the one it replaced, the channel
+            // has nothing to say, which is the whole reason an event names an
+            // instance rather than a type.
+            StreamEvent::AudioStopped { stream } => {
+                if starve(&self.media_stream, stream) {
+                    self.send_media(Media::Ended);
                 }
-                self.send_media(Media::Ended);
+                if starve(&self.navi_stream, stream) {
+                    self.send_navi(Navi::Ended);
+                }
             }
             // The car learns nothing from this: it is the video channel that
             // tells it whether there is a picture.
@@ -493,6 +655,14 @@ impl MediaSink for ClSink {
 mod tests {
     use super::*;
 
+    /// One stream: a type the phone names it with, and the instance it opened.
+    fn id(stream_type: u8, connection_id: i64) -> StreamId {
+        StreamId {
+            stream_type,
+            connection_id,
+        }
+    }
+
     /// The phone mixes three different things onto one stream of events and only
     /// one of them is the car's media channel. A call is the car's own
     /// telephone, and the music playing under it is not the call.
@@ -501,27 +671,29 @@ mod tests {
         let outlet = ClOutlet::new();
         let sink = outlet.sink();
         let mut media = outlet.take_media().expect("nothing has taken it");
+        let mut navi = outlet.take_navi().expect("nothing has taken it");
 
-        let opened = |stream_type, name: &str| StreamEvent::AudioConfig {
-            stream_type,
+        let opened = |stream, name: &str| StreamEvent::AudioConfig {
+            stream,
             codec: AudioCodec::Pcm {
                 rate: 44_100,
                 channels: 2,
             },
             name: name.to_string(),
         };
-        let sound = |stream_type| StreamEvent::AudioPacket {
-            stream_type,
+        let sound = |stream| StreamEvent::AudioPacket {
+            stream,
             timestamp_us: 1_234_567,
             data: vec![0x11, 0x22],
         };
 
-        sink.push(opened(100, "telephony"));
-        sink.push(sound(100));
+        sink.push(opened(id(100, 1), "telephony"));
+        sink.push(sound(id(100, 1)));
         assert!(media.try_recv().is_err(), "a call is not the car's music");
+        assert!(navi.try_recv().is_err(), "nor is it a prompt");
 
-        sink.push(opened(102, "media"));
-        sink.push(sound(102));
+        sink.push(opened(id(102, 2), "media"));
+        sink.push(sound(id(102, 2)));
         assert!(
             matches!(
                 media.try_recv(),
@@ -539,6 +711,102 @@ mod tests {
             }
             other => panic!("expected sound on the media channel, got {other:?}"),
         }
+    }
+
+    /// A prompt is a stream of its own, and it goes to the car's other channel
+    /// rather than through the music's — which is what lets sound come out of
+    /// the navigation while the music keeps playing.
+    #[test]
+    fn a_prompt_goes_to_the_navigation_channel_and_the_music_carries_on() {
+        let outlet = ClOutlet::new();
+        let sink = outlet.sink();
+        let mut media = outlet.take_media().expect("nothing has taken it");
+        let mut navi = outlet.take_navi().expect("nothing has taken it");
+
+        sink.push(StreamEvent::AudioConfig {
+            stream: id(102, 7),
+            codec: AudioCodec::AacLc {
+                rate: 48_000,
+                channels: 2,
+            },
+            name: "media".into(),
+        });
+        // The prompt opens as its own type and its own instance, with the codec
+        // it is delivered in rather than the one on the wire.
+        sink.push(StreamEvent::AudioConfig {
+            stream: id(100, 8),
+            codec: AudioCodec::Pcm {
+                rate: 16_000,
+                channels: 1,
+            },
+            name: "default".into(),
+        });
+        sink.push(StreamEvent::AudioPacket {
+            stream: id(100, 8),
+            timestamp_us: 2_000_000,
+            data: vec![0xaa],
+        });
+
+        assert!(
+            matches!(
+                navi.try_recv(),
+                Ok(Navi::Format {
+                    rate: 16_000,
+                    channels: 1
+                })
+            ),
+            "the prompt channel is told what its samples are"
+        );
+        assert!(matches!(navi.try_recv(), Ok(Navi::Pcm { data, .. }) if data == vec![0xaa]));
+        // The music is still where it was: opening a prompt says nothing on the
+        // media channel at all.
+        assert!(matches!(media.try_recv(), Ok(Media::Format { .. })));
+        assert!(media.try_recv().is_err(), "the prompt is not the music");
+    }
+
+    /// The phone re-opens a type for every track change, so an instance that
+    /// ends can be one the channel has already moved off — and then the channel
+    /// has nothing to say. Ending the music whenever an older instance of it
+    /// says goodbye is what used to stop the sound for good.
+    #[test]
+    fn an_instance_that_was_replaced_cannot_end_the_channel() {
+        let outlet = ClOutlet::new();
+        let sink = outlet.sink();
+        let mut media = outlet.take_media().expect("nothing has taken it");
+
+        let opened = |connection| StreamEvent::AudioConfig {
+            stream: id(102, connection),
+            codec: AudioCodec::AacLc {
+                rate: 48_000,
+                channels: 2,
+            },
+            name: "media".into(),
+        };
+        sink.push(opened(3));
+        assert!(matches!(media.try_recv(), Ok(Media::Format { .. })));
+
+        // A newer instance of the same type takes the channel over.
+        sink.push(opened(4));
+        assert!(matches!(media.try_recv(), Ok(Media::Format { .. })));
+
+        // The one it replaced is torn down late. Nothing is said to the car.
+        sink.push(StreamEvent::AudioStopped { stream: id(102, 3) });
+        assert!(
+            media.try_recv().is_err(),
+            "the teardown of a replaced instance is not the end of the music"
+        );
+
+        // And the music still reaches it.
+        sink.push(StreamEvent::AudioPacket {
+            stream: id(102, 4),
+            timestamp_us: 1_000,
+            data: vec![0x55],
+        });
+        assert!(matches!(media.try_recv(), Ok(Media::Pcm { .. })));
+
+        // The instance the channel is actually on is a different matter.
+        sink.push(StreamEvent::AudioStopped { stream: id(102, 4) });
+        assert!(matches!(media.try_recv(), Ok(Media::Ended)));
     }
 
     /// Whichever of the two AAC-LC bits the phone sets, the stream is the 48 kHz

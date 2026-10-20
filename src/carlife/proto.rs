@@ -248,7 +248,11 @@ pub fn frame_rate(rate: i32) -> Vec<u8> {
 /// PCM that follows is. All three fields are required by the phone's own schema,
 /// so all three are written.
 ///
-/// Nothing else about the channel is negotiated, and the car sets a player up
+/// `MSG_NAVI_TTS_INIT` carries `CarlifeTTSInit`, which is the same three fields
+/// under another name: a rate, a channel count and a sample width, and the car
+/// sets a player up from them the same way. One function writes both.
+///
+/// Nothing else about either channel is negotiated, and the car sets a player up
 /// from these two numbers alone, so how it reads them is the whole of it.
 /// CarLife-Android-Vehicle's `AudioTrackManagerSingle` reads each one exactly one
 /// way: `channelConfig` is the channel count, with 1 mono and 2 stereo; and

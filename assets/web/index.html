@@ -18,9 +18,7 @@
   .weui-cell__bd{flex:0 0 auto;padding-right:16px}
   .weui-cell__ft{flex:1 1 auto;min-width:0;overflow-wrap:anywhere;font-size:14px}
   .weui-cell__ft.none{opacity:.35}
-  .weui-cell_block{display:block}
-  .weui-cell_block .weui-cell__bd{padding-right:0}
-  .weui-cell_block .weui-cell__ft{text-align:left;margin-top:6px;font-size:13px;opacity:.75}
+  .weui-cell_block{align-items:flex-start}
   .line{padding:2px 0}
   /* 封面与字段名同一行：字段名贴顶，图靠右，行高由图决定。 */
   .weui-cell_cover{align-items:flex-start}
@@ -86,6 +84,10 @@ function channels(n) {
   if (n === 1) return "Mono";
   if (n === 2) return "Stereo";
   return n + " ch";
+}
+function audioStream(a) {
+  const body = detail(a.codec, rate(a.rate), channels(a.channels));
+  return (a.name || a.stream_type) + ":" + (body ? " " + body : "");
 }
 
 /* 渠道号 → 厂商名映射（来自逆向报告 CARLIFE_AUTH.md §2.4）。
@@ -173,13 +175,11 @@ const CARPLAY_ROWS = [
   ["接入方式", d => bool(d.wireless, "WiFi", "USB")],
   ["分辨率", d => d.screen ? size(d.screen) : null],
   ["视频编码", d => video(d.video)],
-  /* 手机的媒体、通话、语音助手是三路流，编码与参数各不相同，各占一段。 */
-  ["音频编码", d => d.audio.length
-    ? d.audio.map(a => detail(a.codec, rate(a.rate), channels(a.channels))).join(" / ")
-    : null],
 ];
 
-const CARPLAY_BLOCKS = [];
+const CARPLAY_BLOCKS = [
+  ["音频编码", d => d.audio.map(audioStream)],
+];
 
 /* 正在播放：车机面板上的那首歌，也就是我们发给它的那一条。
    这一栏没有自己的「会话状态」——没有歌的时候每条都是「—」。
@@ -233,8 +233,7 @@ function fill(host, rows, blocks, data, up) {
   });
   for (const [label, lines] of blocks) {
     const value = up ? lines(data) : null;
-    // 一项都没有的空块不是「未知」，而是「没有」：两者都不显示更干净。
-    if (value && value.length) host.appendChild(cell(label, value, null, true));
+    host.appendChild(cell(label, value && value.length ? value : null, null, true));
   }
 }
 

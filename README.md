@@ -20,6 +20,8 @@ to half screen.
 
 - No video transcoding on bridge, only transfer.
 - Support both wired and wireless CarPlay.
+- Navigation prompts go out on the head unit's own speech channel, which ducks
+  the music rather than stopping it.
 - A status page showing both halves at once — what the head unit is doing and what
   the phone is doing.
 
@@ -762,6 +764,37 @@ The strip is only sent once the car has asked for it, with
 sent, because that is the phone saying something about itself rather than data
 the car subscribes to.
 
+## Navigation prompts
+
+The spoken prompt is a second, separate thing: it arrives as audio, not as
+route data, and it goes out on the car's own channel for speech —
+`MSG_NAVI_TTS_INIT` / `_DATA` / `_END` on channel 4 — rather than through the
+media channel the music uses. Keeping them apart is what lets a prompt play over
+the music: the car mixes the two itself and ducks the music for the prompt, and
+nothing here has to.
+
+Two things about the stream decide how it is handled.
+
+**It is Opus.** A wireless session sends the music as AAC-LC and a prompt as
+Opus at 48 kHz mono, and the phone will not take anything else for it. Opus is
+decoded here (`rusty-opus`, pure Rust), where no other part of the audio path
+needs a decoder beyond AAC-LC, and decimated 3:1 to the 16 kHz mono the car's
+channel is given. A wired session sends the prompt as PCM instead, and then the
+car is told whatever rate that was: the format sent in `MSG_NAVI_TTS_INIT` is
+what the car sets its player up with.
+
+**It ends by silence, not by a message.** The phone does not reliably tear a
+prompt's stream down when it stops speaking, and a head unit that took the
+channel up holds the music down until it hears `MSG_NAVI_TTS_END`. So the end is
+sent 700 ms after the last frame (`TTS_IDLE` in `src/carlife/session.rs`) if the
+phone has not closed the stream by then. Too short cuts a sentence in two at the
+pause between two of them; too long leaves the music down after the last word.
+
+Which stream is a prompt is decided by the `audioType` the phone gives it in the
+SETUP: `media` is the music, `telephony` and `speechRecognition` are a call and
+the voice assistant — the car's own channels, not bridged — and everything else,
+including no name at all, is a prompt. See `src/sink.rs`.
+
 ## Depending on LIVI
 
 LIVI is a git submodule under `vendor/`, pinned to an exact commit:
@@ -860,9 +893,11 @@ this a derivative work, so cp2cl inherits that.
 ## Known gaps
 
 * The CarLife video and media channels carry the phone's picture and its sound,
-  the car's touch and panel keys reach the phone, and its panel is told what is
-  playing and where the phone is guiding. The two voice channels are the car's
-  own and stay empty, so navigation speech and the voice assistant are silent.
+  its navigation prompts go out on the channel for speech — see
+  [Navigation prompts](#navigation-prompts) — the car's touch and panel keys
+  reach the phone, and its panel is told what is playing and where the phone is
+  guiding. The channel the car keeps for the voice assistant stays empty, so
+  Siri is silent; a call is the car's own Bluetooth and was never ours.
 * The panel is told *which* song is playing but not where in it: the progress
   bar's message is not sent. See [Now playing](#now-playing).
 * `up`/`down` overshoot. The knob's absolute Y axis is a *position* to the phone

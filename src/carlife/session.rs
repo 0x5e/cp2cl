@@ -33,7 +33,7 @@ use crate::commands::{Command, TouchContact, PHONE_DROP, PHONE_HOOK_SWITCH, PHON
 use crate::config::Config;
 use crate::navigation::{turn_kind, Guidance};
 use crate::playing::{Playing, Track};
-use crate::sink::{ClOutlet, Media};
+use crate::sink::{ClOutlet, Media, Navi};
 use crate::web::{Size, Statistic, Status};
 
 // What the car sends, by name — the numbers are CarLifeVehicleLib's
@@ -74,6 +74,12 @@ const VIDEO_HEARTBEAT: u32 = 0x0002_0002;
 const MEDIA_INIT: u32 = 0x0003_0001;
 const MEDIA_STOP: u32 = 0x0003_0002;
 const MEDIA_DATA: u32 = 0x0003_0006;
+// The navigation prompt has a channel of its own, with the same three messages
+// in the same order. See the guide's §10.4 and CarLifeVehicleLib's
+// `CommonParams.java`.
+const NAVI_TTS_INIT: u32 = 0x0004_0001;
+const NAVI_TTS_END: u32 = 0x0004_0002;
+const NAVI_TTS_DATA: u32 = 0x0004_0003;
 
 const TOUCH_ACTION: u32 = 0x0006_8001;
 const TOUCH_HARD_KEY: u32 = 0x0006_8008;
@@ -108,6 +114,17 @@ const KEY_VR_START: i32 = 0x0000_0021;
 /// How often the video channel is touched when there is no picture to send. The
 /// reference does the same whenever its own interface is not in the foreground.
 const HEARTBEAT: Duration = Duration::from_secs(1);
+
+/// How long silence on the navigation channel may last before the car is told
+/// the prompt is over.
+///
+/// The phone does not always tear a prompt's stream down when it stops speaking,
+/// and a head unit that took the channel up keeps the music down until it hears
+/// `MSG_NAVI_TTS_END` — so silence is the only evidence there is that the end is
+/// not coming. Long enough not to cut a sentence in two at the pause between two
+/// of them, short enough that the music comes back before anyone wonders why it
+/// stopped.
+const TTS_IDLE: Duration = Duration::from_millis(700);
 
 /// The frame rates the video channel agrees to.
 ///
@@ -297,22 +314,23 @@ where
     // not missed.
     let mut desktop = desktop.subscribe();
 
-    // A session is what drains the bridge, so it takes all four receiving halves
-    // for as long as it runs: one channel carries pictures, one the phone's
-    // sound, and the last two what the phone says about itself — the song it is
-    // playing and the route it is guiding along. The car unplugged and plugged
-    // back in is a new session and a new call to this function, which is why the
-    // halves are given back on the way out rather than dropped with everything
-    // else.
+    // A session is what drains the bridge, so it takes all five receiving halves
+    // for as long as it runs: one channel carries pictures, two the phone's
+    // sound — the music and the navigation prompt — and the last two what the
+    // phone says about itself, the song it is playing and the route it is
+    // guiding along. The car unplugged and plugged back in is a new session and
+    // a new call to this function, which is why the halves are given back on the
+    // way out rather than dropped with everything else.
     // A panel that has just been plugged in has no song on it: what the last
     // session was showing belongs to a car that is no longer here, and the page
     // would otherwise go on showing it.
     status.now_playing_cleared();
-    let (mut video, mut media, mut playing, mut guidance, source) = match frames {
+    let (mut video, mut media, mut navi, mut playing, mut guidance, source) = match frames {
         Frames::Live(outlet) => match outlet.take_video() {
             Some(rx) => (
                 Some(rx),
                 outlet.take_media(),
+                outlet.take_navi(),
                 outlet.take_playing(),
                 outlet.take_guidance(),
                 Source::Live,
@@ -321,10 +339,11 @@ where
                 tracing::warn!(
                     "[cl] the video channel is already being read; sending heartbeats only"
                 );
-                (None, None, None, None, Source::None)
+                (None, None, None, None, None, Source::None)
             }
         },
         Frames::Cycle(units) => (
+            None,
             None,
             None,
             None,
@@ -334,7 +353,7 @@ where
                 next: 0,
             },
         ),
-        Frames::None => (None, None, None, None, Source::None),
+        Frames::None => (None, None, None, None, None, Source::None),
     };
 
     // Reads are their own task. A frame can be six hundred kilobytes and the
@@ -368,6 +387,9 @@ where
         agreed: None,
         started_at: None,
         media_format: None,
+        navi_format: None,
+        navi_open: false,
+        nav_deadline: None,
         track: Track::default(),
         art: None,
         // A route is described by the phone in messages of its own, so the
@@ -390,6 +412,7 @@ where
 
     let outcome = loop {
         let deadline = session.next_tick;
+        let prompt_idle = session.nav_deadline;
         tokio::select! {
             arriving = rx.recv() => match arriving {
                 Some(ChunkOrEnd::Chunk(chunk)) => {
@@ -428,6 +451,25 @@ where
                 }
                 // The CarPlay side has gone; there is nothing left to play.
                 None => media = None,
+            },
+            // The prompt, on the channel the car keeps for speech. Written as it
+            // arrives for the same reason as the music, but the end of it is
+            // also decided here: see `TTS_IDLE`.
+            item = recv_navi(&mut navi) => match item {
+                Some(item) => {
+                    if let Err(e) = session.send_navi(item).await {
+                        break Err(e);
+                    }
+                }
+                // The CarPlay side has gone; there is nothing left to say.
+                None => navi = None,
+            },
+            // The prompt has been quiet long enough that it is over. This is the
+            // branch that puts the music back on a head unit that paused it.
+            _ = prompt_idle_after(prompt_idle) => {
+                if let Err(e) = session.close_navi().await {
+                    break Err(e);
+                }
             },
             // What the phone is playing, on the command channel. Written as it
             // arrives, like the three above: the phone is what decides when the
@@ -482,6 +524,9 @@ where
         }
         if let Some(rx) = media {
             outlet.return_media(rx);
+        }
+        if let Some(rx) = navi {
+            outlet.return_navi(rx);
         }
         if let Some(rx) = playing {
             outlet.return_playing(rx);
@@ -568,6 +613,24 @@ async fn recv_media(media: &mut Option<mpsc::Receiver<Media>>) -> Option<Media> 
     }
 }
 
+/// The same, for the navigation channel.
+async fn recv_navi(navi: &mut Option<mpsc::Receiver<Navi>>) -> Option<Navi> {
+    match navi {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Waits for the moment a prompt that has gone quiet is taken as over, or never
+/// when none is waiting — the same trick the three above use to keep a branch
+/// in the loop without a second code path.
+async fn prompt_idle_after(deadline: Option<Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
 /// The same, for what the phone is playing.
 async fn recv_playing(playing: &mut Option<mpsc::Receiver<Playing>>) -> Option<Playing> {
     match playing {
@@ -607,6 +670,17 @@ struct Session<'a, W> {
     /// it has been told. A stream that opens with the same one is not worth a
     /// second message: nothing about it has changed.
     media_format: Option<(u32, u16)>,
+    /// The same for the navigation channel, and kept past the end of a prompt:
+    /// the next one announces its player again, and the format it announces is
+    /// the one the phone last said, not one to be worked out twice.
+    navi_format: Option<(u32, u16)>,
+    /// Whether the car currently has a prompt player open, which is what
+    /// `MSG_NAVI_TTS_END` closes. It goes out with the first frame of a prompt
+    /// and with nothing else.
+    navi_open: bool,
+    /// When silence on the navigation channel is taken as the end of the prompt.
+    /// `None` while no prompt player is open.
+    nav_deadline: Option<Instant>,
     /// What the phone has said about the song that is playing, folded together.
     /// It describes one attribute per update and the car's message is the whole
     /// song, so this is what the two are reconciled through.
@@ -1150,6 +1224,64 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         }
     }
 
+    /// One thing the phone's navigation prompt produced, on the TTS channel.
+    ///
+    /// The car is told the format with the first frame and not before: the INIT
+    /// is what sets a player up, and a player set up over silence is one the car
+    /// has an open channel for and nothing to put in. The frames themselves are
+    /// 20 ms of 16 kHz mono, one message each — the channel's body cap is 50 KB
+    /// and a frame is 640 bytes, so nothing here needs splitting.
+    async fn send_navi(&mut self, item: Navi) -> Result<()> {
+        match item {
+            Navi::Format { rate, channels } => {
+                // The same format as the last one is not a new player, and
+                // restarting it mid-sentence would be heard as one.
+                if self.navi_format == Some((rate, channels)) {
+                    return Ok(());
+                }
+                // A player already open at another format is put down first: the
+                // car builds one from the INIT it is sent, and two of them for
+                // one voice is the kind of thing that is only heard, not seen.
+                self.close_navi().await?;
+                tracing::info!("[cl] the navi channel carries PCM at {rate} Hz, {channels}ch");
+                self.navi_format = Some((rate, channels));
+                Ok(())
+            }
+            Navi::Pcm {
+                timestamp_ms,
+                data,
+            } => {
+                // Every frame is the prompt still going on, so every frame puts
+                // the end of it further away.
+                self.nav_deadline = Some(Instant::now() + TTS_IDLE);
+                if !self.navi_open {
+                    let (rate, channels) = self.navi_format.unwrap_or((16_000, 1));
+                    self.navi_open = true;
+                    self.send(NAVI_TTS_INIT, &proto::media_init(rate, channels))
+                        .await?;
+                }
+                self.send_frame(NAVI_TTS_DATA, timestamp_ms, &data).await
+            }
+            Navi::Ended => self.close_navi().await,
+        }
+    }
+
+    /// Tells the car the prompt is over, once.
+    ///
+    /// Called both when the phone says so and when it has gone quiet for longer
+    /// than `TTS_IDLE`, which is why it has to be safe to call twice: the phone
+    /// often leaves the stream open after the last word, and the second END
+    /// would be closing a player that is not there.
+    async fn close_navi(&mut self) -> Result<()> {
+        self.nav_deadline = None;
+        if !self.navi_open {
+            return Ok(());
+        }
+        self.navi_open = false;
+        tracing::debug!("[cl] the prompt is over");
+        self.send(NAVI_TTS_END, &[]).await
+    }
+
     /// One thing the phone said it is playing, folded into what is known and
     /// then written out.
     ///
@@ -1438,7 +1570,15 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sink::{AudioCodec, MediaSink, StreamEvent};
+    use crate::sink::{AudioCodec, MediaSink, StreamEvent, StreamId};
+
+    /// One stream: a type the phone names it with, and the instance it opened.
+    fn stream(stream_type: u8, connection_id: i64) -> StreamId {
+        StreamId {
+            stream_type,
+            connection_id,
+        }
+    }
     use std::sync::{Arc, Mutex};
     use tokio::io::DuplexStream;
 
@@ -1853,7 +1993,7 @@ mod tests {
 
             // The music: the stream opens, and then there is sound on it.
             sink.push(StreamEvent::AudioConfig {
-                stream_type: 102,
+                stream: stream(102, 1),
                 codec: AudioCodec::AacLc {
                     rate: 44_100,
                     channels: 2,
@@ -1864,7 +2004,7 @@ mod tests {
             assert_eq!(init.body, proto::media_init(44_100, 2));
 
             sink.push(StreamEvent::AudioPacket {
-                stream_type: 102,
+                stream: stream(102, 1),
                 timestamp_us: 1_234_000,
                 data: vec![0x11, 0x22, 0x33, 0x44],
             });
@@ -1872,9 +2012,10 @@ mod tests {
             assert_eq!(sound.body, vec![0x11, 0x22, 0x33, 0x44]);
             assert_eq!(sound.timestamp_ms, Some(1_234));
 
-            // The same format again says nothing the car is not already holding.
+            // The next track opens a stream of its own, in the format the car is
+            // already holding: nothing to say, and the sound goes on.
             sink.push(StreamEvent::AudioConfig {
-                stream_type: 102,
+                stream: stream(102, 2),
                 codec: AudioCodec::AacLc {
                     rate: 44_100,
                     channels: 2,
@@ -1882,7 +2023,7 @@ mod tests {
                 name: "media".into(),
             });
             sink.push(StreamEvent::AudioPacket {
-                stream_type: 102,
+                stream: stream(102, 2),
                 timestamp_us: 1_300_000,
                 data: vec![0x55, 0x66],
             });
@@ -1891,7 +2032,7 @@ mod tests {
             // A call is one of the car's own channels, not this one: what comes
             // out next is the music, with nothing between them.
             sink.push(StreamEvent::AudioConfig {
-                stream_type: 100,
+                stream: stream(100, 3),
                 codec: AudioCodec::Opus {
                     rate: 48_000,
                     channels: 1,
@@ -1899,12 +2040,12 @@ mod tests {
                 name: "telephony".into(),
             });
             sink.push(StreamEvent::AudioPacket {
-                stream_type: 100,
+                stream: stream(100, 3),
                 timestamp_us: 1_400_000,
                 data: vec![0x77],
             });
             sink.push(StreamEvent::AudioPacket {
-                stream_type: 102,
+                stream: stream(102, 2),
                 timestamp_us: 1_500_000,
                 data: vec![0x88],
             });
@@ -1912,8 +2053,160 @@ mod tests {
 
             // The phone stopped playing, and the car is told rather than left
             // holding a player open over nothing.
-            sink.push(StreamEvent::AudioStopped { stream_type: 102 });
+            sink.push(StreamEvent::AudioStopped {
+                stream: stream(102, 2),
+            });
             car.expect(MEDIA_STOP).await;
+        });
+
+        run(
+            device,
+            &frames,
+            &cfg,
+            None,
+            &mut screen,
+            no_icon(),
+            EventSink::new(),
+            &mut carplay,
+            &no_tap(),
+            Arc::new(Status::new()),
+        )
+        .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    /// The prompt goes out on the car's channel for speech, not through the
+    /// music's: a player set up with the format its first frame arrives in, the
+    /// frames themselves, and an end that leaves the music's channel alone.
+    #[tokio::test]
+    async fn the_prompt_is_announced_and_ended_on_its_own_channel() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
+
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+        let sink = outlet.sink();
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+
+            // The stream opens. A player set up over silence is one the car
+            // holds open with nothing in it, so nothing is said yet.
+            sink.push(StreamEvent::AudioConfig {
+                stream: stream(100, 5),
+                codec: AudioCodec::Pcm {
+                    rate: 16_000,
+                    channels: 1,
+                },
+                name: "default".into(),
+            });
+            car.expect_silence(Duration::from_millis(200)).await;
+
+            // The first frame says both things: what the samples are, and then
+            // the samples.
+            sink.push(StreamEvent::AudioPacket {
+                stream: stream(100, 5),
+                timestamp_us: 2_000_000,
+                data: vec![0xaa, 0xbb],
+            });
+            let init = car.expect(NAVI_TTS_INIT).await;
+            assert_eq!(init.body, proto::media_init(16_000, 1));
+            let said = car.expect(NAVI_TTS_DATA).await;
+            assert_eq!(said.body, vec![0xaa, 0xbb]);
+            assert_eq!(said.timestamp_ms, Some(2_000));
+
+            // The next frame is more of the same player, and says nothing about
+            // the format.
+            sink.push(StreamEvent::AudioPacket {
+                stream: stream(100, 5),
+                timestamp_us: 2_020_000,
+                data: vec![0xcc],
+            });
+            assert_eq!(car.expect(NAVI_TTS_DATA).await.body, vec![0xcc]);
+
+            // The phone says the prompt is over.
+            sink.push(StreamEvent::AudioStopped {
+                stream: stream(100, 5),
+            });
+            car.expect(NAVI_TTS_END).await;
+        });
+
+        run(
+            device,
+            &frames,
+            &cfg,
+            None,
+            &mut screen,
+            no_icon(),
+            EventSink::new(),
+            &mut carplay,
+            &no_tap(),
+            Arc::new(Status::new()),
+        )
+        .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    /// The phone often leaves a prompt's stream open after the last word, and a
+    /// head unit that took the channel up keeps the music down until it is told
+    /// the prompt is over. So silence ends it — once, and no more.
+    #[tokio::test]
+    async fn a_prompt_that_goes_quiet_is_ended_for_it() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
+
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+        let sink = outlet.sink();
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+
+            sink.push(StreamEvent::AudioConfig {
+                stream: stream(100, 6),
+                codec: AudioCodec::Pcm {
+                    rate: 16_000,
+                    channels: 1,
+                },
+                name: "alert".into(),
+            });
+            sink.push(StreamEvent::AudioPacket {
+                stream: stream(100, 6),
+                timestamp_us: 3_000_000,
+                data: vec![0x01],
+            });
+            car.expect(NAVI_TTS_INIT).await;
+            car.expect(NAVI_TTS_DATA).await;
+
+            // Nothing more is said, and the phone does not close the stream. The
+            // end arrives anyway, inside the deadline the test allows for it.
+            car.expect(NAVI_TTS_END).await;
+            // And it arrives once: a second one would be closing a player the
+            // car no longer has.
+            car.expect_silence(TTS_IDLE * 2).await;
+
+            // The same stream speaking again is a new player, announced with the
+            // format it was last given.
+            sink.push(StreamEvent::AudioPacket {
+                stream: stream(100, 6),
+                timestamp_us: 4_000_000,
+                data: vec![0x02],
+            });
+            assert_eq!(
+                car.expect(NAVI_TTS_INIT).await.body,
+                proto::media_init(16_000, 1)
+            );
+            assert_eq!(car.expect(NAVI_TTS_DATA).await.body, vec![0x02]);
         });
 
         run(
@@ -2512,7 +2805,7 @@ mod tests {
             car.expect(MD_INFO).await;
 
             sink.push(StreamEvent::AudioConfig {
-                stream_type: 102,
+                stream: stream(102, 1),
                 codec: AudioCodec::AacLc {
                     rate: 48_000,
                     channels: 2,
@@ -2523,7 +2816,7 @@ mod tests {
 
             // One byte past the media channel's body cap.
             sink.push(StreamEvent::AudioPacket {
-                stream_type: 102,
+                stream: stream(102, 1),
                 timestamp_us: 1_000_000,
                 data: vec![0x11; 100 * 1024 + 1],
             });
@@ -2531,7 +2824,7 @@ mod tests {
 
             // And the channel is still there, with nothing left over on it.
             sink.push(StreamEvent::AudioPacket {
-                stream_type: 102,
+                stream: stream(102, 1),
                 timestamp_us: 1_100_000,
                 data: vec![0x22],
             });

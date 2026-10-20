@@ -29,7 +29,7 @@ use super::pairing::{PairSetup, PairVerify, Pairings, VerifyKeys};
 use super::rtsp::{self, Request, Response, OCTET_CONTENT_TYPE, PAIRING_CONTENT_TYPE};
 use super::screen::{self, VideoReceiver};
 use crate::config::Config;
-use crate::sink::{AudioCodec, MediaSink, StreamEvent};
+use crate::sink::{AudioCodec, MediaSink, StreamEvent, StreamId};
 use crate::web::{Audio, Mic, Screen, Status};
 
 /// What a coding is called on the page. `AudioCodec`'s own `Debug` is a struct
@@ -131,9 +131,12 @@ struct AudioStream {
 }
 
 impl AudioClock {
-    /// Registers a stream and hands back a handle to it. Setting up the same
-    /// type again replaces the entry: the phone re-opens audio on every track
-    /// change rather than reusing the old stream.
+    /// Registers a stream and hands back a handle to it. Opening the *same*
+    /// stream again — the type and the connection it was opened as — replaces
+    /// the entry, because there is nothing left of the one before it to report.
+    /// A different connection is a different stream, even under the same type:
+    /// the phone opens a fresh one for every track change, and both are live
+    /// until it tears the older of the two down.
     pub fn open(
         &mut self,
         stream_type: i64,
@@ -143,7 +146,8 @@ impl AudioClock {
     ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        self.streams.retain(|s| s.stream_type != stream_type);
+        self.streams
+            .retain(|s| s.stream_type != stream_type || s.connection_id != connection_id);
         self.streams.push(AudioStream {
             id,
             stream_type,
@@ -160,10 +164,11 @@ impl AudioClock {
         self.streams.retain(|s| s.id != id);
     }
 
-    /// Forgets whichever stream carries this type, which is how the phone names
-    /// it in a teardown.
-    pub fn close_type(&mut self, stream_type: i64) {
-        self.streams.retain(|s| s.stream_type != stream_type);
+    /// Forgets one instance of a stream, which is how a teardown names it: by
+    /// the type the phone calls it, with the connection it was opened as.
+    pub fn close_type(&mut self, stream_type: i64, connection_id: i64) {
+        self.streams
+            .retain(|s| s.stream_type != stream_type || s.connection_id != connection_id);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -564,6 +569,10 @@ async fn wait_due(last: &mut (u64, tokio::time::Instant), ts: u64) {
 /// it the task would sit in `recv` for the life of the process holding a port.
 struct Pump {
     task: tokio::task::JoinHandle<()>,
+    /// Which instance of the stream this is. The phone labels a teardown with
+    /// the type alone, so this is the only thing that says which of the type's
+    /// instances the teardown is about.
+    connection_id: i64,
     /// The stream's control port, bound but never read: leaving it closed makes
     /// the phone's RTCP bounce back as ICMPv6 port-unreachable, and an open
     /// socket nobody listens on is the cheapest way to answer "nothing to say".
@@ -612,9 +621,13 @@ struct Session {
     /// Tasks this session started that nothing else will stop. Held rather than
     /// awaited: dropping them is the whole point, see `StopOnDrop`.
     _timing: Vec<StopOnDrop>,
-    /// Open streams by the type the phone names them with. Teardown looks them
-    /// up here to close what it says it is closing.
-    pumps: HashMap<i64, Pump>,
+    /// Open streams by the type the phone names them with, oldest first.
+    /// Teardown looks them up here to close what it says it is closing, and what
+    /// it says is a type — so the oldest instance of that type is the one it
+    /// means. A type holds more than one because the phone opens a stream
+    /// without waiting for the last one to be torn down, and the teardown that
+    /// arrives after that is about the one that came before.
+    pumps: HashMap<i64, Vec<Pump>>,
     in_buf: Vec<u8>,
     /// Sealed frames waiting to be complete, once the channel is encrypted.
     frame_buf: Vec<u8>,
@@ -1045,7 +1058,9 @@ impl Session {
     /// Closes every stream, without the phone having asked.
     async fn close_streams(&mut self) {
         for stream_type in self.pumps.keys().copied().collect::<Vec<_>>() {
-            self.close_stream(stream_type).await;
+            while self.pumps.contains_key(&stream_type) {
+                self.close_stream(stream_type).await;
+            }
         }
     }
 
@@ -1056,26 +1071,50 @@ impl Session {
     /// the session that took over, and telling them the screen stopped is the
     /// one thing that would break it.
     fn abandon_streams(&mut self) {
-        for (_, pump) in self.pumps.drain() {
-            pump.task.abort();
+        for (_, pumps) in self.pumps.drain() {
+            for pump in pumps {
+                pump.task.abort();
+            }
         }
     }
 
-    /// Closes one stream, named the way the phone names it.
+    /// Closes the oldest instance of one stream type, which is the one the phone
+    /// means when it tears a type down.
     ///
     /// Aborting the pump is the only way a UDP stream ever ends, and it means
     /// the pump never reaches its own goodbye — so the sink is told here or not
     /// at all, or whoever mixes keeps a channel for a stream nobody will ever
-    /// send again.
+    /// send again. What the sink is told names the instance, because the channel
+    /// may by now be on a newer one of the same type and must not be closed with
+    /// it. A type with nothing open says nothing: a teardown that arrives twice,
+    /// or once after the stream ended on its own, is not news.
     async fn close_stream(&mut self, stream_type: i64) {
-        self.audio_clock.lock().await.close_type(stream_type);
-        if let Some(pump) = self.pumps.remove(&stream_type) {
-            pump.task.abort();
+        let mut closed = None;
+        if let Some(pumps) = self.pumps.get_mut(&stream_type) {
+            if !pumps.is_empty() {
+                let pump = pumps.remove(0);
+                pump.task.abort();
+                closed = Some(pump.connection_id);
+            }
         }
+        if self.pumps.get(&stream_type).is_some_and(Vec::is_empty) {
+            self.pumps.remove(&stream_type);
+        }
+        let Some(connection_id) = closed else {
+            tracing::debug!("[airplay] stream {stream_type} was torn down after it had gone");
+            return;
+        };
+        self.audio_clock
+            .lock()
+            .await
+            .close_type(stream_type, connection_id);
         match stream_type {
             110 => self.video_sink.push(StreamEvent::ScreenActive(false)),
             100 | 101 | 102 => self.audio_sink.push(StreamEvent::AudioStopped {
-                stream_type: stream_type as u8,
+                stream: StreamId {
+                    stream_type: stream_type as u8,
+                    connection_id,
+                },
             }),
             _ => {}
         }
@@ -1330,7 +1369,14 @@ impl Session {
                         status.with(|s| s.carplay.video.active = true);
                         Self::pump_video(socket, key, sink, status).await;
                     });
-                    self.open_pump(110, task, None);
+                    self.open_pump(
+                        110,
+                        Pump {
+                            task,
+                            connection_id: stream_id,
+                            _control: None,
+                        },
+                    );
                     self.streams.insert(stream_id as u64, port);
                     let mut entry = Dictionary::new();
                     entry.insert("type".into(), Value::Integer(110.into()));
@@ -1422,11 +1468,24 @@ impl Session {
                         self.open_mic(stream_id, mic_port as u16, codec, frames_per_packet, keys)
                             .await;
                     }
+                    // Which of the car's channels this stream feeds is decided by
+                    // `audio_type`, downstream; what the car is told its samples
+                    // are is `delivered`, which is the same as the negotiated
+                    // codec until a prompt's Opus is decoded into 16 kHz PCM.
+                    let delivered = audio::delivered(codec, &audio_type);
+                    let name = audio_type.clone();
                     self.audio_sink.push(StreamEvent::AudioConfig {
-                        stream_type: stream_type as u8,
-                        codec,
+                        stream: StreamId {
+                            stream_type: stream_type as u8,
+                            connection_id: stream_id,
+                        },
+                        codec: delivered,
                         name: audio_type,
                     });
+                    // The clock counts the samples the phone is sending, so it
+                    // is told the rate on the wire — not the one the car is
+                    // given. Telling it 16 kHz for a 48 kHz stream would put the
+                    // reported playout position 3× off.
                     let id = self.audio_clock.lock().await.open(
                         stream_type,
                         stream_id,
@@ -1436,19 +1495,14 @@ impl Session {
                     let sink = self.audio_sink.clone();
                     let clock = self.audio_clock.clone();
                     let status = self.status.clone();
+                    let stream = StreamId {
+                        stream_type: stream_type as u8,
+                        connection_id: stream_id,
+                    };
                     let task = tokio::spawn(async move {
                         tracing::info!("[airplay] audio stream attached");
-                        Self::pump_audio(
-                            socket,
-                            key,
-                            stream_type as u8,
-                            codec,
-                            sink,
-                            clock,
-                            id,
-                            status,
-                        )
-                        .await;
+                        Self::pump_audio(socket, key, stream, &name, codec, sink, clock, id, status)
+                            .await;
                     });
                     // Bound but never read; a failure here is not worth failing
                     // the whole setup over.
@@ -1463,7 +1517,14 @@ impl Session {
                         .as_ref()
                         .and_then(|s| s.local_addr().ok())
                         .map_or(0, |a| a.port());
-                    self.open_pump(stream_type, task, control);
+                    self.open_pump(
+                        stream_type,
+                        Pump {
+                            task,
+                            connection_id: stream_id,
+                            _control: control,
+                        },
+                    );
                     self.streams.insert(stream_id as u64, port);
                     let mut entry = Dictionary::new();
                     entry.insert("type".into(), Value::Integer(type_.unwrap().into()));
@@ -1539,21 +1600,15 @@ impl Session {
     }
 
     /// Registers a running stream under the type the phone will name it with.
-    /// A type that is already open is replaced rather than left to rot, because
-    /// the phone may re-open a stream without tearing the old one down.
-    fn open_pump(
-        &mut self,
-        stream_type: i64,
-        task: tokio::task::JoinHandle<()>,
-        control: Option<UdpSocket>,
-    ) {
-        let pump = Pump {
-            task,
-            _control: control,
-        };
-        if let Some(old) = self.pumps.insert(stream_type, pump) {
-            old.task.abort();
-        }
+    ///
+    /// A second stream of a type that is already open is added rather than put
+    /// in place of the first: the phone re-opens its audio without tearing the
+    /// old stream down first, and the two are told apart by their connection —
+    /// the teardown that follows names only the type, and it is the older of the
+    /// two it means. Closing the older one here instead took the sound with it
+    /// whenever a prompt opened.
+    fn open_pump(&mut self, stream_type: i64, pump: Pump) {
+        self.pumps.entry(stream_type).or_default().push(pump);
     }
 
     fn plist_body(bytes: &[u8]) -> Result<Dictionary, String> {
@@ -1627,14 +1682,16 @@ impl Session {
     async fn pump_audio(
         socket: UdpSocket,
         key: SymKey,
-        stream_type: u8,
+        stream: StreamId,
+        name: &str,
         codec: AudioCodec,
         sink: Arc<dyn MediaSink>,
         clock: Arc<Mutex<AudioClock>>,
         id: u64,
         status: Arc<Status>,
     ) {
-        let mut rx = AudioReceiver::new(key, stream_type, codec, sink.clone());
+        let stream_type = stream.stream_type;
+        let mut rx = AudioReceiver::new(key, stream, codec, name, sink.clone());
         let mut buf = [0u8; 2048];
         let mut packets: u64 = 0;
         // Sound that stutters is either packets that never arrived or ones that
@@ -1700,7 +1757,7 @@ impl Session {
                         if let Some((timestamp_us, data)) = opened {
                             decoded += 1;
                             sink.push(StreamEvent::AudioPacket {
-                                stream_type,
+                                stream,
                                 timestamp_us,
                                 data,
                             });
@@ -1822,7 +1879,7 @@ impl Session {
         // failing — stop announcing it. A stream that is gone but still named
         // in `/feedback` is one the phone keeps asking about.
         clock.lock().await.close(id);
-        sink.push(StreamEvent::AudioStopped { stream_type });
+        sink.push(StreamEvent::AudioStopped { stream });
         tracing::info!("[airplay] audio stream closed after {packets} packets, {missing} missing");
         // The counters only exist here, and the stream is over, so this is the
         // last moment they can be reported at all.
