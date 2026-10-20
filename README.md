@@ -597,8 +597,11 @@ side. **正在播放** is what the two agree on: the song the car's panel is sho
 which belongs to neither half and is the one part of the page someone sitting in
 the car can check against what they see. It is shown only while both ends are
 up — a song on a page whose halves are down describes a moment that has passed.
-**设备端** is the board itself, CPU share and memory in use: neither end, and the
-one section that says whether the box is keeping up.
+**车载数据 · GPS** is the car's own position, in one cell for the coordinates and
+the car's clock eight hours on at the end, and the section is there once the car
+has reported a position: the numbers are the ones CarLife carries, and the page
+is where they become degrees and metres. **设备端** is the board itself, CPU share and memory in use: neither
+end, and the one section that says whether the box is keeping up.
 
 The port is not a setting, and neither is the page: it is one HTML file with no
 build step, compiled into the binary along with its stylesheet. There is nothing

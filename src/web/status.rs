@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 
 use super::device::Device;
+use crate::carlife::proto::CarGps;
 
 /// How many strings a head unit may name the device with. The protocol names
 /// six; see `carlife::desc::Asked`.
@@ -254,6 +255,11 @@ pub struct Carlife {
     /// error codes are not in any documentation we have, so the size is the only
     /// thing about it that can honestly be reported.
     pub error_bytes: Option<usize>,
+    /// The last position the head unit reported, in the units of
+    /// `MSG_CMD_CAR_GPS` — the page turns them into degrees and metres. `None`
+    /// until the first one arrives, and again once the car has gone: it is the
+    /// one report here that describes a place rather than a connection.
+    pub gps: Option<CarGps>,
 }
 
 /// The USB device this program presents, as a host reads it.
@@ -539,6 +545,23 @@ impl Carlife {
                 "level": video.level,
             },
             "error_bytes": self.error_bytes,
+            "gps": self.gps.as_ref().map(|gps| json!({
+                "antenna_state": gps.antenna_state,
+                "latitude": gps.latitude,
+                "longitude": gps.longitude,
+                "height": gps.height,
+                "speed": gps.speed,
+                "heading": gps.heading,
+                "hor_pos_error": gps.hor_pos_error,
+                "vert_pos_error": gps.vert_pos_error,
+                "year": gps.year,
+                "month": gps.month,
+                "day": gps.day,
+                "hour": gps.hour,
+                "minute": gps.minute,
+                "second": gps.second,
+                "timestamp_ms": gps.timestamp_ms,
+            })),
         })
     }
 }

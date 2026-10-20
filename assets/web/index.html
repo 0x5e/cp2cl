@@ -33,6 +33,8 @@
   <div class="weui-cells" id="carplay"></div>
   <div class="weui-cells__title" id="playing-title">正在播放</div>
   <div class="weui-cells" id="playing"></div>
+  <div class="weui-cells__title" id="gps-title" style="display: none">车载数据 · GPS</div>
+  <div class="weui-cells" id="gps" style="display: none"></div>
   <div class="weui-cells__title">设备端</div>
   <div class="weui-cells" id="device"></div>
   <p class="stamp" id="stamp">正在读取…</p>
@@ -92,6 +94,36 @@ function channels(n) {
 function audioStream(a) {
   const body = detail(a.codec, rate(a.rate), channels(a.channels));
   return (a.name || a.stream_type) + ":" + (body ? " " + body : "");
+}
+
+// The car's own position. It arrives in the units the CarLife message is
+// defined in: a millionth of a degree, a tenth of a metre, a hundredth of a
+// kilometre an hour, a tenth of a degree.
+const FIXED = d => !!d && d.antenna_state === 1;
+
+function gpsState(d) {
+  if (!d || d.antenna_state === undefined) return null;
+  if (d.antenna_state === 1) return "已定位";
+  if (d.antenna_state === -1) return "无定位";
+  return String(d.antenna_state);
+}
+function degrees(millionths) {
+  return (millionths / 1000000).toFixed(6) + "°";
+}
+function metres(v) {
+  return v + " m";
+}
+// The car counts its fix in UTC; the page shows the clock the people in the car
+// read, which is eight hours ahead of it.
+function utc8(d) {
+  if (!d || !d.year || !d.month || !d.day) return null;
+  const pad = (n, width) => String(n).padStart(width, "0");
+  const at = Date.UTC(d.year, d.month - 1, d.day, d.hour, d.minute, d.second) +
+    8 * 3600 * 1000;
+  const t = new Date(at);
+  return t.getUTCFullYear() + "-" + pad(t.getUTCMonth() + 1, 2) + "-" +
+    pad(t.getUTCDate(), 2) + " " + pad(t.getUTCHours(), 2) + ":" +
+    pad(t.getUTCMinutes(), 2) + ":" + pad(t.getUTCSeconds(), 2);
 }
 
 const CHANNEL_MAP = {
@@ -186,6 +218,19 @@ const PLAYING_ROWS = [
   ["艺人 / 歌手", d => d.artist],
   ["专辑", d => d.album],
   ["时长", d => clock(d.duration_s)],
+];
+
+const GPS_ROWS = [
+  ["定位状态", d => gpsState(d), d => FIXED(d) ? "ok" : null],
+  ["经纬度", d => FIXED(d)
+    ? degrees(d.latitude) + ", " + degrees(d.longitude)
+    : null],
+  ["高度", d => FIXED(d) ? metres(d.height / 10) : null],
+  ["速度", d => FIXED(d) ? (d.speed / 100).toFixed(2) + " km/h" : null],
+  ["航向", d => FIXED(d) ? (d.heading / 10).toFixed(1) + "°" : null],
+  ["水平精度", d => FIXED(d) ? metres(d.hor_pos_error) : null],
+  ["垂直精度", d => FIXED(d) ? metres(d.vert_pos_error) : null],
+  ["时间", d => FIXED(d) ? utc8(d) : null],
 ];
 
 function cell(label, value, tone, block) {
@@ -294,6 +339,15 @@ function render(data) {
     document.getElementById(id).style.display = both ? "" : "none";
   }
   renderPlaying(data.now_playing);
+
+  // The car's position is the car's, and only the car can say it has one: the
+  // section appears with the first fix the car reports and goes away when it
+  // stops reporting them. A live link with no position in it is not a section.
+  const fix = (data.carlife && data.carlife.gps) || null;
+  for (const id of ["gps-title", "gps"]) {
+    document.getElementById(id).style.display = fix ? "" : "none";
+  }
+  fill(document.getElementById("gps"), GPS_ROWS, [], fix || {}, true);
 }
 
 const stamp = document.getElementById("stamp");

@@ -344,6 +344,38 @@ mod tests {
         assert_eq!(body["carlife"]["physical"]["height_mm"], 229);
     }
 
+    /// The car's position is a section of its own, and it is the car's: the page
+    /// shows it while the car reports one and reads it from the car's half.
+    #[test]
+    fn the_page_reads_the_cars_position_from_its_own_part() {
+        assert!(
+            page_text().contains("车载数据 · GPS"),
+            "it has a heading of its own"
+        );
+        assert!(
+            page_text().contains("data.carlife.gps"),
+            "and the page reads the fix"
+        );
+
+        let status = Status::new();
+        assert!(
+            status.json()["carlife"]["gps"].is_null(),
+            "a car that has not reported a position yet is not one at zero degrees"
+        );
+
+        status.with(|s| {
+            s.carlife.gps = Some(crate::carlife::proto::CarGps {
+                antenna_state: 1,
+                latitude: 30_317_880,
+                longitude: 120_128_094,
+                ..Default::default()
+            });
+        });
+        let body = status.json();
+        assert_eq!(body["carlife"]["gps"]["latitude"], 30_317_880);
+        assert_eq!(body["carlife"]["gps"]["longitude"], 120_128_094);
+    }
+
     /// The board's own CPU and memory are their own part of the page, and the
     /// page writes both rows itself: a percent from the share the answer gives
     /// it, and memory from the two byte counts.

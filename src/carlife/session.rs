@@ -541,6 +541,9 @@ where
     session.status.with(|s| {
         s.carlife.session_up = false;
         s.carlife.encoding = false;
+        // A fix belongs to the car it came from. Left behind, it would describe a
+        // position this device no longer has any way of updating.
+        s.carlife.gps = None;
     });
     outcome
 }
@@ -855,9 +858,8 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     }
                 }
             }
-            // The car's position, at the rate it reports at. Every field is read
-            // in the units the message carries, and none of them are converted
-            // here.
+            // The car's position, at the rate it reports at. Where it goes is
+            // the page, which turns these units into degrees and metres.
             HU_CAR_GPS => {
                 let fix = proto::decode_car_gps(&message.body);
                 let latitude = f64::from(fix.latitude) / 1e6;
@@ -879,6 +881,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     fix.heading,
                     fix.hor_pos_error
                 );
+                self.status.with(|s| s.carlife.gps = Some(fix));
             }
             HU_AUTHEN_REQUEST => {
                 let challenge = proto::decode_authen_request(&message.body).unwrap_or_default();
@@ -3180,10 +3183,12 @@ mod tests {
     /// and not when something starts being guided: the answer is a property of
     /// the car, and the fix is worth having either way.
     #[tokio::test]
-    async fn the_car_is_asked_for_its_position_as_soon_as_it_is_known() {
+    async fn the_cars_position_is_asked_for_and_reported() {
         let cfg = Config::from_env();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
+        let status = Arc::new(Status::new());
+        let reported = status.clone();
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
@@ -3207,10 +3212,22 @@ mod tests {
             );
 
             car.send(HU_CAR_GPS, &position()).await;
-            // A message the session answers, so that the fix is known to have
-            // been read by the time the car's half is looked at.
+            // A message the session answers, so that the position is known to
+            // have been read by the time the page is looked at.
             car.send(HU_GO_TO_FOREGROUND, &[]).await;
             car.expect(GO_TO_FOREGROUND_RESPONSE).await;
+
+            let gps = reported.json()["carlife"]["gps"].clone();
+            assert_eq!(gps["antenna_state"], 1);
+            assert_eq!(gps["latitude"], 30_317_880);
+            assert_eq!(gps["longitude"], 120_128_094);
+            assert_eq!(gps["height"], 456);
+            assert_eq!(gps["speed"], 1234);
+            assert_eq!(gps["heading"], 900);
+            assert_eq!(gps["hor_pos_error"], 35);
+            assert_eq!(gps["vert_pos_error"], 20);
+            assert_eq!(gps["year"], 2026);
+            assert_eq!(gps["second"], 57);
         });
 
         run(
@@ -3223,11 +3240,18 @@ mod tests {
             EventSink::new(),
             &mut carplay,
             &no_tap(),
-            Arc::new(Status::new()),
+            status.clone(),
         )
         .await
-        .expect("the session ends cleanly");
+            .expect("the session ends cleanly");
         car.await.unwrap();
+
+        // A fix belongs to the car that reported it, so the page is not left
+        // showing where the last one was.
+        assert!(
+            status.json()["carlife"]["gps"].is_null(),
+            "the position goes when the car does"
+        );
     }
 
     /// A turn the two vocabularies have no word in common for goes out without
