@@ -169,31 +169,24 @@ impl Frames {
                 let units = access_units(&bytes);
                 if units.is_empty() {
                     tracing::warn!(
-                        "[cl] {} holds no access unit; sending heartbeats only",
-                        path.display()
+                        "cl.video_source_empty file={path:?} action=heartbeat_only"
                     );
                     return Self::None;
                 }
                 tracing::info!(
-                    "[cl] the video channel will play {} \
-                     ({} bytes in {} access units)",
-                    path.display(),
+                    "cl.video_source file={path:?} bytes={} access_units={}",
                     bytes.len(),
                     units.len()
                 );
                 Self::Cycle(units)
             }
             Ok(_) => {
-                tracing::warn!(
-                    "[cl] {} is empty; sending heartbeats only",
-                    path.display()
-                );
+                tracing::warn!("cl.video_source_empty file={path:?} action=heartbeat_only");
                 Self::None
             }
             Err(e) => {
                 tracing::warn!(
-                    "[cl] {} could not be read ({e}); sending heartbeats only",
-                    path.display()
+                    "cl.video_source_unreadable file={path:?} err={e} action=heartbeat_only"
                 );
                 Self::None
             }
@@ -336,9 +329,7 @@ where
                 Source::Live,
             ),
             None => {
-                tracing::warn!(
-                    "[cl] the video channel is already being read; sending heartbeats only"
-                );
+                tracing::warn!("cl.video_source_taken action=heartbeat_only");
                 (None, None, None, None, None, Source::None)
             }
         },
@@ -537,7 +528,7 @@ where
     }
     if session.up {
         carplay(false);
-        tracing::info!("[cl] the session is over; the CarPlay side goes with it");
+        tracing::info!("cl.session_over action=close_carplay");
     }
     // A session that has ended is not one that is running, and the page has to
     // say so: an encoder left "running" after the car has gone is the one thing
@@ -729,12 +720,12 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             return Ok(());
         }
         let Some(message) = frame::decode(frame::CMD, &chunk.body) else {
-            tracing::warn!("[cl] a command chunk that does not decode was dropped");
+            tracing::warn!("cl.command_dropped reason=decode_failed");
             return Ok(());
         };
         if !frame::from_car(message.service_type) {
             tracing::debug!(
-                "[cl] ignoring {:#010x} — the car's direction bit is clear",
+                "cl.message_ignored type={:#010x} reason=direction_bit_clear",
                 message.service_type
             );
             return Ok(());
@@ -743,7 +734,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         match message.service_type {
             HU_PROTOCOL_VERSION => {
                 let (major, minor) = proto::decode_protocol_version(&message.body);
-                tracing::info!("[cl] the car speaks CarLife {major}.{minor}");
+                tracing::info!("cl.version version={major}.{minor}");
                 self.status
                     .with(|s| s.carlife.protocol = Some((major, minor)));
                 let body = proto::protocol_version_match_status(proto::MATCH);
@@ -762,7 +753,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 if !self.up {
                     self.up = true;
                     self.status.with(|s| s.carlife.session_up = true);
-                    tracing::info!("[cl] the car has our device information; the session is up");
+                    tracing::info!("cl.session_up");
                     carplay(true);
                 }
             }
@@ -771,8 +762,8 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // `connect_time` is reported as-is: the field is an int32 and
                 // neither the guide nor the head-unit library says in what unit.
                 tracing::info!(
-                    "[cl] the car reports cuid {:?} version {:?} (build {}), channel {:?}; \
-                     {} connections, {} of them successful, connect time {}",
+                    "cl.car_info cuid={:?} version={:?} build={} channel={:?} connections={} \
+                     connected={} connect_time={}",
                     info.cuid,
                     info.version_name,
                     info.version_code,
@@ -810,7 +801,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             HU_FEATURE_CONFIG_RESPONSE => {
                 let configs = proto::decode_feature_configs(&message.body);
                 for (key, value) in &configs {
-                    tracing::info!("[cl] the car set {key} = {value}");
+                    tracing::info!("cl.setting key={key} value={value:?}");
                 }
                 self.status.with(|s| s.carlife.features = configs);
             }
@@ -825,15 +816,13 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 let passed = proto::decode_authen_result(&message.body).unwrap_or(false);
                 self.status.with(|s| s.carlife.accepted = Some(passed));
                 if passed {
-                    tracing::info!("[cl] the car accepted us");
+                    tracing::info!("cl.auth_result result=accepted");
                 } else if self.auth.is_none() {
                     // The answer to a challenge that was skipped, which is
                     // nothing the operator was not already told at startup.
-                    tracing::debug!("[cl] the car did not accept us, as expected without a key");
+                    tracing::debug!("cl.auth_result result=rejected reason=no_key");
                 } else {
-                    tracing::warn!(
-                        "[cl] the car did not accept us; the guide has it disconnecting here"
-                    );
+                    tracing::warn!("cl.auth_result result=rejected consequence=disconnect");
                 }
             }
             HU_VIDEO_ENCODER_INIT => {
@@ -859,7 +848,8 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     },
                 };
                 tracing::info!(
-                    "[cl] the car asked for {}x{} at {} fps; agreeing to {}x{} at {}",
+                    "cl.geometry_asked width={} height={} fps={} agreed_width={} \
+                     agreed_height={} agreed_fps={}",
                     asked.width,
                     asked.height,
                     asked.frame_rate,
@@ -901,7 +891,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 );
             }
             HU_VIDEO_ENCODER_START => {
-                tracing::info!("[cl] the car started the encoder; video begins");
+                tracing::info!("cl.encoder state=started");
                 let now = Instant::now();
                 self.started_at = Some(now);
                 self.status.with(|s| s.carlife.encoding = true);
@@ -911,7 +901,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 self.next_tick = now;
             }
             HU_VIDEO_ENCODER_PAUSE | HU_VIDEO_ENCODER_RESET => {
-                tracing::info!("[cl] the car stopped the encoder");
+                tracing::info!("cl.encoder state=stopped");
                 self.started_at = None;
                 self.status.with(|s| s.carlife.encoding = false);
             }
@@ -921,7 +911,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     MIN_FPS..=MAX_FPS => asked,
                     _ => self.agreed.map(|agreed| agreed.frame_rate).unwrap_or(30),
                 };
-                tracing::info!("[cl] the car asked for {asked} fps; agreeing to {accepted}");
+                tracing::info!("cl.frame_rate asked={asked} agreed={accepted}");
                 if let Some(agreed) = self.agreed.as_mut() {
                     agreed.frame_rate = accepted;
                 }
@@ -942,7 +932,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // There is no window here to bring forward, so the honest reply
                 // is sent at once rather than after the five seconds the guide
                 // gives a device that is actually switching.
-                tracing::debug!("[cl] the car asked us to come to the foreground");
+                tracing::debug!("cl.foreground");
                 self.send(GO_TO_FOREGROUND_RESPONSE, &[]).await?;
             }
             // The car asking whether this device can tell it about a route. The
@@ -950,7 +940,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             // to do with it — so it is told exactly what this side has.
             HU_DATA_SUBSCRIBE => {
                 let asked = proto::decode_data_subscribe(&message.body);
-                tracing::info!("[cl] the car asks which data we can provide: {asked:?}");
+                tracing::info!("cl.car_data_query modules={asked:?}");
                 let answer: Vec<(i32, bool)> = asked
                     .iter()
                     .map(|module| (*module, *module == proto::DATA_TURN_BY_TURN))
@@ -965,8 +955,8 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 let asked = proto::decode_data_subscribe(&message.body);
                 let wanted = message.service_type == HU_DATA_SUBSCRIBE_START;
                 tracing::info!(
-                    "[cl] the car asks us to {} {asked:?}",
-                    if wanted { "send" } else { "stop sending" }
+                    "cl.car_data_subscription action={} modules={asked:?}",
+                    if wanted { "send" } else { "stop" }
                 );
                 if asked.contains(&proto::DATA_TURN_BY_TURN) {
                     self.subscribed = wanted;
@@ -979,12 +969,9 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             HU_ERROR_CODE => {
                 self.status
                     .with(|s| s.carlife.error_bytes = Some(message.body.len()));
-                tracing::warn!(
-                    "[cl] the car reported an error, {} bytes of it",
-                    message.body.len()
-                );
+                tracing::warn!("cl.error_report bytes={}", message.body.len());
             }
-            other => tracing::debug!("[cl] {other:#010x} arrived and is not acted on"),
+            other => tracing::debug!("cl.message_ignored type={other:#010x}"),
         }
         Ok(())
     }
@@ -1009,7 +996,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         });
         let Some(key) = self.auth.as_ref() else {
             tracing::debug!(
-                "[cl] the car's challenge {challenge:?} is skipped: no key is built in"
+                "cl.challenge result=skipped reason=no_key challenge={challenge:?}"
             );
             return Ok(());
         };
@@ -1017,7 +1004,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             return Ok(());
         };
         tracing::info!(
-            "[cl] the car's challenge {challenge:?} is answered; {} characters went out",
+            "cl.challenge result=answered chars={} challenge={challenge:?}",
             value.len()
         );
         self.status
@@ -1039,9 +1026,9 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         let legal = auth::channel_is_legal(channel);
         self.status.with(|s| s.carlife.channel_legal = Some(legal));
         if legal {
-            tracing::info!("[cl] the car's channel {channel:?} is one a phone serves");
+            tracing::info!("cl.channel_check channel={channel:?} result=legal");
         } else {
-            tracing::warn!("[cl] the car's channel {channel:?} is not one a phone serves");
+            tracing::warn!("cl.channel_check channel={channel:?} result=illegal");
         }
         let body = proto::authen_result(legal);
         self.send(MD_AUTHEN_RESULT, &body).await
@@ -1056,18 +1043,22 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     /// has no meaning for is dropped with a line rather than guessed at.
     async fn other_channel(&mut self, chunk: frame::Chunk) {
         if chunk.channel != frame::TOUCH {
-            tracing::debug!("[cl] channel {} sent {} bytes", chunk.channel, chunk.body.len());
+            tracing::debug!(
+                "cl.chunk_ignored channel={} bytes={}",
+                chunk.channel,
+                chunk.body.len()
+            );
             return;
         }
         let Some(message) = frame::decode(frame::TOUCH, &chunk.body) else {
-            tracing::warn!("[cl] a touch chunk that does not decode was dropped");
+            tracing::warn!("cl.touch_dropped reason=decode_failed");
             return;
         };
         let command = match message.service_type {
             TOUCH_ACTION => match proto::decode_touch_action(&message.body) {
                 Some(touch) => Some(self.touch(touch)),
                 None => {
-                    tracing::warn!("[cl] a touch action with fields missing was dropped");
+                    tracing::warn!("cl.touch_dropped reason=missing_fields");
                     None
                 }
             },
@@ -1075,17 +1066,17 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 Some(key) => {
                     let command = command_for(key);
                     if command.is_none() {
-                        tracing::debug!("[cl] panel key {key:#04x} means nothing to a phone");
+                        tracing::debug!("cl.key_ignored key={key:#04x}");
                     }
                     command
                 }
                 None => {
-                    tracing::warn!("[cl] a panel key with its field missing was dropped");
+                    tracing::warn!("cl.key_dropped reason=missing_field");
                     None
                 }
             },
             other => {
-                tracing::debug!("[cl] {other:#010x} arrived on the touch channel");
+                tracing::debug!("cl.touch_ignored type={other:#010x}");
                 None
             }
         };
@@ -1095,7 +1086,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         // Failures are the phone's to have: a press that arrives before the event
         // channel is up is dropped by the sink with a line of its own.
         if let Err(e) = self.events.dispatch(command).await {
-            tracing::warn!("[cl] the phone did not take an input event: {e}");
+            tracing::warn!("cl.input_send_failed err={e}");
         }
     }
 
@@ -1211,7 +1202,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 if self.media_format == Some((rate, channels)) {
                     return Ok(());
                 }
-                tracing::info!("[cl] the media channel carries PCM at {rate} Hz, {channels}ch");
+                tracing::info!("cl.audio_ready channel=media rate_hz={rate} channels={channels}");
                 self.media_format = Some((rate, channels));
                 self.status
                     .with(|s| s.carlife.media = Some((rate, channels)));
@@ -1250,7 +1241,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // car builds one from the INIT it is sent, and two of them for
                 // one voice is the kind of thing that is only heard, not seen.
                 self.close_navi().await?;
-                tracing::info!("[cl] the navi channel carries PCM at {rate} Hz, {channels}ch");
+                tracing::info!("cl.audio_ready channel=navi rate_hz={rate} channels={channels}");
                 self.navi_format = Some((rate, channels));
                 Ok(())
             }
@@ -1285,7 +1276,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             return Ok(());
         }
         self.navi_open = false;
-        tracing::debug!("[cl] the prompt is over");
+        tracing::debug!("cl.prompt state=over");
         self.send(NAVI_TTS_END, &[]).await
     }
 
@@ -1337,7 +1328,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // one the car can take.
                 if image.len() > proto::MAX_ART {
                     tracing::warn!(
-                        "[cl] media info: cover dropped bytes={} cap={}",
+                        "cl.media_cover_dropped bytes={} cap_bytes={}",
                         image.len(),
                         proto::MAX_ART
                     );
@@ -1352,7 +1343,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     return Ok(());
                 }
                 if image.is_empty() {
-                    tracing::debug!("[cl] media info: an empty cover; the song goes without one");
+                    tracing::debug!("cl.media_cover_empty action=send_without_cover");
                 }
                 self.art = Some(image);
                 // The page draws it as soon as it is here rather than when the
@@ -1421,8 +1412,8 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             .as_ref()
             .map_or(0.0, |art| art.len() as f64 / 1024.0);
         tracing::debug!(
-            "[cl] media info: song={song:?} artist={artist:?} album={album:?} \
-             duration={} source={source:?} cover={cover:.1}kB",
+            "cl.media_info song={song:?} artist={artist:?} album={album:?} duration_s={} \
+             source={source:?} cover_kb={cover:.1}",
             self.track.duration_s.unwrap_or(0)
         );
         let body = proto::media_info(&self.track, self.art.as_deref().filter(|art| !art.is_empty()));
@@ -1460,7 +1451,10 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             };
             if self.navi != Some(state) {
                 self.navi = Some(state);
-                tracing::info!("[cl] navi state: running={running}");
+                tracing::info!(
+                    "cl.navi state={}",
+                    if running { "running" } else { "idle" }
+                );
                 let body = proto::module_status(proto::NAVI_MODULE, state);
                 self.send(MODULE_STATUS, &body).await?;
             }
@@ -1491,10 +1485,10 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             _ => "hide",
         };
         if action == proto::ACTION_HIDE {
-            tracing::info!("[cl] navi turn: action={action_name}");
+            tracing::info!("cl.navi_turn action={action_name}");
         } else {
             tracing::info!(
-                "[cl] navi turn: action={action_name} kind={:?} road={:?} remain_m={:?}",
+                "cl.navi_turn action={action_name} kind={:?} road={:?} remain_m={:?}",
                 turn.kind.map(|k| format!("0x{k:02X}")),
                 turn.road,
                 turn.remain_m
@@ -1562,7 +1556,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         let cap = frame::max_body(channel);
         if body.len() > cap as usize {
             tracing::warn!(
-                "[cl] message dropped: type={service_type:#010x} bytes={} cap={cap}",
+                "cl.message_dropped type={service_type:#010x} bytes={} cap_bytes={cap}",
                 body.len()
             );
             return Ok(());

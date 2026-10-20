@@ -171,7 +171,7 @@ pub async fn watch(
         let current: Vec<String> = phones.iter().map(|p| p.id.clone()).collect();
         match &busy {
             Some(id) if !current.contains(id) => {
-                tracing::info!("[cp] {} unplugged", short(id));
+                tracing::info!("cp.unplugged phone={}", short(id));
                 // Nothing about a phone that has gone is still true, and the
                 // page is where that has to show: a session left standing after
                 // the cable is out is the page's most convincing lie.
@@ -189,7 +189,7 @@ pub async fn watch(
         }
         if busy.is_none() {
             if let Some(phone) = phones.into_iter().next() {
-                tracing::info!("[cp] {} found over usb", short(&phone.id));
+                tracing::info!("cp.attached phone={} transport=usb", short(&phone.id));
                 status.with(|s| {
                     s.carplay.phone = Some(phone.id.clone());
                     s.carplay.identified = false;
@@ -209,7 +209,10 @@ pub async fn watch(
                 .await
                 {
                     Ok(_) => busy = Some(phone.id.clone()),
-                    Err(e) => tracing::warn!("[cp] {} could not attach: {e}", short(&phone.id)),
+                    Err(e) => tracing::warn!(
+                        "cp.attach_failed phone={} err={e}",
+                        short(&phone.id)
+                    ),
                 }
             }
         }
@@ -252,16 +255,16 @@ async fn attach(
     let av_iface = match &ncm {
         Ok(ncm) => Some(ncm.ifname.clone()),
         Err(e) => {
-            tracing::warn!("[cp] no NCM bridge ({e}); falling back to the kernel's interface");
+            tracing::warn!("cp.ncm_missing err={e} action=kernel_interface");
             av_interface().await
         }
     };
-    tracing::info!("[cp] av interface: {:?}", av_iface);
+    tracing::info!("cp.av_interface name={av_iface:?}");
     status.with(|s| s.carplay.av_iface = av_iface.clone());
 
     loop {
         let tunnel = carkit(&mux).await?;
-        tracing::info!("[cp] {} carkit up, starting iAP2", short(&phone.id));
+        tracing::info!("cp.carkit_up phone={} action=start_iap2", short(&phone.id));
 
         let identity = Identity {
             name: cfg.name.clone(),
@@ -326,7 +329,7 @@ async fn attach(
 
         let ended =
             run_bringup(
-                "[cp]",
+                "cp",
                 &short(&phone.id),
                 airplay_port,
                 None,
@@ -349,7 +352,7 @@ async fn attach(
         match ended {
             Ended::Restart => {
                 tracing::info!(
-                    "[cp] {} is being told to start over; reopening carkit",
+                    "cp.restart phone={} action=reopen_carkit",
                     short(&phone.id)
                 );
                 tokio::time::sleep(RESTART_PAUSE).await;
@@ -363,10 +366,10 @@ async fn attach(
 
 /// Prints the progress of one iAP2 bringup, and says how it ended.
 ///
-/// Both transports run the same conversation, and differ only in their log
-/// prefix and in which events they can produce, so the loop lives here once.
-/// `ssid` is the network a wireless session tells the phone to join; the wired
-/// one never has that step and passes `None`.
+/// Both transports run the same conversation, and differ only in the area their
+/// events are named under and in which events they can produce, so the loop
+/// lives here once. `ssid` is the network a wireless session tells the phone to
+/// join; the wired one never has that step and passes `None`.
 ///
 /// `changed` fires when what the phone should render has changed, which the
 /// caller turns into a new session.
@@ -378,7 +381,7 @@ async fn attach(
 /// `status` is told how far the conversation got, which is the only place any of
 /// these steps is known: see `crate::web::status`.
 pub(crate) async fn run_bringup(
-    prefix: &str,
+    area: &str,
     peer: &str,
     airplay_port: u32,
     ssid: Option<&str>,
@@ -405,35 +408,34 @@ pub(crate) async fn run_bringup(
         match event {
             Some(BringupEvent::Identified) => {
                 status.with(|s| s.carplay.identified = true);
-                tracing::info!("{prefix} {peer} identified");
+                tracing::info!("{area}.identified peer={peer}");
             }
             Some(BringupEvent::Authenticated) => {
                 status.with(|s| s.carplay.authenticated = true);
-                tracing::info!("{prefix} {peer} MFi authentication passed");
+                tracing::info!("{area}.mfi_passed peer={peer}");
             }
             Some(BringupEvent::Subscribed) => {
                 status.with(|s| s.carplay.subscribed = true);
-                tracing::info!("{prefix} {peer} subscriptions sent");
+                tracing::info!("{area}.subscriptions_sent peer={peer}");
             }
             Some(BringupEvent::WifiConfigSent) => {
                 if let Some(ssid) = ssid {
-                    tracing::info!("{prefix} {peer} told to join {ssid:?}");
+                    tracing::info!("{area}.wifi_config_sent peer={peer} ssid={ssid:?}");
                 }
             }
             Some(BringupEvent::CarPlayStartSent { ip }) => {
                 status.with(|s| s.carplay.advertised = Some(format!("{ip}:{airplay_port}")));
                 tracing::info!(
-                    "{prefix} {peer} CarPlayStartSession sent — the phone should knock on \
-                     {ip}:{airplay_port}"
+                    "{area}.carplay_start_sent peer={peer} airplay={ip}:{airplay_port}"
                 );
             }
             Some(BringupEvent::Failed(reason)) => {
                 status.with(|s| s.carplay.failed = Some(reason.to_string()));
-                tracing::error!("{prefix} {peer} session failed: {reason}");
+                tracing::error!("{area}.session_failed peer={peer} reason={reason:?}");
                 return Ended::Finished;
             }
             Some(BringupEvent::Closed) => {
-                tracing::info!("{prefix} {peer} session closed");
+                tracing::info!("{area}.session_closed peer={peer}");
                 return Ended::Finished;
             }
             // What the phone is playing, which the car's panel is owed. It is
@@ -445,7 +447,7 @@ pub(crate) async fn run_bringup(
             }) => match Track::from_iap2(&frame) {
                 // The phone describes one attribute at a time, so this is the
                 // line per message rather than per song: what it just said, not
-                // what is known. `[cl] media info` is the other end of it.
+                // what is known. `cl.media_info` is the other end of it.
                 //
                 // It also sends this message for things the car has no field
                 // for — whether it is playing, where it is in the song — and
@@ -458,14 +460,14 @@ pub(crate) async fn run_bringup(
                 // seconds, and at `info` that is most of the log.
                 Some(track) => {
                     if let Some(line) = said(&track) {
-                        tracing::debug!("[cp] media: {line}");
+                        tracing::debug!("cp.now_playing {line}");
                     }
                     panel.playing(Playing::Track(track));
                 }
                 // A song this side cannot read is one the panel is never told
                 // about, and nothing further down would say so.
                 None => tracing::warn!(
-                    "[cp] media: a NowPlayingUpdate that does not decode bytes={}",
+                    "cp.now_playing_dropped bytes={} reason=decode_failed",
                     frame.len()
                 ),
             },
@@ -508,7 +510,7 @@ fn said(track: &Track) -> Option<String> {
     .filter_map(|(name, value)| value.map(|value| format!("{name}={value:?}")))
     .collect();
     if let Some(seconds) = track.duration_s {
-        parts.push(format!("duration={seconds}s"));
+        parts.push(format!("duration_s={seconds}"));
     }
     if parts.is_empty() {
         None
@@ -550,7 +552,7 @@ pub(crate) async fn carry_artwork(mut artwork: ArtworkRx, panel: Arc<ClSink>) {
                 let Ok(fitted) =
                     tokio::task::spawn_blocking(move || artwork::fit(&image, budget)).await
                 else {
-                    tracing::warn!("[cp] cover dropped: the compression task did not finish");
+                    tracing::warn!("cp.cover_dropped reason=compression_aborted");
                     continue;
                 };
                 report_cover(&fitted, seen.0, started.elapsed());
@@ -579,7 +581,7 @@ pub(crate) async fn carry_artwork(mut artwork: ArtworkRx, panel: Arc<ClSink>) {
 fn report_cover(fitted: &Fitted, bytes: usize, took: Duration) {
     let ms = took.as_millis();
     match fitted {
-        Fitted::AsIs(_) => tracing::debug!("[cp] cover: in={bytes} passthrough"),
+        Fitted::AsIs(_) => tracing::debug!("cp.cover_fit bytes={bytes} action=passthrough"),
         Fitted::Shrunk {
             bytes: out,
             kind,
@@ -594,8 +596,8 @@ fn report_cover(fitted: &Fitted, bytes: usize, took: Duration) {
                 format!(" orientation={orientation}")
             };
             tracing::info!(
-                "[cp] cover compressed: src={kind} in={bytes} out={} size={}x{} q={quality} \
-                 tries={tries}{turned} ms={ms}",
+                "cp.cover_fitted src={kind} in_bytes={bytes} out_bytes={} width={} height={} \
+                 quality={quality} tries={tries}{turned} ms={ms}",
                 out.len(),
                 size.0,
                 size.1
@@ -603,14 +605,14 @@ fn report_cover(fitted: &Fitted, bytes: usize, took: Duration) {
         }
         Fitted::GaveUp { why, best, tries } => match best {
             Some(best) => tracing::warn!(
-                "[cp] cover dropped: in={bytes} reason={why} best={} size={}x{} q={} \
-                 tries={tries} ms={ms}",
+                "cp.cover_dropped in_bytes={bytes} reason={why:?} best_bytes={} width={} \
+                 height={} quality={} tries={tries} ms={ms}",
                 best.bytes,
                 best.size.0,
                 best.size.1,
                 best.quality
             ),
-            None => tracing::warn!("[cp] cover dropped: in={bytes} reason={why} ms={ms}"),
+            None => tracing::warn!("cp.cover_dropped in_bytes={bytes} reason={why:?} ms={ms}"),
         },
     }
 }
@@ -671,14 +673,14 @@ impl Trace {
     fn inbound(&mut self, data: &[u8]) {
         self.chunks_in += 1;
         if self.chunks_in <= TRACE_CHUNKS {
-            tracing::debug!("[link] in  {} bytes {}", data.len(), hex(data));
+            tracing::debug!("link.frame_in bytes={} data={}", data.len(), hex(data));
         }
     }
 
     fn outbound(&mut self, data: &[u8]) {
         self.chunks_out += 1;
         if self.chunks_out <= TRACE_CHUNKS {
-            tracing::debug!("[link] out {} bytes {}", data.len(), hex(data));
+            tracing::debug!("link.frame_out bytes={} data={}", data.len(), hex(data));
         }
     }
 }
@@ -801,7 +803,7 @@ mod tests {
         };
         assert_eq!(
             said(&update).as_deref(),
-            Some("song=\"So What\" duration=545s")
+            Some("song=\"So What\" duration_s=545")
         );
         assert_eq!(said(&Track::default()), None);
     }

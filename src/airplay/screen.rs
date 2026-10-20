@@ -80,7 +80,7 @@ impl VideoReceiver {
                 match parse_video_config(body) {
                     Some(config) => {
                         tracing::info!(
-                            "[video] config: {} level {}, {} parameter set(s), {}-byte NAL lengths",
+                            "video.config profile={} level={} parameter_sets={} nal_length_size={}",
                             config.format.profile,
                             config.format.level,
                             config.parameter_sets.len(),
@@ -99,8 +99,7 @@ impl VideoReceiver {
                         // is not, so name what arrived rather than leave a black
                         // picture with nothing printed.
                         tracing::warn!(
-                            "[video] config not understood ({}B): {} — only an H.264 \
-                             avcC record can be read",
+                            "video.config_unreadable bytes={} data={} want=avcC",
                             body.len(),
                             hex::encode(&body[..body.len().min(32)])
                         );
@@ -131,8 +130,8 @@ impl VideoReceiver {
                             // is a separate question.
                             if self.frames == 0 {
                                 tracing::info!(
-                                    "[video] first frame: keyframe={keyframe}, {} bytes, \
-                                     {}-byte NAL lengths",
+                                    "video.first_frame keyframe={keyframe} bytes={} \
+                                     nal_length_size={}",
                                     annex_b.len(),
                                     self.nal_length_size
                                 );
@@ -142,7 +141,7 @@ impl VideoReceiver {
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("[video] frame {} failed to open: {e}", self.counter);
+                        tracing::warn!("video.frame_open_failed frame={} err={e}", self.counter);
                     }
                 }
                 // A frame says nothing about the coding: that came in the
@@ -150,7 +149,7 @@ impl VideoReceiver {
                 None
             }
             other => {
-                tracing::warn!(opcode = other, "unknown video opcode");
+                tracing::warn!("video.unknown_opcode opcode={other}");
                 None
             }
         }

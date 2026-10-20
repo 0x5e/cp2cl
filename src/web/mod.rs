@@ -90,7 +90,7 @@ pub async fn serve(listener: TcpListener, status: Arc<Status>) {
         .fallback(not_found)
         .with_state(status);
     if let Err(e) = axum::serve(listener, app).await {
-        tracing::warn!("[web] the status page stopped: {e}");
+        tracing::warn!("web.serve_failed err={e}");
     }
 }
 

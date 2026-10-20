@@ -62,14 +62,14 @@ instead, since it cannot build this itself — see
 Then plug the phone in and unlock it. You should see:
 
 ```
-[cp] 000081301A46 found over usb
-[cp] identified
-[cp] MFi authentication passed
-[cp] CarPlayStartSession sent — the phone should knock on 52843
-[airplay] 192.168.20.3:53412 connected
-[airplay] pair-verify complete; shared secret ready
-[airplay] answered GET /info
-[airplay] video stream attached
+[cp]      	cp.attached phone=000081301A46 transport=usb
+[cp]      	cp.identified peer=000081301A46
+[cp]      	cp.mfi_passed peer=000081301A46
+[cp]      	cp.carplay_start_sent peer=000081301A46 airplay=192.168.20.1:52843
+[airplay] 	airplay.connected peer=192.168.20.3:53412
+[pairing] 	pairing.verified
+[airplay] 	airplay.info_answered width=1280 height=720 fps=30 codec=avc1
+[video]   	video.stream_attached
 ```
 
 ### Cross-compiling for the board
@@ -129,8 +129,8 @@ reaches it on the next one. A car whose screen is not the default has its CarPla
 session rebuilt once, early on, for exactly this reason — the log says so:
 
 ```
-[cl] the car asked for 1920x480 at 24 fps; agreeing to 1920x480 at 24
-[cp2cl] the car's screen is 1920x480 at 24 fps; the phone is asked for the same
+[cl]      	cl.geometry_asked width=1920 height=480 fps=24 agreed_width=1920 agreed_height=480 agreed_fps=24
+[screen]  	screen.named width=1920 height=480 fps=24
 ```
 
 Two things have to happen, and closing the connection is only the first:
@@ -161,8 +161,8 @@ notice the first one ending before it will act on the second.
 
 | Log line | What it means |
 |---|---|
-| `[cp] ... is being told to start over; reopening carkit` | wired: the old tunnel is closed and another is being opened |
-| `[cp-wifi] ... is being told to start over; dropping the Bluetooth link` | wireless: the link is closed; the platform has to bring the phone back |
+| `cp.restart phone=... action=reopen_carkit` | wired: the old tunnel is closed and another is being opened |
+| `wireless.restart peer=... action=drop_link` | wireless: the link is closed; the platform has to bring the phone back |
 
 The wireless half depends on something outside this program bringing the phone
 back: BlueZ's `AutoConnect` pages a phone that has paired before. **Wired has
@@ -344,35 +344,35 @@ What to watch for, in the order it happens. The first line that does not appear
 is where it stopped:
 
 ```bash
-[cl-usb] waiting for a head unit to enumerate the device
-[cl-usb] control request 51 in, type 0xc0, value 0, index 0, length 2
-[cl-usb] answered with AOA 2
-[cl-usb] control request 52 out, type 0x40, value 0, index 0, length 5
-[cl-usb] identifier 0: "Baidu"                                 # and five more like it
-[cl-usb] control request 53 out, type 0x40, value 0, index 0, length 0
-[cl-usb] switched to an accessory (18d1:2d00 as Baidu / CarLife); the host will enumerate us again
-[cl-usb] the host has enumerated us; starting the session
-[cl] the car speaks CarLife 1.0
-[cl] the car has our device information; the session is up   # the gate opens here
-[cl] the car set VOICE_MIC = 0                               # whatever it asks for
-[cl] the car asked for 1280x720 at 30 fps; agreeing to 1280x720 at 30
-[cl] the car started the encoder; video begins
+[usb]     	usb.waiting_for_host
+[usb]     	usb.control_request request=51 direction=in type=0xc0 value=0 index=0 length=2
+[usb]     	usb.aoa_version version=2
+[usb]     	usb.control_request request=52 direction=out type=0x40 value=0 index=0 length=5
+[usb]     	usb.ident index=0 text="Baidu"       # and five more like it
+[usb]     	usb.control_request request=53 direction=out type=0x40 value=0 index=0 length=0
+[usb]     	usb.accessory_switch result=ok identity="18d1:2d00 as Baidu / CarLife"
+[usb]     	usb.enumerated action=start_session
+[cl]      	cl.version version=1.0
+[cl]      	cl.session_up                        # the gate opens here
+[cl]      	cl.setting key=VOICE_MIC value="0"   # whatever it asks for
+[cl]      	cl.geometry_asked width=1280 height=720 fps=30 agreed_width=1280 agreed_height=720 agreed_fps=30
+[cl]      	cl.encoder state=started
 ```
 
-`[cl]` is the session, `[cl-usb]` is the USB side under it. A head unit that
-skips the handshake — which is what the reference implementation does, and what a
-car does when it has already switched this device once — goes straight from
-`waiting for a head unit` to `the host has enumerated us`. The other half of the
-bridge says so too, and its two lines bracket the one above:
+The `[cl]` lines are the session, the `[usb]` lines the USB side under it. A head
+unit that skips the handshake — which is what the reference implementation does,
+and what a car does when it has already switched this device once — goes straight
+from `usb.waiting_for_host` to `usb.enumerated`. The other half of the bridge says
+so too, and its two lines bracket the one above:
 
 ```bash
-[airplay] holding: the CarLife session is not up   # until "the session is up"
-[airplay] <phone> connected                        # and only after it
+[airplay] 	airplay.held reason=car_session_not_up   # until cl.session_up
+[airplay] 	airplay.connected peer=<phone>           # and only after it
 ```
 
 If the car goes quiet and nothing from `[cl]` follows, the last line printed says
-what it was waiting on. A stop at `the car asked us to authenticate and there is
-no key` is the next section's subject.
+what it was waiting on. A stop at `cl.challenge result=skipped reason=no_key` is
+the next section's subject.
 
 ### The accessory interface
 
@@ -675,7 +675,7 @@ arrived at.
 
 Nothing captures it yet — there is no microphone on the board, and no path from
 the car up to this side — so the uplink opens and is reported
-(`[mic] uplink open to ...`) for a capture that does not exist. It is open while
+(`mic.uplink_open peer=...`) for a capture that does not exist. It is open while
 the phone is listening and shut the rest of the time, so the way to see it is to
 start a call or invoke Siri.
 
@@ -890,8 +890,8 @@ this a derivative work, so cp2cl inherits that.
   because the phone sends PCM packet by packet there. The audio pump therefore
   releases the buffered stream one frame per 21.33 ms, and prints how it is
   going every five seconds:
-  `[airplay] audio: N packets, M missing, worst gap X ms, B bursts of LO-HI (avg A), N held`.
-  A rising `missing` is loss; a large `worst gap` is the phone's lumping and is
+  `audio.stats packets=N missing=M worst_gap_ms=X bursts=B burst_lo=LO burst_hi=HI burst_avg=A held=N`.
+  A rising `missing` is loss; a large `worst_gap_ms` is the phone's lumping and is
   expected; `held` is how much audio is waiting to go out.
 
 ## Known gaps

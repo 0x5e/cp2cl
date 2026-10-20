@@ -66,7 +66,7 @@ impl Signer {
     /// out loud and leaves the CarLife side unable to answer a challenge.
     pub fn from_pem(pem: &str) -> Option<Self> {
         let Some(der) = pem_body(pem) else {
-            tracing::warn!("[cl] the built-in CarLife key holds no PEM block");
+            tracing::warn!("auth.key_unreadable reason=no_pem");
             return None;
         };
         // Either shape of private key file will do: the PKCS#8 one a key
@@ -77,15 +77,11 @@ impl Signer {
             .ok();
         let Some(key) = key else {
             tracing::warn!(
-                "[cl] the built-in CarLife key is not an RSA private key this can read; \
-                 the car's challenge will go unanswered"
+                "auth.key_unreadable reason=not_rsa consequence=challenge_unanswered"
             );
             return None;
         };
-        tracing::info!(
-            "[cl] the phone's CarLife key ({} bits) is built in",
-            key.size() * 8
-        );
+        tracing::info!("auth.key_loaded bits={} source=built_in", key.size() * 8);
         Some(Self { key })
     }
 
@@ -107,7 +103,7 @@ impl Signer {
         match self.key.sign(Pkcs1v15Sign::new_unprefixed(), text.as_bytes()) {
             Ok(answer) => Some(BASE64.encode(answer)),
             Err(e) => {
-                tracing::warn!("[cl] the car's challenge could not be answered: {e}");
+                tracing::warn!("auth.challenge_unanswered err={e}");
                 None
             }
         }
@@ -130,15 +126,12 @@ impl Signer {
 /// and the car accepts the challenge back in both cases.
 fn answer_text(challenge: &str) -> String {
     let Some((head, version)) = challenge.split_once('_') else {
-        tracing::debug!(
-            "[cl] the car's challenge carries no version to compare; answering it as it stands"
-        );
+        tracing::debug!("auth.challenge_version_missing action=answer_as_is");
         return challenge.to_string();
     };
     let Some(theirs) = version_of(version) else {
         tracing::debug!(
-            "[cl] the car's challenge names {version:?}, which is not a three-part version; \
-             answering it as it stands"
+            "auth.challenge_version_unparsed version={version:?} action=answer_as_is"
         );
         return challenge.to_string();
     };
@@ -148,8 +141,10 @@ fn answer_text(challenge: &str) -> String {
             // only newer versions is a car that will not accept the answer, and
             // this line is what says why.
             tracing::info!(
-                "[cl] the car serves CarLife {version} and up, which this device is not; \
-                 answering as the older phone the app would be"
+                "auth.car_version_too_new car={version} claimed={}.{}.{} action=answer_as_older",
+                CLAIMED_VERSION[0],
+                CLAIMED_VERSION[1],
+                CLAIMED_VERSION[2]
             );
             return too_old(head);
         }

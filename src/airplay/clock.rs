@@ -121,7 +121,7 @@ impl SyncedClock {
             "residual"
         };
         tracing::info!(
-            "[timing] clock {what}: offset {offset:.3}s ({note}), rtt {:.1}ms",
+            "clock.synced action={what} offset_s={offset:.3} note={note:?} rtt_ms={:.1}",
             rtt * 1000.0
         );
     }

@@ -374,7 +374,7 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
     let newest = Arc::new(AtomicU64::new(0));
     loop {
         if !*gate.borrow() {
-            tracing::info!("[airplay] holding: the CarLife session is not up");
+            tracing::info!("airplay.held reason=car_session_not_up");
             if gate.changed().await.is_err() {
                 return;
             }
@@ -385,12 +385,12 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                 let (socket, peer) = match accepted {
                     Ok(v) => v,
                     Err(e) => {
-                        tracing::warn!("[airplay] accept failed: {e}");
+                        tracing::warn!("airplay.accept_failed err={e}");
                         return;
                     }
                 };
                 let status = shared.status.clone();
-                tracing::info!("[airplay] {peer} connected");
+                tracing::info!("airplay.connected peer={peer}");
                 status.with(|s| s.carplay.airplay.peer = Some(peer.to_string()));
                 let serial = newest.fetch_add(1, Ordering::SeqCst) + 1;
                 let current = newest.clone();
@@ -451,7 +451,7 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                         status,
                     };
                     if let Err(e) = session.run(socket).await {
-                        tracing::info!("[airplay] {peer} ended: {e}");
+                        tracing::info!("airplay.ended peer={peer} err={e}");
                     }
                     // The connection is gone, and so is everything about it: a
                     // page still naming the last client's address, ports and
@@ -465,9 +465,7 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                     return;
                 }
                 if !*gate.borrow() {
-                    tracing::info!(
-                        "[airplay] the CarLife session ended; closing the CarPlay side"
-                    );
+                    tracing::info!("airplay.closed reason=car_session_ended");
                     let _ = shared.shutdown.send(());
                 }
             }
@@ -710,8 +708,7 @@ impl Session {
                 }
                 Wakeup::Restart => {
                     tracing::info!(
-                        "[airplay] {}: what to render changed; dropping the session so \
-                         the phone asks again",
+                        "airplay.dropped peer={} reason=render_changed",
                         self.peer
                     );
                     self.close_streams().await;
@@ -720,7 +717,7 @@ impl Session {
                 // There is nothing left for the phone to send us: the session it
                 // was feeding is over on the other side of the bridge.
                 Wakeup::Shutdown => {
-                    tracing::info!("[airplay] {}: the CarLife session is over", self.peer);
+                    tracing::info!("airplay.closed peer={} reason=car_session_over", self.peer);
                     self.close_streams().await;
                     return Ok(());
                 }
@@ -744,15 +741,14 @@ impl Session {
                     // own without telling anyone what the screen is doing.
                     if self.newest.load(Ordering::SeqCst) != self.serial {
                         tracing::debug!(
-                            "[airplay] {} went quiet after a newer connection took over",
+                            "airplay.retired peer={} reason=superseded",
                             self.peer
                         );
                         self.abandon_streams();
                         return Ok(());
                     }
                     tracing::info!(
-                        "[airplay] {} has been silent for {}s; the phone is gone, \
-                         asking for a new session",
+                        "airplay.silent peer={} idle_s={} action=new_session",
                         self.peer,
                         PHONE_SILENT.as_secs()
                     );
@@ -762,7 +758,7 @@ impl Session {
                 }
             };
             if n == 0 {
-                tracing::info!("[airplay] {} disconnected", self.peer);
+                tracing::info!("airplay.disconnected peer={}", self.peer);
                 return Ok(());
             }
             self.in_buf.extend_from_slice(&buf[..n]);
@@ -791,7 +787,7 @@ impl Session {
                         self.cipher_read = SymKey::from_bytes(&keys.control_read()).ok();
                         self.cipher_write = SymKey::from_bytes(&keys.control_write()).ok();
                         self.status.with(|s| s.carplay.airplay.encrypted = true);
-                        tracing::info!("[airplay] control channel is now encrypted");
+                        tracing::info!("airplay.encrypted channel=control");
                     }
                 }
 
@@ -839,7 +835,7 @@ impl Session {
                     &mut self.frame_buf,
                     &mut self.plain_buf,
                 ) {
-                    tracing::warn!("[airplay] frame {} failed to open: {e}", self.read_ctr);
+                    tracing::warn!("airplay.frame_open_failed ctr={} err={e}", self.read_ctr);
                     return Err(e.into());
                 }
                 if let Some((request, used)) = rtsp::parse(&self.plain_buf)? {
@@ -863,7 +859,7 @@ impl Session {
         let chatty = req.method == "OPTIONS" || req.path.to_lowercase().ends_with("/feedback");
         if !chatty {
             tracing::info!(
-                "[airplay] <- {} {} ({}B)",
+                "airplay.request_in method={} path={} bytes={}",
                 req.method,
                 req.path,
                 req.body.len()
@@ -873,7 +869,11 @@ impl Session {
         match result {
             Ok(response) => response,
             Err(e) => {
-                tracing::warn!("[airplay] {} {} failed: {e}", req.method, req.path);
+                tracing::warn!(
+                    "airplay.request_failed method={} path={} err={e}",
+                    req.method,
+                    req.path
+                );
                 Response::new(500)
             }
         }
@@ -889,7 +889,7 @@ impl Session {
             "GET" if path == "/info" => self.info(),
             "SETUP" => self.setup(req).await,
             "RECORD" => {
-                tracing::info!("[airplay] RECORD: media is live");
+                tracing::info!("airplay.media_live");
                 Ok(Response::new(200))
             }
             // Worth reading: the phone usually names the streams it is dropping,
@@ -960,7 +960,7 @@ impl Session {
         // H.264 is the only family on offer: CarLife carries an elementary
         // stream and its head units decode `video/avc`.
         tracing::info!(
-            "[airplay] answered GET /info ({width}x{height}@{fps} at {ppi} ppi, {})",
+            "airplay.info_answered width={width} height={height} fps={fps} ppi={ppi} codec={}",
             screen::CODEC
         );
         Ok(Response::new(200).plist(plist))
@@ -978,7 +978,7 @@ impl Session {
     /// here shows them.
     fn command(&self, req: &Request) {
         let Ok(dict) = Self::plist_body(&req.body) else {
-            Self::describe("command", &req.body);
+            Self::describe(&req.body);
             return;
         };
         let params = dict.get("params").and_then(|p| p.as_dictionary());
@@ -988,12 +988,10 @@ impl Session {
             .unwrap_or("");
         match dict.get("type").and_then(|v| v.as_string()) {
             Some("requestUI") if url == "videoplayback:" => {
-                tracing::info!("[airplay] requestUI {url}: not handled")
+                tracing::info!("airplay.request_ui url={url:?} action=not_handled")
             }
             Some("requestUI") => {
-                tracing::info!(
-                    "[airplay] requestUI: our icon was tapped; asking the car for its desktop"
-                );
+                tracing::info!("airplay.request_ui action=ask_car_for_desktop");
                 // Nobody to tell is not a failure: the car may have gone.
                 let _ = self.desktop.send(());
             }
@@ -1002,9 +1000,9 @@ impl Session {
                     .and_then(|p| p.get("urls"))
                     .and_then(|v| v.as_array())
                     .map_or(0, Vec::len);
-                tracing::info!("[airplay] suggestUI ({urls} urls, not shown)");
+                tracing::info!("airplay.suggest_ui urls={urls} shown=false");
             }
-            _ => Self::describe("command", &req.body),
+            _ => Self::describe(&req.body),
         }
     }
 
@@ -1013,12 +1011,14 @@ impl Session {
     /// Used for the commands nothing here acts on: the body is then the whole of
     /// what there is to know, and every one of them is printed. The per-second
     /// requests never reach here: `/feedback` is answered before this and
-    /// OPTIONS carries no body.
-    fn describe(what: &str, body: &[u8]) {
+    /// OPTIONS carries no body. `setup` and `teardown` print their bodies under
+    /// the same event name, so `airplay.body` means one thing throughout; which
+    /// request it belongs to is on the line before, so the path is not repeated.
+    fn describe(body: &[u8]) {
         match Self::plist_body(body) {
-            Ok(dict) => tracing::info!("[airplay] {what} body: {}", to_json(&dict)),
+            Ok(dict) => tracing::info!("airplay.body json={}", to_json(&dict)),
             Err(e) => tracing::warn!(
-                "[airplay] {what} body: {e} ({}B) {}",
+                "airplay.body_unparsed err={e} bytes={} data={}",
                 body.len(),
                 hex::encode(&body[..body.len().min(24)])
             ),
@@ -1032,14 +1032,14 @@ impl Session {
     async fn teardown(&mut self, req: &Request) {
         let named = match Self::plist_body(&req.body) {
             Ok(dict) => {
-                tracing::info!("[airplay] TEARDOWN body: {}", to_json(&dict));
+                tracing::info!("airplay.body json={}", to_json(&dict));
                 dict.get("streams").and_then(|v| v.as_array()).cloned()
             }
             Err(e) => {
                 tracing::warn!(
-                    "[airplay] TEARDOWN body: {e} ({}B) {}",
+                    "airplay.body_unparsed err={e} bytes={} data={}",
                     req.body.len(),
-                    hex::encode(&req.body[..req.body.len().min(48)])
+                    hex::encode(&req.body[..req.body.len().min(24)])
                 );
                 None
             }
@@ -1051,7 +1051,7 @@ impl Session {
             .filter_map(|s| s.as_dictionary()?.get("type")?.as_signed_integer())
         {
             self.close_stream(stream_type).await;
-            tracing::info!("[airplay] stream {stream_type} torn down");
+            tracing::info!("airplay.stream_torn_down stream={stream_type}");
         }
     }
 
@@ -1101,7 +1101,7 @@ impl Session {
             self.pumps.remove(&stream_type);
         }
         let Some(connection_id) = closed else {
-            tracing::debug!("[airplay] stream {stream_type} was torn down after it had gone");
+            tracing::debug!("airplay.stream_already_gone stream={stream_type}");
             return;
         };
         self.audio_clock
@@ -1149,7 +1149,7 @@ impl Session {
         // change — it is otherwise once-a-second chatter like the request.
         let summary = clock.summary();
         if self.feedback_log != summary {
-            tracing::info!("[airplay] /feedback streams: {summary}");
+            tracing::info!("airplay.feedback_streams summary={summary:?}");
             self.feedback_log = summary;
         }
         Ok(Response::new(200).plist(plist))
@@ -1172,7 +1172,7 @@ impl Session {
             self.keys = Some(keys);
             self.event_sink.set_key(keys.events_write()).await;
             self.status.with(|s| s.carplay.airplay.verified = true);
-            tracing::info!("[airplay] pair-verify complete; shared secret ready");
+            tracing::info!("pairing.verified");
         }
         Ok(Response::new(200)
             .header("Content-Type", PAIRING_CONTENT_TYPE)
@@ -1222,7 +1222,7 @@ impl Session {
         let enc_sig = aes_ctr128(&aes_key[..16], &aes_iv[..16], &sig);
 
         tracing::info!(
-            "[airplay] /auth-setup signed (cert {}B, sig {}B, sha{})",
+            "airplay.auth_setup_signed cert_bytes={} sig_bytes={} digest=sha{}",
             cert.len(),
             enc_sig.len(),
             if major == 2 { 1 } else { 256 }
@@ -1243,7 +1243,7 @@ impl Session {
         let dict = Self::plist_body(&req.body)?;
         // The whole body and nothing else: the keys were a table of contents for
         // a body nobody could see, and the body is short enough to print.
-        tracing::info!("[airplay] SETUP body: {}", to_json(&dict));
+        tracing::info!("airplay.body json={}", to_json(&dict));
         let has_streams = dict
             .get("streams")
             .and_then(|v| v.as_array())
@@ -1288,7 +1288,7 @@ impl Session {
             let Ok((socket, peer)) = listener.accept().await else {
                 return;
             };
-            tracing::info!("[airplay] event channel from {peer}");
+            tracing::info!("event.channel_opened peer={peer}");
             event_status.with(|s| s.carplay.airplay.event_port = Some(event_port));
             // Input is latency-sensitive and always written in pairs. With Nagle
             // on, a Wi-Fi link holds the second report until the first is acked
@@ -1327,7 +1327,7 @@ impl Session {
             s.carplay.airplay.event_port = Some(event_port);
             s.carplay.airplay.timing_port = Some(timing_port);
         });
-        tracing::info!("[airplay] session SETUP answered (event {event_port})");
+        tracing::info!("airplay.setup_answered event_port={event_port}");
         Ok(Response::new(200).plist(plist))
     }
 
@@ -1365,7 +1365,7 @@ impl Session {
                         let Ok((socket, _)) = listener.accept().await else {
                             return;
                         };
-                        tracing::info!("[airplay] video stream attached");
+                        tracing::info!("video.stream_attached");
                         status.with(|s| s.carplay.video.active = true);
                         Self::pump_video(socket, key, sink, status).await;
                     });
@@ -1425,11 +1425,11 @@ impl Session {
                     // The whole table, because the codec's own name for a stream
                     // can be as much as 8% away from the rate it carries, and a
                     // field naming the rate outright would settle it.
-                    tracing::debug!("[airplay] audio stream {stream_type} setup: {table:?}");
+                    tracing::debug!("audio.setup_table stream={stream_type} table={table:?}");
                     tracing::info!(
-                        "[airplay] audio stream type {stream_type} {audio_type:?} \
-                         (format 0x{fmt:x} -> {codec:?}), {frames_per_packet} frames per \
-                         packet, latency {latency} ms"
+                        "audio.stream_ready stream={stream_type} type={audio_type:?} \
+                         format=0x{fmt:x} codec={codec:?} frames_per_packet={frames_per_packet} \
+                         latency_ms={latency}"
                     );
                     {
                         *self.codec.lock().await = codec;
@@ -1500,7 +1500,7 @@ impl Session {
                         connection_id: stream_id,
                     };
                     let task = tokio::spawn(async move {
-                        tracing::info!("[airplay] audio stream attached");
+                        tracing::info!("audio.stream_attached");
                         Self::pump_audio(socket, key, stream, &name, codec, sink, clock, id, status)
                             .await;
                     });
@@ -1509,7 +1509,7 @@ impl Session {
                     let control = match UdpSocket::bind(("::", 0)).await {
                         Ok(s) => Some(s),
                         Err(e) => {
-                            tracing::warn!("[airplay] control port not bound: {e}");
+                            tracing::warn!("audio.control_port_unbound err={e}");
                             None
                         }
                     };
@@ -1571,7 +1571,7 @@ impl Session {
         let key = match SymKey::from_bytes(&keys.media_input(stream_id as u64)) {
             Ok(key) => key,
             Err(e) => {
-                tracing::warn!("[mic] input key for stream {stream_id} is unusable: {e}");
+                tracing::warn!("mic.key_unusable stream={stream_id} err={e}");
                 return;
             }
         };
@@ -1588,14 +1588,15 @@ impl Session {
                     });
                 });
                 tracing::info!(
-                    "[mic] uplink open to {peer} ({:?} {}Hz/{}ch, {} samples per packet)",
+                    "mic.uplink_open peer={peer} codec={:?} rate_hz={} channels={} \
+                     samples_per_packet={}",
                     config.codec,
                     config.sample_rate,
                     config.channels,
                     config.samples_per_packet
                 );
             }
-            Err(e) => tracing::warn!("[mic] uplink to {peer} not opened: {e}"),
+            Err(e) => tracing::warn!("mic.uplink_failed peer={peer} err={e}"),
         }
     }
 
@@ -1640,7 +1641,7 @@ impl Session {
             }
             let len = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
             if len > 8 * 1024 * 1024 {
-                tracing::warn!("[video] implausible frame length {len}");
+                tracing::warn!("video.frame_rejected len={len} reason=implausible");
                 break;
             }
             // KeepAlive, ForceKeyFrame and friends carry no payload at all.
@@ -1668,7 +1669,7 @@ impl Session {
         // the socket, and the codec description and the keepalives are messages
         // too. Only the second is pictures.
         tracing::info!(
-            "[airplay] video stream closed after {frames} messages, {} frames",
+            "video.stream_closed messages={frames} frames={}",
             rx.frames()
         );
         status.with(|s| {
@@ -1816,11 +1817,11 @@ impl Session {
                     }
                     packets += 1;
                     // Once, and only to settle a question: if this appears right
-                    // after "audio stream attached" but sound comes seconds
+                    // after `audio.stream_attached` but sound comes seconds
                     // later, the wait is in the player. If this line itself is
                     // late, the wait was the phone opening the audio stream.
                     if packets == 1 {
-                        tracing::debug!("[airplay] audio: first packet handed to the player");
+                        tracing::debug!("audio.first_packet");
                     }
                     if now >= report_at {
                         // A burst is only counted once the next one starts, so a
@@ -1849,12 +1850,12 @@ impl Session {
                         // plays is this one not matching the codec's rate.
                         let source = in_rate * f64::from(FRAME_SAMPLES);
                         tracing::debug!(
-                            "[airplay] audio: {packets} packets, {missing} missing, \
-                             {out_of_order} out of order, {duplicates} duplicates, \
-                             worst gap {:.0} ms, {bursts} bursts of {lo}-{hi} \
-                             (avg {avg:.1}), {} held, {in_rate:.1} frames/s arrived \
-                             ({source:.0} Hz), {out_rate:.1} sent/s, {:.0} ms spent \
-                             (worst {:.0} ms)",
+                            "audio.stats packets={packets} missing={missing} \
+                             out_of_order={out_of_order} duplicates={duplicates} \
+                             worst_gap_ms={:.0} bursts={bursts} burst_lo={lo} burst_hi={hi} \
+                             burst_avg={avg:.1} held={} in_fps={in_rate:.1} \
+                             source_hz={source:.0} out_fps={out_rate:.1} decode_ms={:.0} \
+                             worst_decode_ms={:.0}",
                             worst_gap.as_secs_f64() * 1000.0,
                             queue.len(),
                             decode_time.as_secs_f64() * 1000.0,
@@ -1880,7 +1881,7 @@ impl Session {
         // in `/feedback` is one the phone keeps asking about.
         clock.lock().await.close(id);
         sink.push(StreamEvent::AudioStopped { stream });
-        tracing::info!("[airplay] audio stream closed after {packets} packets, {missing} missing");
+        tracing::info!("audio.stream_closed packets={packets} missing={missing}");
         // The counters only exist here, and the stream is over, so this is the
         // last moment they can be reported at all.
         status.with(|s| {
@@ -1985,7 +1986,7 @@ impl Session {
             target.set_port(p);
             let tx = socket.clone();
             let tx_clock = self.timing.clone();
-            tracing::info!("[airplay] driving clock sync to {target}");
+            tracing::info!("clock.driving target={target}");
             let ticker = tokio::spawn(async move {
                 let mut tick = tokio::time::interval(Duration::from_secs(1));
                 loop {

@@ -130,7 +130,7 @@ impl Usb {
 
         usb.bind()?;
         tracing::info!(
-            "[cl-usb] the device is on {}, presenting {}",
+            "usb.device controller={} identity={:?}",
             usb.controller,
             identity.describe()
         );
@@ -268,7 +268,7 @@ impl Usb {
                 root.display()
             )
         })?;
-        tracing::debug!("[cl-usb] took down the gadget an earlier run left");
+        tracing::debug!("usb.cleanup result=ok source=previous_run");
         Ok(())
     }
 
@@ -283,7 +283,7 @@ impl Usb {
         {
             return Ok(());
         }
-        tracing::warn!("[cl-usb] unloading {SQUATTER}, which holds the controller");
+        tracing::warn!("usb.squatter_unload module={SQUATTER}");
         match std::process::Command::new("modprobe")
             .args(["-r", SQUATTER])
             .status()
@@ -369,7 +369,7 @@ fn unmount_functionfs() {
         let e = io::Error::last_os_error();
         // EINVAL: nothing is mounted there. ENOENT: there is not even a path.
         if !matches!(e.raw_os_error(), Some(libc::EINVAL | libc::ENOENT)) {
-            tracing::warn!("[cl-usb] {MOUNTPOINT} could not be unmounted: {e}");
+            tracing::warn!("usb.umount_failed path={MOUNTPOINT} err={e}");
         }
     }
 }
@@ -397,7 +397,7 @@ fn empty(path: &Path) -> Result<()> {
         if kind.is_dir() {
             empty(&child)?;
             if let Err(e) = fs::remove_dir(&child) {
-                tracing::debug!("[cl-usb] {} stays for now: {e}", child.display());
+                tracing::debug!("usb.rmdir_refused path={} err={e}", child.display());
             }
         } else if kind.is_symlink() {
             fs::remove_file(&child).with_context(|| format!("removing {}", child.display()))?;

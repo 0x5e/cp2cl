@@ -75,7 +75,7 @@ impl EventSink {
         // the switch to Wi-Fi, and every report after that would be dropped.
         let was = std::mem::replace(&mut *self.counter.lock().await, 0);
         if was != 0 {
-            tracing::info!("[event] new event channel; write counter reset from {was}");
+            tracing::info!("event.channel_opened write_ctr_reset_from={was}");
         }
         let id = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         *self.writer.lock().await = Some((id, writer));
@@ -85,12 +85,12 @@ impl EventSink {
     pub async fn dispatch(self: &Arc<Self>, cmd: Command) -> std::io::Result<()> {
         let key = self.key.lock().await.clone();
         let Some(key) = key else {
-            tracing::warn!("[event] not paired yet — press ignored");
+            tracing::warn!("event.press_ignored reason=not_paired");
             return Ok(());
         };
         let mut guard = self.writer.lock().await;
         let Some((_, writer)) = guard.as_mut() else {
-            tracing::warn!("[event] phone has not opened the event channel yet");
+            tracing::warn!("event.press_ignored reason=no_channel");
             return Ok(());
         };
         let mut counter = self.counter.lock().await;
@@ -165,7 +165,7 @@ pub(crate) async fn pump_events(
 
         // Same framing as the control channel: [2B length][ciphertext][tag].
         if let Err(e) = open_frames(&read_key, &mut ctr, &mut enc, &mut plain) {
-            tracing::error!("[event] frame failed to open: {e}");
+            tracing::error!("event.frame_open_failed err={e}");
             break;
         }
 
@@ -176,24 +176,24 @@ pub(crate) async fn pump_events(
             // back — a loop that drowns the log in identical lines.
             if req.method.starts_with("RTSP/") || req.method.starts_with("HTTP/") {
                 if req.path != "200" {
-                    tracing::warn!("[event] response {} {}", req.path, req.version);
+                    tracing::warn!("event.response_unexpected path={} version={}", req.path, req.version);
                 }
                 continue;
             }
             tracing::info!(
-                "[event] <- {} {} ({}B)",
+                "event.request method={} path={} bytes={}",
                 req.method,
                 req.path,
                 req.body.len()
             );
             if let Err(e) = sink.reply(req.cseq()).await {
-                tracing::error!("[event] reply failed: {e}");
+                tracing::error!("event.reply_failed err={e}");
                 break;
             }
         }
     }
     sink.detach_writer(id).await;
-    tracing::info!("[airplay] event channel closed");
+    tracing::info!("event.channel_closed");
 }
 
 pub struct EventChannel<W> {
@@ -258,7 +258,7 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
         // "it worked" — which is why it exists, and why it is debug level
         // rather than `println!`: a finger drag is one line per pointer move.
         // `CP2CL_LOG_LEVEL=debug` brings it back.
-        tracing::debug!("[event] -> {cmd:?}");
+        tracing::debug!("event.sending cmd={cmd:?}");
 
         match cmd {
             Command::Play => self.media_momentary(MEDIA_PLAY).await?,

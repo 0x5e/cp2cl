@@ -98,7 +98,7 @@ where
     });
     describe_identity(&status, &identity);
 
-    tracing::info!("[cl-usb] waiting for a head unit to enumerate the device");
+    tracing::info!("usb.waiting_for_host");
 
     // The key the car's challenge is answered with, built in beside the icon and
     // the page. Read once rather than per session: it is one key, and a car
@@ -113,7 +113,7 @@ where
         Some(pem) => auth::Signer::from_pem(pem),
         None => {
             tracing::warn!(
-                "[cl] {} is not built in; the car's authentication is skipped",
+                "auth.key_missing file={} consequence=carlife_auth_skipped",
                 auth::KEY_FILE
             );
             None
@@ -143,7 +143,7 @@ where
                 status.with(|s| s.carlife.usb.enumerated = Some(true));
                 match bulk(&from_car, &to_car) {
                     Ok(pair) => {
-                        tracing::info!("[cl-usb] the host has enumerated us; starting the session");
+                        tracing::info!("usb.enumerated action=start_session");
                         if let Err(e) = session::run(
                             pair,
                             frames,
@@ -158,25 +158,25 @@ where
                         )
                         .await
                         {
-                            tracing::warn!("[cl] the session ended badly: {e:#}");
+                            tracing::warn!("usb.session_failed err={e:#}");
                         }
                     }
-                    Err(e) => tracing::error!("[cl-usb] the endpoints are not usable: {e:#}"),
+                    Err(e) => tracing::error!("usb.endpoints_unusable err={e:#}"),
                 }
             }
             Event::Disabled => {
                 status.with(|s| s.carlife.usb.enumerated = Some(false));
-                tracing::info!("[cl-usb] the host has gone");
+                tracing::info!("usb.host_gone");
             }
             Event::Accessory => {
                 status.with(|s| s.carlife.accessory = true);
-                tracing::info!("[cl-usb] the device is an accessory from here on")
+                tracing::info!("usb.accessory_mode state=on")
             }
         }
     }
 
     controlling.abort();
-    tracing::info!("[cl-usb] the control endpoint is gone");
+    tracing::info!("usb.control_closed");
     Ok(())
 }
 
@@ -202,7 +202,7 @@ async fn control_loop(
         if let Err(e) = ep0.read_exact(&mut raw).await {
             // Not a quiet ending: this endpoint is the only way a head unit
             // reaches us, so its loss is the loss of the CarLife half.
-            tracing::warn!("[cl-usb] the control endpoint stopped reading: {e:#}");
+            tracing::warn!("usb.control_read_failed err={e:#}");
             return;
         }
         match raw[8] {
@@ -221,11 +221,11 @@ async fn control_loop(
                     }
                     Ok(Answered::Nothing) => {}
                     Err(e) => {
-                        tracing::warn!("[cl-usb] a control request could not be answered: {e:#}")
+                        tracing::warn!("usb.control_unanswered err={e:#}")
                     }
                 }
             }
-            other => tracing::debug!("[cl-usb] control event {other}"),
+            other => tracing::debug!("usb.control_event event={other}"),
         }
     }
 }
@@ -246,7 +246,7 @@ async fn answer(
 ) -> Result<Answered> {
     let setup = desc::Setup::decode(raw).ok_or_else(|| anyhow!("a setup event with no setup packet"))?;
     tracing::info!(
-        "[cl-usb] control request {} {}, type {:#04x}, value {}, index {}, length {}",
+        "usb.control_request request={} direction={} type={:#04x} value={} index={} length={}",
         setup.request,
         setup.direction(),
         setup.request_type,
@@ -264,7 +264,7 @@ async fn answer(
             // transfer that this is the answer to.
             ep0.flush().await?;
             status.with(|s| s.carlife.aoa_version = Some(desc::AOA_VERSION));
-            tracing::info!("[cl-usb] answered with AOA {}", desc::AOA_VERSION);
+            tracing::info!("usb.aoa_version version={}", desc::AOA_VERSION);
             Ok(Answered::Nothing)
         }
         // One of the six strings the host wants the device to call itself.
@@ -272,7 +272,7 @@ async fn answer(
             let mut text = vec![0u8; setup.length as usize];
             ep0.read_exact(&mut text).await?;
             tracing::info!(
-                "[cl-usb] identifier {index}: {:?}",
+                "usb.ident index={index} text={:?}",
                 String::from_utf8_lossy(&text)
             );
             let text = String::from_utf8_lossy(&text).into_owned();
@@ -294,10 +294,7 @@ async fn answer(
             // it. See `complete`.
             complete(ep0).await?;
             if identity.is_accessory() {
-                tracing::info!(
-                    "[cl-usb] the host asked us to switch to accessory mode; we are already one, \
-                     so there is nothing to re-enumerate"
-                );
+                tracing::info!("usb.accessory_switch result=already_accessory");
                 return Ok(Answered::Nothing);
             }
             switch(usb, identity, asked).await?;
@@ -310,7 +307,8 @@ async fn answer(
                 let mut dropped = vec![0u8; setup.length as usize];
                 ep0.read_exact(&mut dropped).await?;
                 tracing::info!(
-                    "[cl-usb] that one is not acted on; its {} bytes are dropped",
+                    "usb.control_ignored request={} bytes_dropped={}",
+                    setup.request,
                     setup.length
                 );
             } else if setup.direction() == "in" {
@@ -320,10 +318,10 @@ async fn answer(
                 // answer USB has for a request a device does not implement.
                 let mut refused = [0u8; 1];
                 let _ = ep0.read(&mut refused).await;
-                tracing::info!("[cl-usb] that one is not acted on, and is refused");
+                tracing::info!("usb.control_ignored request={} action=refuse", setup.request);
             } else {
                 complete(ep0).await?;
-                tracing::info!("[cl-usb] that one is not acted on");
+                tracing::info!("usb.control_ignored request={} action=ignore", setup.request);
             }
             Ok(Answered::Nothing)
         }
@@ -361,10 +359,7 @@ async fn switch(usb: &Usb, identity: &mut desc::Identity, asked: &desc::Asked) -
     usb.reidentify(&accessory)
         .await
         .context("switching the device to its accessory form")?;
-    tracing::info!(
-        "[cl-usb] switched to an accessory ({}); the host will enumerate us again",
-        accessory.describe()
-    );
+    tracing::info!("usb.accessory_switch result=ok identity={}", accessory.describe());
     *identity = accessory;
     Ok(())
 }

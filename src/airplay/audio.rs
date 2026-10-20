@@ -90,8 +90,8 @@ impl AudioReceiver {
                 Some(decoder) => Some(decoder),
                 None => {
                     tracing::warn!(
-                        "[audio] AAC-LC at {rate} Hz in {channels} channel(s) is not something \
-                         this decoder takes; the stream's frames are dropped"
+                        "audio.codec_unsupported codec=aac-lc rate_hz={rate} channels={channels} \
+                         consequence=frames_dropped"
                     );
                     None
                 }
@@ -128,7 +128,7 @@ impl AudioReceiver {
         let sealed = &packet[RTP_HEADER_LEN..end];
 
         let Ok(payload) = open(&self.key, &nonce, sealed, aad) else {
-            tracing::warn!("[audio] packet failed to open");
+            tracing::warn!("audio.packet_open_failed");
             return None;
         };
         if payload.is_empty() {
@@ -188,10 +188,7 @@ impl AudioReceiver {
     fn say_dropped(&mut self) {
         if !self.dropped {
             self.dropped = true;
-            tracing::warn!(
-                "[audio] this stream's frames are being dropped; the car is being given no \
-                 sound from it"
-            );
+            tracing::warn!("audio.stream_dropped consequence=no_sound");
         }
     }
 }
@@ -262,7 +259,7 @@ impl Speech {
                 decimator: Decimator::default(),
             }),
             Err(e) => {
-                tracing::warn!("[audio] no Opus decoder for the prompt stream: {e}");
+                tracing::warn!("audio.prompt_decoder_missing err={e}");
                 None
             }
         }
@@ -278,7 +275,7 @@ impl Speech {
             Err(e) => {
                 // Once per frame at debug: the warning is the caller's, and says
                 // it once.
-                tracing::debug!("[audio] a prompt frame did not decode: {e}");
+                tracing::debug!("audio.prompt_frame_dropped err={e}");
                 return None;
             }
         };

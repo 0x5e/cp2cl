@@ -81,12 +81,12 @@ pub(crate) async fn run_session(
     let (path, ap) = match access_point(&cfg.wifi_iface) {
         Ok(found) => found,
         Err(e) => {
-            tracing::error!("[cp-wifi] {e}");
+            tracing::error!("wireless.ap_unusable err={e}");
             return Ended::Finished;
         }
     };
     tracing::info!(
-        "[cp-wifi] the phone is told to join {:?} on channel {} over {}, from {}",
+        "wireless.ap ssid={:?} channel={} iface={} config={}",
         ap.ssid,
         ap.channel,
         cfg.wifi_iface,
@@ -169,7 +169,7 @@ pub(crate) async fn run_session(
     });
 
     let ended = run_bringup(
-        "[cp-wifi]",
+        "wireless",
         peer,
         airplay_port,
         Some(ap.ssid.as_str()),
@@ -187,7 +187,7 @@ pub(crate) async fn run_session(
     let _ = accessory.await;
 
     if let Ended::Restart = ended {
-        tracing::info!("[cp-wifi] {peer} is being told to start over; dropping the Bluetooth link");
+        tracing::info!("wireless.restart peer={peer} action=drop_link");
     }
     ended
 }

@@ -33,7 +33,7 @@ pub async fn watch(
     status: Arc<Status>,
 ) {
     if let Err(e) = ready(&cfg) {
-        tracing::error!("[cp-wifi] {e}");
+        tracing::error!("wireless.ap_unusable err={e}");
         return;
     }
 
@@ -51,8 +51,8 @@ pub async fn watch(
             Ok(started) => started,
             Err(e) => {
                 tracing::error!(
-                    "[cp-wifi] bluetooth did not start on {}: {e}. Is bluetoothd \
-                     running, and is {} the adapter?",
+                    "wireless.bt_start_failed adapter={} err={e} hint=\"is bluetoothd running, \
+                     and is {} the adapter?\"",
                     cfg.bt_adapter,
                     cfg.bt_adapter
                 );
@@ -63,7 +63,7 @@ pub async fn watch(
     // unregisters them, so it has to be kept alive for as long as we are
     // listening — it is also what puts the controllers back at the end.
     tracing::info!(
-        "[cp-wifi] publishing the iAP service on {} as {:?}; pair the phone now",
+        "wireless.bt_service_up adapter={} name={:?} action=pair_phone",
         cfg.bt_adapter, cfg.name
     );
 
@@ -72,7 +72,7 @@ pub async fn watch(
     // one moment the controllers have to be put back. Without the handler the
     // default action still ends the process, only without the putting back.
     let mut stop = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .inspect_err(|e| tracing::warn!("[cp-wifi] no SIGTERM handler: {e}"))
+        .inspect_err(|e| tracing::warn!("wireless.signal_handler_missing err={e} consequence=no_restore"))
         .ok();
 
     loop {
@@ -92,7 +92,7 @@ pub async fn watch(
             break;
         };
         let peer = short(&peer_mac);
-        tracing::info!("[cp-wifi] {peer} opened a channel");
+        tracing::info!("wireless.channel_opened peer={peer}");
         // Over Bluetooth there is no serial to be had: the peer is an address
         // and nothing more, so that is what the page is given.
         status.with(|s| {
@@ -129,16 +129,16 @@ pub async fn watch(
         )
         .await;
         carrying.abort();
-        tracing::info!("[cp-wifi] {peer} done, waiting for the next one");
+        tracing::info!("wireless.channel_closed peer={peer} action=page_again");
         if let Ended::Restart = ended {
-            tracing::info!("[cp-wifi] waiting for the phone to open the channel again");
+            tracing::info!("wireless.waiting peer={peer} action=wait_channel");
         }
     }
 
     // Nothing is listening any more: the profiles went with the channel, and the
     // controllers go back to the name and discoverability they were found with.
     livi_runtime::bt::let_go(&conn, &cfg.bt_adapter, &held).await;
-    tracing::info!("[cp-wifi] the iAP service is down, {} is as it was", cfg.bt_adapter);
+    tracing::info!("wireless.bt_service_down adapter={} state=restored", cfg.bt_adapter);
 }
 
 /// This machine's Bluetooth address, which the phone checks against the one it

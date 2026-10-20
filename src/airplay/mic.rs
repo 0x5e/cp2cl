@@ -237,7 +237,7 @@ impl MicSink {
         let sealed = match seal(&uplink.key, &nonce, payload, &header[4..]) {
             Ok(sealed) => sealed,
             Err(e) => {
-                tracing::warn!("[mic] packet not sealed: {e}");
+                tracing::warn!("mic.seal_failed err={e}");
                 return;
             }
         };
@@ -252,7 +252,7 @@ impl MicSink {
         uplink.nonce += 1;
 
         if let Err(e) = uplink.socket.send(&packet).await {
-            tracing::warn!("[mic] packet not sent: {e}");
+            tracing::warn!("mic.send_failed err={e}");
         }
     }
 }

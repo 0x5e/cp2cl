@@ -52,14 +52,13 @@ async fn main() -> Result<()> {
     // cannot be used is reported by a log line, and that line needs somewhere
     // to go.
     tracing_subscriber::fmt()
+        .event_format(logging::Line)
         .with_env_filter(config::log_filter())
-        .with_timer(logging::Clock)
-        .with_target(false)
         .init();
 
     let cfg = Arc::new(Config::from_env());
 
-    tracing::info!("cp2cl — headless CarPlay receiver");
+    tracing::info!("process.started name=cp2cl");
 
     // Everything the page shows is reported from wherever it is learned, and
     // nothing reads it back: see `web::status`. Started before anything else so
@@ -78,10 +77,10 @@ async fn main() -> Result<()> {
     // bridge, and 80 is a port a machine not running as root cannot have.
     match TcpListener::bind(web::ADDR).await {
         Ok(listener) => {
-            tracing::info!("[web] the status page is on http://{}/", web::ADDR);
+            tracing::info!("web.listening url=http://{}/", web::ADDR);
             tokio::spawn(web::serve(listener, status.clone()));
         }
-        Err(e) => tracing::warn!("[web] no status page on {}: {e:#}", web::ADDR),
+        Err(e) => tracing::warn!("web.listen_failed addr={} err={e:#}", web::ADDR),
     }
 
     // The board's own CPU and memory, which nothing in the bridge measures: the
@@ -151,10 +150,7 @@ async fn main() -> Result<()> {
     // Worth saying out loud: nothing here draws a picture, and what the phone is
     // asked to render is the car's own screen — so nothing is rendered until a
     // car has said what that screen is.
-    tracing::info!(
-        "[cp2cl] the streams go to the car; the phone is asked to render at whatever \
-         screen the car says it has"
-    );
+    tracing::info!("bridge.ready sink=carlife screen_source=car");
 
     let pairings = Arc::new(Mutex::new(Pairings::load_or_create(None)?));
 
@@ -167,7 +163,7 @@ async fn main() -> Result<()> {
     // and nothing is accepted until there is a head unit on the other end.
     let (carplay, gate) = tokio::sync::watch::channel(false);
     tracing::debug!(
-        "[cp2cl] the CarPlay side starts {}",
+        "bridge.carplay_side state={}",
         if *carplay.borrow() { "open" } else { "shut" }
     );
 
@@ -176,11 +172,11 @@ async fn main() -> Result<()> {
     // has anything to advertise. Whether anything is accepted on it is the
     // gate's business.
     tracing::info!(
-        "[cp2cl] airplay receiver on {airplay_port}, {}",
+        "airplay.receiver port={airplay_port} state={}",
         if *carplay.borrow() {
             "listening"
         } else {
-            "held until the car's session is up"
+            "held"
         }
     );
     tokio::spawn(airplay::serve(
@@ -248,16 +244,13 @@ async fn main() -> Result<()> {
             if (*slot).unwrap_or_default() == wanted {
                 return;
             }
-            tracing::info!(
-                "[cp2cl] the car's screen is {width}x{height} at {fps} fps; \
-                 the phone is asked for the same"
-            );
+            tracing::info!("screen.named width={width} height={height} fps={fps}");
             *slot = Some(wanted);
             drop(slot);
             let _ = nudge.send(());
         }
     };
-    tracing::info!("[cp2cl] CarLife is on; the CarPlay side waits for the car");
+    tracing::info!("bridge.carlife_up carplay_side=waiting");
     // In the background, because the two sides are each other's condition: this
     // task is what opens the gate, and the watcher below is the only thing that
     // acts on it. Waiting for `serve` to return here would leave nobody to
@@ -284,8 +277,8 @@ async fn main() -> Result<()> {
             // `{e:#}` and not `{e}`: the outer message says what we were doing
             // and the causes under it hold the errno, which is the part that
             // says why.
-            tracing::error!("[cp2cl] CarLife stopped: {e:#}");
-            tracing::warn!("[cp2cl] carrying on with the CarPlay side on its own");
+            tracing::error!("bridge.carlife_stopped err={e:#}");
+            tracing::warn!("bridge.degraded mode=carplay_only");
             let _ = alone.send(true);
         }
     });
@@ -309,15 +302,15 @@ fn mfi_signer() -> Result<Box<dyn AuthCoprocessor + Send>> {
         assets::get("authentication/certificate.p7b"),
     ) else {
         tracing::warn!(
-            "[cp2cl] no MFi credentials built in; the phone will reject us at authentication. \
-             Put identity.pk8 + certificate.p7b in assets/authentication and rebuild."
+            "mfi.credentials_missing consequence=phone_rejects \
+             want=\"identity.pk8 + certificate.p7b in assets/authentication\""
         );
         return Ok(Box::new(NoCoprocessor));
     };
     let signer = LocalCoprocessor::load(key, cert)
         .context("the built-in MFi credentials could not be used")?;
     tracing::info!(
-        "[cp2cl] built-in MFi credentials loaded ({} + {} bytes)",
+        "mfi.credentials_loaded key_bytes={} cert_bytes={}",
         key.len(),
         cert.len()
     );
