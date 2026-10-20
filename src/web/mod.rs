@@ -10,7 +10,8 @@
 //! reads: a single JSON document holding every part of the bridge, which the
 //! page polls. There is no push and no state on this side — the page asks, and
 //! the answer is whatever the bridge last reported. See `status` for who reports
-//! what.
+//! what, and `device` for the one part of it that nobody reports: the board's own
+//! CPU and memory, sampled on a task of its own.
 //!
 //! `/api/cover` is the one answer that is not JSON: the song's picture, which
 //! the page draws rather than reads. It is fetched by the name of the cover —
@@ -23,6 +24,7 @@
 //! a WebSocket too, and that half went with the browser client that needed it —
 //! see the changelog — so the only feature asked for is HTTP/1.1 over tokio.
 
+pub mod device;
 mod status;
 
 // The parts of a report that are built by name rather than by assignment. The
@@ -203,6 +205,7 @@ mod tests {
         assert!(body.get("carlife").is_some());
         assert!(body.get("carplay").is_some());
         assert!(body.get("now_playing").is_some());
+        assert!(body.get("device").is_some());
     }
 
     /// What is playing is its own part of the page, and its cover comes from a
@@ -339,5 +342,33 @@ mod tests {
         let body = status.json();
         assert_eq!(body["carlife"]["physical"]["width_mm"], 407);
         assert_eq!(body["carlife"]["physical"]["height_mm"], 229);
+    }
+
+    /// The board's own CPU and memory are their own part of the page, and the
+    /// page writes both rows itself: a percent from the share the answer gives
+    /// it, and memory from the two byte counts.
+    #[test]
+    fn the_page_reads_the_device_from_its_own_part() {
+        assert!(page_text().contains("设备端"), "it has a heading of its own");
+        assert!(page_text().contains("data.device"), "and the page reads the part");
+        assert!(
+            page_text().contains("d.cpu_percent"),
+            "the page writes the percentage, from the share the answer gives it"
+        );
+        let status = Status::new();
+        assert!(
+            status.json()["device"]["memory_total"].is_null(),
+            "nothing sampled yet is not zero"
+        );
+
+        status.with(|s| {
+            s.device.cpu_percent = Some(37);
+            s.device.memory_used = Some(100 * 1024 * 1024);
+            s.device.memory_total = Some(496 * 1024 * 1024);
+        });
+        let body = status.json();
+        assert_eq!(body["device"]["cpu_percent"], 37);
+        assert_eq!(body["device"]["memory_used"], 100 * 1024 * 1024);
+        assert_eq!(body["device"]["memory_total"], 496 * 1024 * 1024);
     }
 }

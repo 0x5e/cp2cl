@@ -595,6 +595,8 @@ side. **正在播放** is what the two agree on: the song the car's panel is sho
 which belongs to neither half and is the one part of the page someone sitting in
 the car can check against what they see. It is shown only while both ends are
 up — a song on a page whose halves are down describes a moment that has passed.
+**设备端** is the board itself, CPU share and memory in use: neither end, and the
+one section that says whether the box is keeping up.
 
 The port is not a setting, and neither is the page: it is one HTML file with no
 build step, compiled into the binary along with its stylesheet. There is nothing
@@ -615,7 +617,7 @@ every two seconds and redraws from what comes back. That endpoint is the whole
 API, and it answers with the same snapshot the page shows:
 
 ```json
-{ "carlife": { ... }, "carplay": { ... }, "now_playing": { ... } }
+{ "carlife": { ... }, "carplay": { ... }, "now_playing": { ... }, "device": { ... } }
 ```
 
 The cover is the one thing not in it. It is a JPEG, fetched from `GET
@@ -852,12 +854,13 @@ this a derivative work, so cp2cl inherits that.
 | `src/navigation.rs` | where the phone is going, as the fields the car's turn-by-turn strip is told |
 | `src/commands.rs` | the vocabulary of input |
 | `src/web/status.rs` | the snapshot both halves report into, and the JSON behind `/api/status` |
+| `src/web/device.rs` | the board's own CPU and memory, read from `/proc` on a task of its own |
 | `src/web/mod.rs` | the status page's router and listener |
 | `src/assets.rs` | the lookup over `assets/`: what the binary carries besides code |
 | `assets/` | the icons, the channel table and the status page — `build.rs` includes every file here, so adding one is enough to be able to ask for it by name |
 | `assets/icons/` | the icon `GET /info` puts on the phone's screen, two sizes per make, `Default-*` for the rest |
 | `assets/carlife_channel_map.json` | the head unit's channel number, and the label worth showing for it |
-| `assets/web/index.html` | the page itself — one file, two sections, polling |
+| `assets/web/index.html` | the page itself — one file, four sections, polling |
 | `assets/web/vendor/weui.min.css` | its stylesheet, vendored so the page needs no network |
 | `docker/` | the image that cross-compiles for the board, and the CMake toolchain it needs |
 | `board/` | the firmware half: the access point and its unit, laid out as the filesystem they land on |

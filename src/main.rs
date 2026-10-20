@@ -84,6 +84,10 @@ async fn main() -> Result<()> {
         Err(e) => tracing::warn!("[web] no status page on {}: {e:#}", web::ADDR),
     }
 
+    // The board's own CPU and memory, which nothing in the bridge measures: the
+    // page's last section, and the only one sampled rather than reported.
+    tokio::spawn(web::device::watch(status.clone()));
+
     // Ask for a free port rather than picking one: whatever we get is what gets
     // advertised to the phone, so there is no way for the two to disagree.
     let listener = TcpListener::bind(("::", 0))

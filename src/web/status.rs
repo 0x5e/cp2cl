@@ -21,6 +21,8 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
+use super::device::Device;
+
 /// How many strings a head unit may name the device with. The protocol names
 /// six; see `carlife::desc::Asked`.
 const ASKED: usize = 6;
@@ -137,6 +139,9 @@ pub struct Snapshot {
     /// panel is showing, so it is also the only part of this a person sitting
     /// in the car can see for themselves.
     pub now_playing: NowPlaying,
+    /// The machine itself, which is reported by the one module that reads
+    /// `/proc` rather than by a part of the bridge — see `web::device`.
+    pub device: Device,
 }
 
 /// The coding of the video stream, as far as the stream says so itself.
@@ -461,6 +466,7 @@ impl Snapshot {
             "carlife": self.carlife.json(&self.video),
             "carplay": self.carplay.json(&self.video),
             "now_playing": self.now_playing.json(),
+            "device": self.device.json(),
         })
     }
 }

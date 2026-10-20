@@ -7,9 +7,6 @@
 <title>cp2cl 状态</title>
 <link rel="stylesheet" href="/vendor/weui.min.css">
 <style>
-  /* 这一页没有横向内容，横向手势留给浏览器：整页左右滑不再跟着回弹。
-     只动 overscroll，不碰 overflow：给 html/body 加 overflow-x 会让 body
-     变成滚动容器，手机上整页就划不动了。 */
   html,body{overscroll-behavior-x:none}
   .page{padding:4px 0 calc(28px + env(safe-area-inset-bottom))}
   .weui-cells__title{margin-top:22px}
@@ -20,7 +17,6 @@
   .weui-cell__ft.none{opacity:.35}
   .weui-cell_block{align-items:flex-start}
   .line{padding:2px 0}
-  /* 封面与字段名同一行：字段名贴顶，图靠右，行高由图决定。 */
   .weui-cell_cover{align-items:flex-start}
   .cover{display:block;max-width:100%;max-height:200px;border-radius:6px;margin:2px 0 0 auto}
   .v-ok{color:#07c160}
@@ -37,6 +33,8 @@
   <div class="weui-cells" id="carplay"></div>
   <div class="weui-cells__title" id="playing-title">正在播放</div>
   <div class="weui-cells" id="playing"></div>
+  <div class="weui-cells__title">设备端</div>
+  <div class="weui-cells" id="device"></div>
   <p class="stamp" id="stamp">正在读取…</p>
 </div>
 <script>
@@ -56,29 +54,35 @@ function size(s) {
 function pair(a, b) {
   return a === null || a === undefined ? null : (b === null || b === undefined ? String(a) : a + " / " + b);
 }
-/* 秒数写成「分:秒」。车机面板上就是这么显示的，这里也照这个形状。 */
 function clock(seconds) {
   if (seconds === null || seconds === undefined) return null;
   const total = Math.max(0, Math.round(Number(seconds)));
   return Math.floor(total / 60) + ":" + String(total % 60).padStart(2, "0");
 }
+function percent(v) {
+  return v === null || v === undefined ? null : v + "%";
+}
+function megabytes(bytes) {
+  return Math.round(Number(bytes) / 1048576);
+}
+function memory(d) {
+  if (!d.memory_total) return null;
+  const used = megabytes(d.memory_used);
+  const total = megabytes(d.memory_total);
+  const share = Math.round(d.memory_used / d.memory_total * 100);
+  return used + "MB / " + total + "MB (" + share + "%)";
+}
 
-/* 编码格式的细节：后端给了什么就串什么，没给的一律不写。
-   一段就是一串短词，两段用的是同一个函数，所以两边的写法一致。 */
 function detail(...parts) {
   const shown = parts.filter(p => p !== null && p !== undefined && p !== "");
   return shown.length ? shown.join(" ") : null;
 }
-/* 视频：编码名之后是档次与级别，两个都是后端从码流描述里读出来的。
-   级别写成 L3.1：一行要在手机屏上放得下，Level 那五个字母不值当。 */
 function video(v) {
   return detail(v.codec, v.profile, v.level && "L" + v.level);
 }
-/* 采样率按千赫写：44100 少两个字符，读起来还更快。 */
 function rate(hz) {
   return hz ? Math.round(hz / 10) / 100 + " kHz" : null;
 }
-/* 声道的名字用英文：这一行里全是拉丁字母与数字，中文只在这里冒头反而更扎眼。 */
 function channels(n) {
   if (!n) return null;
   if (n === 1) return "Mono";
@@ -90,8 +94,6 @@ function audioStream(a) {
   return (a.name || a.stream_type) + ":" + (body ? " " + body : "");
 }
 
-/* 渠道号 → 厂商名映射（来自逆向报告 CARLIFE_AUTH.md §2.4）。
-   找不到映射时只显示渠道号本身。 */
 const CHANNEL_MAP = {
   "20012100": "DUAL_AUDIO_TRACK",
   "20022100": "HYUNDAI", "20022101": "LFSONATA", "20022102": "CFMISTRA",
@@ -136,16 +138,11 @@ function channelLabel(raw) {
   return name ? raw + " (" + name + ")" : raw;
 }
 
-/* 每一栏是否有内容，只看这一栏的会话状态。
-   手机端以 airplay 连接存在为准：对端的地址是连接打开时写下的，断开时连同整段状态一起清掉。 */
 const CARLIFE_UP = d => d.session_up === true;
 const CARPLAY_UP = d => !!(d.airplay && d.airplay.peer);
 
-/* 正在播放是两端的合流：一边断了，这一栏说的就不再是眼下的事，索性不显示。 */
 const BOTH_UP = d => CARLIFE_UP(d.carlife) && CARPLAY_UP(d.carplay);
 
-/* 一行：标签、取值、状态（ok / warn / bad，决定右侧颜色）。
-   第一行是会话状态，也是这一栏的开关，所以它自己不受开关约束。 */
 const CARLIFE_ROWS = [
   ["会话状态", d => bool(CARLIFE_UP(d), "已建立", "未建立"), d => CARLIFE_UP(d) ? "ok" : null],
   ["厂商 / 型号", d => pair(d.asked[0], d.asked[1])],
@@ -155,14 +152,11 @@ const CARLIFE_ROWS = [
   ["CUID", d => d.statistic && d.statistic.cuid],
   ["渠道号", d => d.statistic && channelLabel(d.statistic.channel)],
   ["分辨率", d => size(d.agreed)],
-  /* 视频是手机那条流原样转过来的，所以档次与级别也是手机的。 */
   ["视频编码", d => video(d.video)],
-  /* 音频是解码后的 PCM，位宽、采样率与声道数都是我们告诉车机的那三个数。 */
   ["音频编码", d => d.media
     ? detail(d.media.bits ? "PCM " + d.media.bits + "-bit" : "PCM",
              rate(d.media.rate), channels(d.media.channels))
     : null],
-  /* 车机那一侧的物理尺寸：车机的像素乘以面板密度，密度是本机设的，见 CP2CL_PPI。 */
   ["物理尺寸", d => d.physical
     ? d.physical.width_mm + " × " + d.physical.height_mm + " mm"
     : null],
@@ -181,9 +175,11 @@ const CARPLAY_BLOCKS = [
   ["音频编码", d => d.audio.map(audioStream)],
 ];
 
-/* 正在播放：车机面板上的那首歌，也就是我们发给它的那一条。
-   这一栏没有自己的「会话状态」——没有歌的时候每条都是「—」。
-   封面单独取，URL 带着封面的名字（内容的哈希），换了封面才重新下载。 */
+const DEVICE_ROWS = [
+  ["CPU 占用率", d => percent(d.cpu_percent)],
+  ["内存占用", d => memory(d)],
+];
+
 const PLAYING_ROWS = [
   ["来源", d => d.source],
   ["歌曲", d => d.song],
@@ -192,7 +188,6 @@ const PLAYING_ROWS = [
   ["时长", d => clock(d.duration_s)],
 ];
 
-/* 一个单元格：标签在左，取值在右；取值多行时改为上下排布。 */
 function cell(label, value, tone, block) {
   const row = document.createElement("div");
   row.className = block ? "weui-cell weui-cell_block" : "weui-cell";
@@ -237,8 +232,6 @@ function fill(host, rows, blocks, data, up) {
   }
 }
 
-/* 这一栏只在内容变了的时候重画：每两秒重建一次 <img> 会让封面闪，
-   也会让浏览器重新解一次那张图。 */
 let playingKey = "";
 let coverShown = null;
 let coverImg = null;
@@ -258,7 +251,6 @@ function renderPlaying(playing) {
   host.appendChild(coverCell(playing.cover));
 }
 
-/* 封面和其余几行同形：标签在左、图在右，标签贴顶而不是随图居中。 */
 function coverCell(cover) {
   const row = document.createElement("div");
   row.className = "weui-cell weui-cell_cover";
@@ -280,8 +272,6 @@ function coverCell(cover) {
       coverImg.className = "cover";
       coverImg.alt = "封面";
     }
-    /* 同一张图不重新取：名字是这张图内容的哈希，名字没变就是同一张。
-       没有名字就不取——后端只认名字，取回来也只会是一张对不上号的图。 */
     if (cover.id && coverShown !== cover.id) {
       coverShown = cover.id;
       coverImg.src = "/api/cover?id=" + encodeURIComponent(cover.id);
@@ -297,8 +287,8 @@ function coverCell(cover) {
 function render(data) {
   fill(document.getElementById("carlife"), CARLIFE_ROWS, CARLIFE_BLOCKS, data.carlife, CARLIFE_UP(data.carlife));
   fill(document.getElementById("carplay"), CARPLAY_ROWS, CARPLAY_BLOCKS, data.carplay, CARPLAY_UP(data.carplay));
+  fill(document.getElementById("device"), DEVICE_ROWS, [], data.device || {}, true);
 
-  /* 只有两端都连着才显示这一栏，标题一起收起来。 */
   const both = BOTH_UP(data);
   for (const id of ["playing-title", "playing"]) {
     document.getElementById(id).style.display = both ? "" : "none";
@@ -317,13 +307,11 @@ async function tick() {
     stamp.textContent = "最后更新 " +
       new Date().toLocaleTimeString("zh-CN", { hour12: false });
   } catch (e) {
-    // 读不到就是读不到：说清楚比留一个空页面有用。
     stamp.className = "stamp v-bad";
     stamp.textContent = "读取失败：" + e.message;
   }
 }
 
-/* 页面在后台时不必轮询：这块板子还要跑桥接。 */
 function schedule() {
   if (document.hidden) return;
   tick();
