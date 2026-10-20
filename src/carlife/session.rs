@@ -45,8 +45,10 @@ const HU_VIDEO_ENCODER_START: u32 = 0x0001_8009;
 const HU_VIDEO_ENCODER_PAUSE: u32 = 0x0001_800A;
 const HU_VIDEO_ENCODER_RESET: u32 = 0x0001_800B;
 const HU_VIDEO_ENCODER_FRAME_RATE_CHANGE: u32 = 0x0001_800C;
+const HU_CAR_GPS: u32 = 0x0001_8010;
 const HU_GO_TO_FOREGROUND: u32 = 0x0001_8025;
 const HU_STATISTIC_INFO: u32 = 0x0001_8027;
+const HU_CAR_DATA_SUBSCRIBE_DONE: u32 = 0x0001_8032;
 const HU_DATA_SUBSCRIBE: u32 = 0x0001_8043;
 const HU_DATA_SUBSCRIBE_START: u32 = 0x0001_8045;
 const HU_DATA_SUBSCRIBE_STOP: u32 = 0x0001_8046;
@@ -63,6 +65,8 @@ const VIDEO_ENCODER_INIT_DONE: u32 = 0x0001_0008;
 const VIDEO_ENCODER_FRAME_RATE_CHANGE_DONE: u32 = 0x0001_000D;
 const MODULE_STATUS: u32 = 0x0001_0026;
 const NAVI_NEXT_TURN_INFO: u32 = 0x0001_0030;
+const CAR_DATA_SUBSCRIBE: u32 = 0x0001_0031;
+const CAR_DATA_SUBSCRIBE_START: u32 = 0x0001_0033;
 const MEDIA_INFO: u32 = 0x0001_0035;
 const DATA_SUBSCRIBE_DONE: u32 = 0x0001_0044;
 const MD_AUTHEN_RESPONSE: u32 = 0x0001_0049;
@@ -396,6 +400,7 @@ where
         // session — a car plugged out and back in finds what the first one did.
         auth,
         next_tick: Instant::now(),
+        position_seen: false,
         up: false,
         last_touch: None,
         status,
@@ -702,6 +707,10 @@ struct Session<'a, W> {
     /// `None` is a session that cannot answer it, which is said out loud when the
     /// car asks.
     auth: Option<auth::Signer>,
+    /// Whether the car has sent a position yet. The first one is worth a line at
+    /// `info`, because it is the evidence that the subscription worked; every
+    /// one after it is the same report again and belongs in `debug`.
+    position_seen: bool,
     next_tick: Instant,
     up: bool,
     /// Where the finger was the last time the car said. A release has to name it
@@ -797,6 +806,11 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // The car will not configure anything until it is asked, and it
                 // has a two-minute limit on sending the statistics above.
                 self.send(FEATURE_CONFIG_REQUEST, &[]).await?;
+                // And the same question a phone asks right after that one: what
+                // vehicle data the car has. Nothing waits for a route to start —
+                // the answer is a property of the car, and a fix is worth having
+                // whether or not anything is being guided along it.
+                self.send(CAR_DATA_SUBSCRIBE, &[]).await?;
             }
             HU_FEATURE_CONFIG_RESPONSE => {
                 let configs = proto::decode_feature_configs(&message.body);
@@ -804,6 +818,67 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     tracing::info!("cl.setting key={key} value={value:?}");
                 }
                 self.status.with(|s| s.carlife.features = configs);
+            }
+            // The car's answer to the question asked with the statistics: the
+            // modules it can report. GPS is the one this bridge consumes, and it
+            // is asked to start — the other five are the phone's own navigation's
+            // business and nothing here reads them.
+            HU_CAR_DATA_SUBSCRIBE_DONE => {
+                let offered = proto::decode_vehicle_infos(&message.body);
+                let modules: Vec<i32> = offered.iter().map(|info| info.module).collect();
+                let gps = offered.iter().find(|info| info.module == proto::CAR_DATA_GPS);
+                match gps {
+                    // The flag is the coordinate system, and a phone only takes a
+                    // GPS module in one of the two it knows — so a car naming a
+                    // third is not asked for the reports it would refuse anyway.
+                    Some(info) if matches!(info.flag, 1 | 2) => {
+                        tracing::info!(
+                            "cl.car_data_offered modules={modules:?} action=subscribe \
+                             module={} flag={}",
+                            proto::CAR_DATA_GPS,
+                            info.flag
+                        );
+                        let body = proto::car_data_subscribe_start(
+                            proto::CAR_DATA_GPS,
+                            info.flag,
+                            0,
+                        );
+                        self.send(CAR_DATA_SUBSCRIBE_START, &body).await?;
+                    }
+                    Some(info) => tracing::warn!(
+                        "cl.car_data_offered modules={modules:?} action=none \
+                         reason=coordinate_system flag={}",
+                        info.flag
+                    ),
+                    None => {
+                        tracing::info!("cl.car_data_offered modules={modules:?} action=none")
+                    }
+                }
+            }
+            // The car's position, at the rate it reports at. Every field is read
+            // in the units the message carries, and none of them are converted
+            // here.
+            HU_CAR_GPS => {
+                let fix = proto::decode_car_gps(&message.body);
+                let latitude = f64::from(fix.latitude) / 1e6;
+                let longitude = f64::from(fix.longitude) / 1e6;
+                if !self.position_seen {
+                    self.position_seen = true;
+                    tracing::info!(
+                        "cl.car_gps_received antenna={} latitude={latitude:.6} \
+                         longitude={longitude:.6}",
+                        fix.antenna_state
+                    );
+                }
+                tracing::debug!(
+                    "cl.car_gps antenna={} latitude={latitude:.6} longitude={longitude:.6} \
+                     height={} speed={} heading={} accuracy_m={}",
+                    fix.antenna_state,
+                    fix.height,
+                    fix.speed,
+                    fix.heading,
+                    fix.hor_pos_error
+                );
             }
             HU_AUTHEN_REQUEST => {
                 let challenge = proto::decode_authen_request(&message.body).unwrap_or_default();
@@ -1628,6 +1703,7 @@ mod tests {
             self.send(HU_STATISTIC_INFO, &statistics("20062100")).await;
             self.expect(MD_AUTHEN_RESULT).await;
             self.expect(FEATURE_CONFIG_REQUEST).await;
+            self.expect(CAR_DATA_SUBSCRIBE).await;
 
             self.send(HU_VIDEO_ENCODER_INIT, &proto::video_encoder_info(asked))
                 .await;
@@ -1682,6 +1758,47 @@ mod tests {
             height: 720,
             frame_rate: 30,
         }
+    }
+
+    /// What the car answers when asked what vehicle data it has: a count and
+    /// that many `{moduleID, flag, frequency}` entries.
+    fn vehicle_list(modules: &[(i32, i32)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        proto::put_int(&mut out, 1, modules.len() as i32);
+        for (module, flag) in modules {
+            let mut entry = Vec::new();
+            proto::put_int(&mut entry, 1, *module);
+            proto::put_int(&mut entry, 2, *flag);
+            proto::put_int(&mut entry, 3, 0);
+            proto::put_bytes(&mut out, 2, &entry);
+        }
+        out
+    }
+
+    /// A fix at 30.317880 N, 120.128094 E, 45.6 m up and moving at 12.34 km/h.
+    fn position() -> Vec<u8> {
+        position_with(1)
+    }
+
+    /// The same report with the antenna state given: `-1` is a receiver that has
+    /// lost its satellites, and it keeps reporting.
+    fn position_with(antenna_state: i32) -> Vec<u8> {
+        let mut body = Vec::new();
+        proto::put_int(&mut body, 1, antenna_state);
+        proto::put_int(&mut body, 3, 30_317_880);
+        proto::put_int(&mut body, 4, 120_128_094);
+        proto::put_int(&mut body, 5, 456);
+        proto::put_int(&mut body, 6, 1234);
+        proto::put_int(&mut body, 7, 900);
+        proto::put_int(&mut body, 8, 2026);
+        proto::put_int(&mut body, 9, 10);
+        proto::put_int(&mut body, 10, 20);
+        proto::put_int(&mut body, 11, 14);
+        proto::put_int(&mut body, 12, 33);
+        proto::put_int(&mut body, 13, 57);
+        proto::put_int(&mut body, 20, 35);
+        proto::put_int(&mut body, 21, 20);
+        body
     }
 
     /// Where `/info` reads the channel number from. A test that is about
@@ -3056,6 +3173,60 @@ mod tests {
         )
         .await
             .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    /// The car's position is asked for as soon as the car has said what it is,
+    /// and not when something starts being guided: the answer is a property of
+    /// the car, and the fix is worth having either way.
+    #[tokio::test]
+    async fn the_car_is_asked_for_its_position_as_soon_as_it_is_known() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+
+            // The question goes out next to the feature-config request, which is
+            // where a phone sends it.
+            car.send(HU_STATISTIC_INFO, &statistics("20062100")).await;
+            car.expect(MD_AUTHEN_RESULT).await;
+            car.expect(FEATURE_CONFIG_REQUEST).await;
+            car.expect(CAR_DATA_SUBSCRIBE).await;
+
+            // A car with a GPS in WGS84, and one module it cannot report.
+            car.send(HU_CAR_DATA_SUBSCRIBE_DONE, &vehicle_list(&[(0, 1), (1, 0)]))
+                .await;
+            let start = car.expect(CAR_DATA_SUBSCRIBE_START).await;
+            assert_eq!(
+                start.body,
+                proto::car_data_subscribe_start(proto::CAR_DATA_GPS, 1, 0)
+            );
+
+            car.send(HU_CAR_GPS, &position()).await;
+            // A message the session answers, so that the fix is known to have
+            // been read by the time the car's half is looked at.
+            car.send(HU_GO_TO_FOREGROUND, &[]).await;
+            car.expect(GO_TO_FOREGROUND_RESPONSE).await;
+        });
+
+        run(
+            device,
+            &Frames::None,
+            &cfg,
+            None,
+            &mut |_, _, _| {},
+            no_icon(),
+            EventSink::new(),
+            &mut carplay,
+            &no_tap(),
+            Arc::new(Status::new()),
+        )
+        .await
+        .expect("the session ends cleanly");
         car.await.unwrap();
     }
 

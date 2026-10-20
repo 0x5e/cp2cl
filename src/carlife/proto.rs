@@ -403,6 +403,28 @@ pub fn data_subscribe_done(modules: &[(i32, bool)]) -> Vec<u8> {
     out
 }
 
+/// `MSG_CMD_CAR_DATA_SUBSCRIBE_START` — this device asking the car to start
+/// reporting one module of its own data.
+///
+/// The body is a bare `CarlifeVehicleInfo` and not the list the same family's
+/// answer carries: that is what the phone sends, and the head unit's own parser
+/// reads it as one entry (`CarLife-Android-Vehicle`'s `CarlifeActivity`).
+/// `frequency` is 0 for the same reason — it is what the phone sends, and the
+/// reference head unit reads it as "on every change".
+pub fn car_data_subscribe_start(module: i32, flag: i32, frequency: i32) -> Vec<u8> {
+    let mut out = Vec::new();
+    put_int(&mut out, 1, module);
+    put_int(&mut out, 2, flag);
+    put_int(&mut out, 3, frequency);
+    out
+}
+
+/// `ModuleID.CAR_DATA_GPS`: the car's own position, which is the one module this
+/// bridge has anything to do with. The other five — speed, gyroscope,
+/// acceleration, gear, oil — are read by the phone's own navigation and are left
+/// alone.
+pub const CAR_DATA_GPS: i32 = 0;
+
 // --------------------------------------------------------- what comes down ---
 
 pub fn decode_protocol_version(body: &[u8]) -> (i32, i32) {
@@ -448,6 +470,97 @@ pub fn decode_statistic_info(body: &[u8]) -> StatisticInfo<'_> {
         connect_count: int_of(body, 5).unwrap_or(0) as i32,
         connect_success_count: int_of(body, 6).unwrap_or(0) as i32,
         connect_time: int_of(body, 7).unwrap_or(0) as i32,
+    }
+}
+
+/// One entry in the car's answer to `MSG_CMD_CAR_DATA_SUBSCRIBE`: a module it can
+/// report, the system its coordinates are in, and the rate it means to report at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VehicleInfo {
+    /// `ModuleID` — 0 GPS, 1 vehicle speed, 2 gyroscope, 3 acceleration, 4 gear,
+    /// 5 oil.
+    pub module: i32,
+    /// For GPS this is the coordinate system: 1 is WGS84 and 2 is GCJ-02. The
+    /// phone treats a GPS module with any other value as one the car cannot
+    /// actually report, and so does this device.
+    pub flag: i32,
+    /// Hertz, or 0 for "on change".
+    pub frequency: i32,
+}
+
+/// `MSG_CMD_CAR_DATA_SUBSCRIBE_DONE`: what the car has to report. Its body is a
+/// count and that many `CarlifeVehicleInfo` entries, which is the same shape the
+/// question arrived in — see `decode_data_subscribe`, which reads the other two
+/// messages of the family.
+pub fn decode_vehicle_infos(body: &[u8]) -> Vec<VehicleInfo> {
+    let mut out = Vec::new();
+    let mut fields = Fields::new(body);
+    while let Some(field) = fields.next_field() {
+        let Field::Bytes { number: 2, value } = field else {
+            continue;
+        };
+        out.push(VehicleInfo {
+            module: int_of(value, 1).unwrap_or(0) as i32,
+            flag: int_of(value, 2).unwrap_or(0) as i32,
+            frequency: int_of(value, 3).unwrap_or(0) as i32,
+        });
+    }
+    out
+}
+
+/// `MSG_CMD_CAR_GPS`: the car's position, in the units the message is defined in.
+///
+/// Every field is `required` in the car's own schema, so a body that stops early
+/// is a body holding zeroes, and that is how it is read. The units are the
+/// guide's: coordinates in a millionth of a degree, height in a tenth of a metre,
+/// speed in a hundredth of a kilometre an hour, and heading in a tenth of a
+/// degree. Nothing here is converted; the page turns them into degrees and
+/// metres, and so would anything that hands the fix on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CarGps {
+    /// 1 while the receiver has a fix. A car with none sends `-1`, which is the
+    /// unsigned field's `0xFFFF_FFFF`.
+    pub antenna_state: i32,
+    pub latitude: i32,
+    pub longitude: i32,
+    pub height: i32,
+    pub speed: u32,
+    pub heading: u32,
+    /// Metres, and the two the receiver is least likely to fill.
+    pub hor_pos_error: u32,
+    pub vert_pos_error: u32,
+    /// The date and time of the fix, in UTC — a GPS receiver reports UTC, and
+    /// nothing in the message names a zone.
+    pub year: i32,
+    pub month: i32,
+    pub day: i32,
+    pub hour: i32,
+    pub minute: i32,
+    pub second: i32,
+    /// The same instant in milliseconds since the epoch, which is the field the
+    /// phone's own consumer reads.
+    pub timestamp_ms: u64,
+}
+
+pub fn decode_car_gps(body: &[u8]) -> CarGps {
+    let int = |number: u32| int_of(body, number).unwrap_or(0) as i32;
+    let uint = |number: u32| int_of(body, number).unwrap_or(0) as u32;
+    CarGps {
+        antenna_state: int(1),
+        latitude: int(3),
+        longitude: int(4),
+        height: int(5),
+        speed: uint(6),
+        heading: uint(7),
+        year: int(8),
+        month: int(9),
+        day: int(10),
+        hour: int(11),
+        minute: int(12),
+        second: int(13),
+        hor_pos_error: uint(20),
+        vert_pos_error: uint(21),
+        timestamp_ms: int_of(body, 25).unwrap_or(0) as u64,
     }
 }
 
@@ -633,6 +746,101 @@ mod tests {
         assert_eq!(info.channel, "20000000");
         assert_eq!(info.connect_count, 3);
         assert_eq!(info.connect_time, 900);
+    }
+
+    /// The car's answer to the data question is a count and that many entries,
+    /// and each entry is the module, its coordinate system and its rate.
+    #[test]
+    fn the_cars_data_answer_is_read_entry_by_entry() {
+        let mut body = Vec::new();
+        put_int(&mut body, 1, 2);
+        for (module, flag, frequency) in [(CAR_DATA_GPS, 1, 0), (1, 0, 10)] {
+            let mut entry = Vec::new();
+            put_int(&mut entry, 1, module);
+            put_int(&mut entry, 2, flag);
+            put_int(&mut entry, 3, frequency);
+            put_bytes(&mut body, 2, &entry);
+        }
+
+        assert_eq!(
+            decode_vehicle_infos(&body),
+            vec![
+                VehicleInfo {
+                    module: 0,
+                    flag: 1,
+                    frequency: 0
+                },
+                VehicleInfo {
+                    module: 1,
+                    flag: 0,
+                    frequency: 10
+                },
+            ]
+        );
+        // A car that reports nothing is an empty answer, not a missing one.
+        assert!(decode_vehicle_infos(&[]).is_empty());
+    }
+
+    /// The subscribe message is one bare entry, and the head unit reads it as
+    /// one — a list here would be read as a count with no entries behind it.
+    #[test]
+    fn the_subscription_is_a_single_entry_and_not_a_list() {
+        assert_eq!(
+            car_data_subscribe_start(CAR_DATA_GPS, 1, 0),
+            vec![0x08, 0x00, 0x10, 0x01, 0x18, 0x00]
+        );
+    }
+
+    /// Every field the car fills is read in the unit the guide states, including
+    /// the negative coordinate and the `-1` that stands for "no fix".
+    #[test]
+    fn a_position_is_read_in_the_units_the_message_is_defined_in() {
+        let mut body = Vec::new();
+        // `antennaState` is a `uint32`, so "no fix" is its `0xFFFF_FFFF` and not
+        // a signed -1.
+        tag(&mut body, 1, 0);
+        put_varint(&mut body, 0xFFFF_FFFF);
+        put_int(&mut body, 3, 30_317_880);
+        put_int(&mut body, 4, -120_128_094);
+        put_int(&mut body, 5, 456);
+        put_int(&mut body, 6, 1234);
+        put_int(&mut body, 7, 900);
+        put_int(&mut body, 8, 2026);
+        put_int(&mut body, 9, 10);
+        put_int(&mut body, 10, 20);
+        put_int(&mut body, 11, 14);
+        put_int(&mut body, 12, 33);
+        put_int(&mut body, 13, 57);
+        put_int(&mut body, 20, 35);
+        put_int(&mut body, 21, 20);
+        // `timeStamp` is a `uint64`, which is wider than anything else here.
+        tag(&mut body, 25, 0);
+        put_varint(&mut body, 1_761_065_637_000);
+
+        assert_eq!(
+            decode_car_gps(&body),
+            CarGps {
+                antenna_state: -1,
+                latitude: 30_317_880,
+                longitude: -120_128_094,
+                height: 456,
+                speed: 1234,
+                heading: 900,
+                hor_pos_error: 35,
+                vert_pos_error: 20,
+                year: 2026,
+                month: 10,
+                day: 20,
+                hour: 14,
+                minute: 33,
+                second: 57,
+                timestamp_ms: 1_761_065_637_000,
+            }
+        );
+
+        // A body that stops early is a car that left the fields out, and the
+        // schema's defaults are what it says.
+        assert_eq!(decode_car_gps(&[]), CarGps::default());
     }
 
     #[test]

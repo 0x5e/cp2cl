@@ -280,10 +280,11 @@ the session a head unit drives — the version handshake, device information,
 authentication in both directions, feature configuration, the video encoder's
 negotiation, and the heartbeat that keeps the channel alive — the video channel,
 carrying CarPlay's frames from the moment the car starts the encoder, the media
-channel, carrying the phone's sound with the AAC-LC taken off it on the way, and
-the car's own touch and panel keys, which reach the phone as the events a phone
-understands. What is not: the two voice channels, which are the car's own and
-stay empty, and the phone's microphone, which nothing feeds.
+channel, carrying the phone's sound with the AAC-LC taken off it on the way, the
+vehicle data channel, which is asked for the car's position as soon as the
+session is up, and the car's own touch and panel keys, which reach the phone as
+the events a phone understands. What is not: the two voice channels, which are
+the car's own and stay empty, and the phone's microphone, which nothing feeds.
 
 ### Trying it without a car
 
