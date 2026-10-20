@@ -80,7 +80,7 @@ const FRAME_SAMPLES: u32 = 1024;
 /// phone answers, plus the per-second requests it makes of us. Silence past this
 /// is the only evidence there is that it is gone. The same number LIVI's own
 /// stack ends a silent session on.
-const PHONE_SILENT: Duration = Duration::from_secs(10);
+const PHONE_SILENT: Duration = Duration::from_secs(5);
 
 /// How often that silence is looked at. It reads one timestamp, so it is cheap;
 /// a second is short enough that the answer arrives while it is still worth
