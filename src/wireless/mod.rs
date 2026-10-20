@@ -70,6 +70,7 @@ pub(crate) async fn run_session(
     restart: &broadcast::Sender<()>,
     panel: &ClSink,
     status: &Status,
+    vehicle: &Arc<Vehicle>,
 ) -> Ended {
     // Subscribed before anything goes out, so a display change made while the
     // identification is still running is waiting for us rather than lost.
@@ -158,11 +159,10 @@ pub(crate) async fn run_session(
 
     let (tx, rx) = mpsc::channel(64);
     // `Vehicle` owns the two watch senders and `feed` only hands out receivers,
-    // so the `Vehicle` has to outlive the session it feeds. As a temporary it
-    // would be dropped at the end of this statement, `changed()` would then
-    // report `Err` at once, and `run_accessory` spins on that until the session
-    // ends. Kept in this scope until the accessory is aborted, below.
-    let vehicle = Vehicle::default();
+    // so the `Vehicle` has to outlive the session it feeds. The one the bridge
+    // shares does: it was made before either half started, and the CarLife side
+    // holds the other reference to it.
+    let vehicle = vehicle.clone();
     let feed = vehicle.feed();
     let accessory = tokio::spawn(async move {
         run_accessory(channel, auth, identity, cp, tx, feed).await

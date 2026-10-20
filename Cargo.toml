@@ -86,7 +86,8 @@ ctr = "0.9"
 sha1 = "0.10"
 
 # GET /info has to be answered with a binary property list, and events are
-# bplist too.
+# bplist too. The same `base64` carries the NMEA block a position reaches the
+# phone as — see `src/carlife/gps.rs`.
 plist = "1"
 base64 = "0.22"
 hex = "0.4"

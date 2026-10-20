@@ -31,6 +31,7 @@ use anyhow::{Context, Result};
 use iap2_mfi::local::LocalCoprocessor;
 use iap2_mfi::{AuthCoprocessor, NoCoprocessor};
 use livi_runtime::mfi_async::SharedCoprocessor;
+use livi_runtime::vehicle::Vehicle;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
@@ -129,6 +130,11 @@ async fn main() -> Result<()> {
     let (shutdown, _) = tokio::sync::broadcast::channel(1);
 
     let mic = MicSink::new();
+
+    // The car's position goes to the phone through this, and only through this:
+    // the CarLife session is where a fix arrives and the iAP2 session is what
+    // hands it on, so both halves hold the same sending half.
+    let vehicle = Arc::new(Vehicle::default());
 
     // The car is the consumer, and this is the queue between the two halves:
     // access units and the phone's sound arrive from CarPlay and wait here for a
@@ -261,6 +267,7 @@ async fn main() -> Result<()> {
     // the same sink the CarPlay side fills in.
     let input = event_sink;
     let reported = status.clone();
+    let handed = vehicle.clone();
     tokio::spawn(async move {
         if let Err(e) = carlife::serve(
             carried,
@@ -271,6 +278,7 @@ async fn main() -> Result<()> {
             &mut report,
             &desktop,
             reported,
+            handed,
         )
         .await
         {
@@ -284,9 +292,9 @@ async fn main() -> Result<()> {
     });
 
     if cfg.wireless {
-        wireless::watch(cfg, auth, airplay_port, restart, gate, panel, status).await;
+        wireless::watch(cfg, auth, airplay_port, restart, gate, panel, status, vehicle).await;
     } else {
-        session::watch(cfg, auth, airplay_port, restart, gate, panel, status).await;
+        session::watch(cfg, auth, airplay_port, restart, gate, panel, status, vehicle).await;
     }
     Ok(())
 }

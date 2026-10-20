@@ -159,6 +159,7 @@ pub async fn watch(
     mut gate: tokio::sync::watch::Receiver<bool>,
     panel: Arc<ClSink>,
     status: Arc<Status>,
+    vehicle: Arc<Vehicle>,
 ) {
     let mut busy: Option<String> = None;
     loop {
@@ -205,6 +206,7 @@ pub async fn watch(
                     &restart,
                     &panel,
                     &status,
+                    &vehicle,
                 )
                 .await
                 {
@@ -238,6 +240,7 @@ async fn attach(
     restart: &broadcast::Sender<()>,
     panel: &Arc<ClSink>,
     status: &Status,
+    vehicle: &Arc<Vehicle>,
 ) -> anyhow::Result<Ended> {
     // Subscribed before anything opens, so a display change made while the
     // carkit is coming up is still waiting for us rather than lost.
@@ -317,11 +320,10 @@ async fn attach(
 
         let (tx, rx) = mpsc::channel(64);
         // `Vehicle` owns the two watch senders and `feed` only hands out
-        // receivers, so the `Vehicle` has to outlive the session it feeds. As a
-        // temporary it would be dropped at the end of this statement, `changed()`
-        // would then report `Err` at once, and `run_accessory` spins on that
-        // until the session ends.
-        let vehicle = Vehicle::default();
+        // receivers, so the `Vehicle` has to outlive the session it feeds. The
+        // one the bridge shares does: it was made before either half started,
+        // and the CarLife side holds the other reference to it.
+        let vehicle = vehicle.clone();
         let feed = vehicle.feed();
         let accessory = tokio::spawn(async move {
             run_accessory(channel, signer, identity, cp, tx, feed).await

@@ -22,6 +22,7 @@ use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use livi_runtime::vehicle::Vehicle;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::{broadcast, mpsc};
 
@@ -78,6 +79,7 @@ pub async fn run<F>(
     carplay: &mut F,
     desktop: &broadcast::Sender<()>,
     status: Arc<Status>,
+    vehicle: Arc<Vehicle>,
 ) -> Result<()>
 where
     F: FnMut(bool),
@@ -155,6 +157,7 @@ where
                             carplay,
                             desktop,
                             status.clone(),
+                            vehicle.clone(),
                         )
                         .await
                         {

@@ -23,11 +23,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
+use livi_runtime::vehicle::Vehicle;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::Instant;
 
-use super::{auth, frame, proto};
+use super::{auth, frame, gps, proto};
 use crate::airplay::{info, EventSink, ScreenParams, SharedChannel};
 use crate::commands::{Command, TouchContact, PHONE_DROP, PHONE_HOOK_SWITCH, PHONE_MUTE};
 use crate::config::Config;
@@ -302,6 +305,7 @@ pub async fn run<S, F>(
     carplay: &mut F,
     desktop: &broadcast::Sender<()>,
     status: Arc<Status>,
+    vehicle: Arc<Vehicle>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
@@ -401,6 +405,11 @@ where
         auth,
         next_tick: Instant::now(),
         position_seen: false,
+        delivered: false,
+        // Nothing is assumed about the datum before the car has named one, and a
+        // fix that arrives before it would not be subscribed to anyway.
+        gcj02: false,
+        vehicle,
         up: false,
         last_touch: None,
         status,
@@ -714,6 +723,16 @@ struct Session<'a, W> {
     /// `info`, because it is the evidence that the subscription worked; every
     /// one after it is the same report again and belongs in `debug`.
     position_seen: bool,
+    /// Whether a position has been handed to the phone at all, which is the
+    /// other half of that evidence: the car spoke, and the phone was told.
+    delivered: bool,
+    /// Whether the car reports its coordinates in GCJ-02 rather than WGS84. The
+    /// car names one of the two when it is asked to start reporting, and the
+    /// phone's maps are in the datum the satellites are in.
+    gcj02: bool,
+    /// The iAP2 side's sending half, shared with whichever session is up: a
+    /// position only reaches the phone through it.
+    vehicle: Arc<Vehicle>,
     next_tick: Instant,
     up: bool,
     /// Where the finger was the last time the car said. A release has to name it
@@ -841,6 +860,9 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                             proto::CAR_DATA_GPS,
                             info.flag
                         );
+                        // What every report after this one is in: 1 is WGS84, 2
+                        // is the datum Chinese maps are drawn in.
+                        self.gcj02 = info.flag == 2;
                         let body = proto::car_data_subscribe_start(
                             proto::CAR_DATA_GPS,
                             info.flag,
@@ -858,8 +880,9 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     }
                 }
             }
-            // The car's position, at the rate it reports at. Where it goes is
-            // the page, which turns these units into degrees and metres.
+            // The car's position, at the rate it reports at. Two consumers: the
+            // page, and the phone, which takes a fix only as NMEA sentences and
+            // only while it has asked for them.
             HU_CAR_GPS => {
                 let fix = proto::decode_car_gps(&message.body);
                 let latitude = f64::from(fix.latitude) / 1e6;
@@ -881,6 +904,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     fix.heading,
                     fix.hor_pos_error
                 );
+                self.hand_to_phone(&fix);
                 self.status.with(|s| s.carlife.gps = Some(fix));
             }
             HU_AUTHEN_REQUEST => {
@@ -1052,6 +1076,30 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             other => tracing::debug!("cl.message_ignored type={other:#010x}"),
         }
         Ok(())
+    }
+
+    /// One fix, handed to the phone's half of the bridge.
+    ///
+    /// What the phone does with the sentences is its own business — it asks for
+    /// the ones it wants, and LIVI writes out only those. A car that reports no
+    /// fix has nothing to hand over, and one whose clock is unset nothing to
+    /// stamp the sentences with — both are left to the phone's own position
+    /// rather than given a made-up one.
+    fn hand_to_phone(&mut self, fix: &proto::CarGps) {
+        let Some(block) = gps::sentences(fix, self.gcj02) else {
+            return;
+        };
+        self.push_location(&block);
+        if !self.delivered {
+            self.delivered = true;
+            tracing::info!("cl.car_gps_handed sentences={}", block.lines().count());
+        }
+    }
+
+    /// The one way to the phone, which takes the block base64'd. A block encoded
+    /// here cannot fail to decode again, so there is nothing to report.
+    fn push_location(&self, block: &str) {
+        let _ = self.vehicle.push_location(&BASE64.encode(block));
     }
 
     /// The car's authentication challenge, answered with the phone's key.
@@ -1849,6 +1897,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -1883,6 +1932,7 @@ mod tests {
             &mut carplay,
             &tap,
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -1969,6 +2019,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -2002,6 +2053,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -2046,6 +2098,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -2086,6 +2139,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -2191,6 +2245,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -2268,6 +2323,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -2341,6 +2397,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -2437,6 +2494,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -2495,6 +2553,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -2565,6 +2624,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -2622,6 +2682,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -2692,6 +2753,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             status,
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -2753,6 +2815,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -2846,6 +2909,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -2899,6 +2963,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -2965,6 +3030,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -3061,6 +3127,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -3128,6 +3195,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -3173,6 +3241,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -3241,6 +3310,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             status.clone(),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -3252,6 +3322,59 @@ mod tests {
             status.json()["carlife"]["gps"].is_null(),
             "the position goes when the car does"
         );
+    }
+
+    /// The page is not the fix's only reader: the phone takes the same position,
+    /// as the two sentences it reads a map from, through the iAP2 half's own
+    /// sending half — which is the one handed in here.
+    #[tokio::test]
+    async fn the_cars_position_is_handed_to_the_phone() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let vehicle = Arc::new(Vehicle::default());
+        let feed = vehicle.feed();
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+            car.send(HU_STATISTIC_INFO, &statistics("20062100")).await;
+            car.expect(MD_AUTHEN_RESULT).await;
+            car.expect(FEATURE_CONFIG_REQUEST).await;
+            car.expect(CAR_DATA_SUBSCRIBE).await;
+            // A car whose GPS is in WGS84, so nothing about the fix is moved.
+            car.send(HU_CAR_DATA_SUBSCRIBE_DONE, &vehicle_list(&[(0, 1)]))
+                .await;
+            car.expect(CAR_DATA_SUBSCRIBE_START).await;
+
+            car.send(HU_CAR_GPS, &position()).await;
+            // A message the session answers, so the fix is known to have been
+            // read by the time the phone's half is looked at.
+            car.send(HU_GO_TO_FOREGROUND, &[]).await;
+            car.expect(GO_TO_FOREGROUND_RESPONSE).await;
+        });
+
+        run(
+            device,
+            &Frames::None,
+            &cfg,
+            None,
+            &mut |_, _, _| {},
+            no_icon(),
+            EventSink::new(),
+            &mut carplay,
+            &no_tap(),
+            Arc::new(Status::new()),
+            vehicle,
+        )
+        .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+
+        let said = feed.location.borrow().1.clone();
+        assert!(said.starts_with("$GPGGA,"), "{said}");
+        assert!(said.contains("\r\n$GPRMC,"), "{said}");
     }
 
     /// A turn the two vocabularies have no word in common for goes out without
@@ -3303,6 +3426,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -3358,6 +3482,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -3401,6 +3526,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -3467,6 +3593,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -3509,6 +3636,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             reported,
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -3564,6 +3692,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -3596,6 +3725,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");
@@ -3648,6 +3778,7 @@ mod tests {
             &mut carplay,
             &no_tap(),
             Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
         )
         .await
             .expect("the session ends cleanly");

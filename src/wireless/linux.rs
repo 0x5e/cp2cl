@@ -12,6 +12,7 @@ use iap2_link::LinkConfig;
 use livi_runtime::bt::IncomingConn;
 use livi_runtime::driver::spawn_link;
 use livi_runtime::mfi_async::SharedCoprocessor;
+use livi_runtime::vehicle::Vehicle;
 use tokio::sync::broadcast;
 
 use super::{page, parse_mac, ready, run_session, short};
@@ -31,6 +32,7 @@ pub async fn watch(
     mut gate: tokio::sync::watch::Receiver<bool>,
     panel: Arc<ClSink>,
     status: Arc<Status>,
+    vehicle: Arc<Vehicle>,
 ) {
     if let Err(e) = ready(&cfg) {
         tracing::error!("wireless.ap_unusable err={e}");
@@ -126,6 +128,7 @@ pub async fn watch(
             &restart,
             &panel,
             &status,
+            &vehicle,
         )
         .await;
         carrying.abort();
