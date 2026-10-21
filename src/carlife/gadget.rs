@@ -123,6 +123,10 @@ where
     };
 
     let (events_tx, mut events_rx) = mpsc::channel(4);
+    // Kept back from the task below, which owns the device: what the controller
+    // says about the link is read here, and only while an event is being
+    // reported — see `usb::Usb::link`.
+    let udc = usb.clone();
     // The endpoint files come out of `usb` as they came from the kernel, and are
     // wrapped here: a read on one of them waits for the host, which is what
     // tokio's blocking pool is for.
@@ -145,7 +149,10 @@ where
                 status.with(|s| s.carlife.usb.enumerated = Some(true));
                 match bulk(&from_car, &to_car) {
                     Ok(pair) => {
-                        tracing::info!("usb.enumerated action=start_session");
+                        // What the car negotiated, beside the fact that it
+                        // configured the device: the two are what a session that
+                        // never says anything has to be read against.
+                        tracing::info!("usb.enumerated action=start_session {}", udc.link());
                         if let Err(e) = session::run(
                             pair,
                             frames,

@@ -242,6 +242,25 @@ impl Usb {
         &self.controller
     }
 
+    /// What the controller says the link is doing, for a line in the log.
+    ///
+    /// Both halves are the board's answer rather than this program's, and both
+    /// are what a car that enumerated and then went quiet has to be read
+    /// against: `state` says whether it got as far as setting a configuration,
+    /// and `speed` says which of the two descriptor sets it is talking to — a
+    /// device that came up at full speed is one a head unit may refuse even
+    /// though every control request is answered. Read per call rather than kept,
+    /// since both change with the host's own state.
+    pub fn link(&self) -> String {
+        let dir = Path::new(CONTROLLER_DIR).join(&self.controller);
+        let field = |name: &str| {
+            fs::read_to_string(dir.join(name))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| "unknown".to_string())
+        };
+        format!("speed={} state={}", field("current_speed"), field("state"))
+    }
+
     /// Takes down whatever is at this gadget's name, and any mount of the
     /// instance it may have left behind.
     ///

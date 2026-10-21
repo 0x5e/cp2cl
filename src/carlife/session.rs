@@ -122,6 +122,17 @@ const KEY_VR_START: i32 = 0x0000_0021;
 /// reference does the same whenever its own interface is not in the foreground.
 const HEARTBEAT: Duration = Duration::from_secs(1);
 
+/// How long a car is given to say the first thing before the pipe is probed.
+///
+/// A head unit that speaks at all speaks within milliseconds of the pipe
+/// opening — it is the car that opens the conversation — so this is only ever
+/// reached by one that is not going to.
+const PROBE_QUIET: Duration = Duration::from_secs(2);
+
+/// How long the probe's write is waited on. A host that is reading the endpoint
+/// takes it in one transfer; one that is not never does.
+const PROBE_WAIT: Duration = Duration::from_secs(1);
+
 /// How long silence on the navigation channel may last before the car is told
 /// the prompt is over.
 ///
@@ -413,9 +424,18 @@ where
         gcj02: false,
         vehicle,
         up: false,
+        frames_seen: 0,
         last_touch: None,
         status,
     };
+
+    // A car that has configured the pipe and then said nothing is either one
+    // that never opened it or one that is waiting for this side to speak first,
+    // and from here the two look the same: a read that waits for ever. One
+    // frame tells them apart — see `probe` — and only where the car has been
+    // quiet long enough that there is nothing else it could be doing.
+    let probe_at = Instant::now() + PROBE_QUIET;
+    let mut probed = false;
 
     let outcome = loop {
         let deadline = session.next_tick;
@@ -520,6 +540,12 @@ where
                     break Err(e);
                 }
                 session.next_tick = Instant::now() + session.period();
+            }
+            // Nothing from the car since the pipe opened, and the handshake
+            // has not got as far as `up`. See `probe`.
+            _ = tokio::time::sleep_until(probe_at), if !probed && !session.up => {
+                probed = true;
+                session.probe().await;
             }
         }
     };
@@ -748,6 +774,10 @@ struct Session<'a, W> {
     vehicle: Arc<Vehicle>,
     next_tick: Instant,
     up: bool,
+    /// How many frames the car has sent, up to the handful reported raw — see
+    /// `note_frames`. Counted here rather than kept as a local because the
+    /// reporting sits in `handle`, which is called once per frame.
+    frames_seen: u32,
     /// Where the finger was the last time the car said. A release has to name it
     /// — see `touch`.
     last_touch: Option<(u16, u16)>,
@@ -757,8 +787,32 @@ struct Session<'a, W> {
 }
 
 impl<W: AsyncWrite + Unpin> Session<'_, W> {
+    /// Reports the first few frames the car sends, whatever they are.
+    ///
+    /// Everything `handle` does with a frame is either at `debug` or only for the
+    /// messages it knows, so a car that says something unexpected and a car that
+    /// says nothing at all produce the same log — and which of the two a silent
+    /// session is turns on exactly that. The first few are reported raw, then the
+    /// log goes quiet again: after a handful the shape is known, and a session
+    /// that is running sends frames sixty times a second.
+    fn note_frames(&mut self, chunk: &frame::Chunk) {
+        const REPORTED: u32 = 8;
+        if self.frames_seen >= REPORTED {
+            return;
+        }
+        self.frames_seen += 1;
+        let head = &chunk.body[..chunk.body.len().min(8)];
+        tracing::info!(
+            "cl.frame channel={} bytes={} head={:02x?}",
+            chunk.channel,
+            chunk.body.len(),
+            head
+        );
+    }
+
     /// One message from the car.
     async fn handle<F: FnMut(bool)>(&mut self, chunk: frame::Chunk, carplay: &mut F) -> Result<()> {
+        self.note_frames(&chunk);
         if chunk.channel != frame::CMD {
             self.other_channel(chunk).await;
             return Ok(());
@@ -1324,6 +1378,32 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 }
             }
             _ => self.send(VIDEO_HEARTBEAT, &[]).await,
+        }
+    }
+
+    /// Writes one frame into a pipe the car has not used, and says what became
+    /// of it.
+    ///
+    /// What a write costs is the only thing this side can learn about the other:
+    /// it completes once the host has read the endpoint, and it does not while
+    /// nobody is reading. So a car that configured the device and then went
+    /// quiet is told apart by one frame — a host that takes it is a host that is
+    /// listening and waiting to be spoken to, and one that leaves it queued
+    /// never opened the pipe at all. The frame is a video heartbeat: the
+    /// emptiest message the protocol has, and one a head unit that has not
+    /// started the encoder drops.
+    ///
+    /// The wait is bounded, and a write still queued when it runs out is left
+    /// where it is: it goes out if the host ever reads, and until then it costs
+    /// a blocking thread that nothing waits on.
+    async fn probe(&mut self) {
+        match tokio::time::timeout(PROBE_WAIT, self.send(VIDEO_HEARTBEAT, &[])).await {
+            Ok(Ok(())) => tracing::info!("usb.probe result=written"),
+            Ok(Err(e)) => tracing::warn!("usb.probe result=failed err={e:#}"),
+            Err(_) => tracing::warn!(
+                "usb.probe result=not_taken waited_ms={}",
+                PROBE_WAIT.as_millis()
+            ),
         }
     }
 
