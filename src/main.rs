@@ -86,6 +86,10 @@ async fn main() -> Result<()> {
     let cfg = Arc::new(Config::from_env());
 
     tracing::info!("process.started name=cp2cl");
+    // Which build this run is, said once and at the top: every question about a
+    // log begins with "which build was that", and the answer is not in the lines
+    // that follow. It is the same string the page shows, from the same place.
+    tracing::info!("process.version software={:?}", web::device::SOFTWARE);
 
     // Everything the page shows is reported from wherever it is learned, and
     // nothing reads it back: see `web::status`. Started before anything else so
