@@ -10,6 +10,8 @@
 
 use std::path::{Path, PathBuf};
 
+use tracing::level_filters::LevelFilter;
+
 fn env(key: &str) -> Option<String> {
     std::env::var(key)
         .ok()
@@ -25,9 +27,20 @@ fn env_or(key: &str, default: &str) -> String {
 ///
 /// Read on its own rather than with the rest, because it has to be known before
 /// the config is: a setting that could not be used is reported by a log line,
-/// and that line needs a subscriber to already exist.
-pub fn log_filter() -> String {
-    env_or("CP2CL_LOG_LEVEL", "info")
+/// and that line needs a subscriber to already exist. That is also why a value
+/// that is not one of the four levels falls back on `info` without saying so —
+/// there is nothing yet to say it to.
+///
+/// A level and nothing else. `tracing-subscriber`'s environment filter also
+/// takes directives — `crate=debug`, `crate[span]=trace` — and parsing them is
+/// what a regex engine was built into the binary for; there is one knob here and
+/// it names one of four levels. A value that is not one of them is `info`, the
+/// way a number that cannot be read falls back on its default.
+pub fn log_filter() -> LevelFilter {
+    match env("CP2CL_LOG_LEVEL") {
+        Some(level) => level.parse().unwrap_or(LevelFilter::INFO),
+        None => LevelFilter::INFO,
+    }
 }
 
 fn env_num<T: std::str::FromStr>(key: &str, default: T) -> T {

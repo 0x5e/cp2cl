@@ -99,7 +99,10 @@ anyhow = "1"
 # is composed, and taken down, by this process. See src/carlife/usb.rs.
 libc = "0.2"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# No `env-filter`: the only control is a single level, and the directive syntax
+# that feature brings is a regex engine — a quarter of a megabyte of it, built
+# into the binary to parse one word. See `config::log_filter`.
+tracing-subscriber = "0.3"
 # Read back so a paired phone is not asked to pair again.
 serde_json = "1"
 
@@ -107,3 +110,24 @@ serde_json = "1"
 # that serve it: what used the rest of axum was a WebSocket, and that went with
 # the browser client it was written for. See `src/web/mod.rs`.
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+
+# The binary is copied to the board over the access point that board itself
+# serves, so its size is a deployment cost. What is here is worth half of it:
+# 14.4 MB unstripped became 6.8 MB.
+#
+# `strip` alone is a third of that: the symbol table is 4.2 MB of the 14.4, and
+# nothing reads it on the board.
+#
+# `lto` and one codegen unit are the same decision. 213 crates each
+# monomorphising the same generics is where most of the text came from, and
+# neither costs anything at run time.
+#
+# `panic = "abort"` drops the unwind tables — 0.5 MB of `.ARM.extab` and
+# `.ARM.exidx` — and takes a panic in any task with it: the process ends, and
+# whatever started it starts it again. Nothing here catches a panic, so nothing
+# is lost but the unwinding.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

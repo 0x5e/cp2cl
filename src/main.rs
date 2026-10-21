@@ -35,7 +35,6 @@ use livi_runtime::vehicle::Vehicle;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tracing_subscriber::prelude::*;
-use tracing_subscriber::EnvFilter;
 
 use crate::airplay::clock::SyncedClock;
 use crate::airplay::pairing::Pairings;
@@ -70,7 +69,7 @@ async fn main() -> Result<()> {
         .with(
             tracing_subscriber::fmt::layer()
                 .event_format(logging::Line)
-                .with_filter(EnvFilter::new(config::log_filter())),
+                .with_filter(config::log_filter()),
         )
         .with(
             tracing_subscriber::fmt::layer()

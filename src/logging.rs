@@ -316,9 +316,9 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
+    use tracing::level_filters::LevelFilter;
     use tracing_subscriber::fmt::MakeWriter as _;
     use tracing_subscriber::prelude::*;
-    use tracing_subscriber::EnvFilter;
 
     use super::{area_of, roll, Journal, Line, GREY, RESET};
 
@@ -408,7 +408,7 @@ mod tests {
                 tracing_subscriber::fmt::layer()
                     .event_format(Line)
                     .with_writer(move || Sink(sink.clone()))
-                    .with_filter(EnvFilter::new("info")),
+                    .with_filter(LevelFilter::INFO),
             )
             .with(
                 tracing_subscriber::fmt::layer()
