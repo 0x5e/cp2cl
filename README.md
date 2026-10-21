@@ -79,23 +79,19 @@ cannot build this crate itself, so the build runs in the container defined by
 `docker/`. Build the image once:
 
 ```bash
-docker build -t cp2cl-armv7-builder docker/
+make image
 ```
 
 Then, from the repository root:
 
 ```bash
-docker run --rm -u "$(id -u):$(id -g)" \
-  -v "$PWD":/work -v cp2cl-cargo:/cargo \
-  cp2cl-armv7-builder cargo build --release --target armv7-unknown-linux-musleabihf
+make all
 ```
 
-`cp2cl-cargo` is a named volume holding the cargo cache, so only the first build
-downloads anything. `-u` keeps the build products owned by you rather than by
-root. Use `cargo check` in place of `cargo build --release` to type-check the
-whole crate without generating code, and `cargo test` to run the unit tests:
-**this crate only builds for Linux**, and the container is the shortest way to a
-Linux compiler from here.
+`make test` runs the unit tests in the same container. The `cp2cl-cargo` volume
+holds the cargo cache, so only the first build downloads anything, and the build
+products come out owned by you rather than by root: **this crate only builds for
+Linux**, and the container is the shortest way to a Linux compiler from here.
 
 **The binary is statically linked, and that is the point.** The target is musl
 rather than the board's glibc, and `.cargo/config.toml` asks for `+crt-static` on
@@ -869,6 +865,7 @@ this a derivative work, so cp2cl inherits that.
 | `assets/carlife_channel_map.json` | the head unit's channel number, and the label worth showing for it |
 | `assets/web/index.html` | the page itself — one file, four sections, polling |
 | `assets/web/vendor/weui.min.css` | its stylesheet, vendored so the page needs no network |
+| `Makefile` | the two commands there are: build for the board, and the tests, both in the container |
 | `docker/` | the image that cross-compiles for the board, and the CMake toolchain it needs |
 | `board/` | the firmware half: the access point and its unit, laid out as the filesystem they land on |
 
