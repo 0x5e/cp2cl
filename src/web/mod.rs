@@ -312,6 +312,10 @@ mod tests {
             page_text().contains("id=\"log-level\""),
             "and the lowest level it shows can be picked"
         );
+        assert!(
+            page_text().contains("id=\"log-wrap\""),
+            "and a line kept on one row instead of wrapped"
+        );
     }
 
     /// The page is one document and reads one key per part, so the snapshot has

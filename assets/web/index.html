@@ -37,6 +37,11 @@
     font-size:13px;color:var(--weui-FG-1)}
   .log-bar select{flex:1;min-width:0;font:inherit;color:var(--weui-FG-0);
     background:none;border:0;padding:2px 0;text-align:right}
+  .log-fold{flex:none;display:flex;align-items:center;gap:4px;white-space:nowrap}
+  .log-fold input{accent-color:var(--weui-BRAND);margin:0}
+  /* Not wrapping gives a line back its shape, which is what a line is read by:
+     the whole of it goes on one row and the box scrolls sideways for the rest. */
+  .log.nowrap{white-space:pre;word-break:normal;overflow-x:auto}
   /* The same reads as the terminal's: the stamp is greyed because it is looked
      up rather than read, and a level says how loud it is by its colour. */
   .log .tm{color:var(--weui-FG-2)}
@@ -84,6 +89,9 @@
         <option value="warn">WARN</option>
         <option value="error">ERROR</option>
       </select>
+      <label class="log-fold" for="log-wrap">
+        <input type="checkbox" id="log-wrap" checked>自动换行
+      </label>
     </div>
     <pre class="log" id="log"></pre>
     <p class="stamp" id="log-stamp">正在读取…</p>
@@ -453,6 +461,18 @@ const RANK = { trace: 0, debug: 1, info: 2, warn: 3, error: 4 };
 
 const levelPick = document.getElementById("log-level");
 let floor = RANK[levelPick.value];
+
+// A line is read by its shape, so wrapping is what it does unless it is turned
+// off: unwrapped, the whole of a line stays on one row and the box scrolls
+// sideways for the rest of it instead of folding it into two.
+const wrapPick = document.getElementById("log-wrap");
+
+function applyWrap() {
+  logBox.classList.toggle("nowrap", !wrapPick.checked);
+}
+
+wrapPick.addEventListener("change", applyWrap);
+applyWrap();
 
 // A line is `<stamp> <LEVEL> [area]\t<event> <fields>`, and it is read as the
 // three parts the terminal colours: the stamp is looked up, the level is how
