@@ -18,6 +18,8 @@ BR_VOL   := cp2cl-buildroot-out
 BR_OUT   := buildroot/output
 BOARD    ?= nanopi_duo2
 UID_GID  := $(shell id -u):$(shell id -g)
+# The uid of the build user in docker/buildroot.Dockerfile.
+BR_UID   := 1000
 
 .PHONY: all test image dist firmware buildroot-image
 
@@ -44,19 +46,27 @@ dist: all
 #
 # The build directory is a named volume rather than a bind mount: the host's
 # filesystem is case-insensitive and Buildroot's output is not, and the failures
-# that causes arrive hours into a build. `dl/` lives in the volume too, so a
-# second build downloads nothing.
+# that causes arrive hours into a build. `dl/` is put in the volume as well, with
+# BR2_DL_DIR, because Buildroot's default is `dl/` beside the sources — inside the
+# image, where it is neither writable nor kept between runs.
 #
-# The build itself runs as root — a volume's root directory stays root-owned here
-# whatever it is chowned to — and only the finished image crosses back, in a
-# second container running as you so the file is not root-owned on the host.
+# The build runs as the container's unprivileged user, not as root: Buildroot is
+# not supported as root and host-tar's configure refuses to run there at all. The
+# volume's root directory is root-owned when it is created and stays that way, so
+# the container starts as root, hands it over, and drops to the builder with su —
+# one container, because the chown only matters to the process that follows it.
+# Only the finished image crosses back, in a second container running as you, so
+# the file is not owned by uid 1000 on the host.
 firmware: dist buildroot-image
 	mkdir -p $(BR_OUT)
 	docker volume create $(BR_VOL) >/dev/null
-	docker run --rm -v $(BR_VOL):/build \
+	docker run --rm -u 0:0 -v $(BR_VOL):/build \
 		-v "$(CURDIR)/buildroot":/ext:ro \
 		-v "$(CURDIR)/dist":/dist:ro \
-		$(BR_IMAGE) sh -c 'make -C /opt/buildroot O=/build BR2_EXTERNAL=/ext $(BOARD)_defconfig && make -C /opt/buildroot O=/build'
+		-e BR2_DL_DIR=/build/dl \
+		$(BR_IMAGE) sh -c 'chown $(BR_UID):$(BR_UID) /build \
+			&& su -s /bin/sh builder -c "make -C /opt/buildroot O=/build BR2_EXTERNAL=/ext $(BOARD)_defconfig \
+				&& make -C /opt/buildroot O=/build -j$$(nproc)"'
 	docker run --rm -u $(UID_GID) -v $(BR_VOL):/build -v "$(CURDIR)/$(BR_OUT)":/out \
 		$(BR_IMAGE) cp /build/images/sdcard.img /out/
 	@echo "image: $(BR_OUT)/sdcard.img"
