@@ -634,6 +634,10 @@ mod tests {
             page_text().contains("d.cpu_percent"),
             "the page writes the percentage, from the share the answer gives it"
         );
+        assert!(
+            page_text().contains("d.software"),
+            "and writes the version the binary was built as"
+        );
         let status = Status::new();
         assert!(
             status.json()["device"]["memory_total"].is_null(),

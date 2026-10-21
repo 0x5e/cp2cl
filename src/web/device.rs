@@ -1,5 +1,5 @@
-//! What the board itself is doing: how much CPU it is using and how much memory
-//! is left.
+//! What the board itself is doing: how much CPU it is using, how much memory
+//! is left, and which build it is running.
 //!
 //! This is the one part of the page that is about neither end of the bridge, and
 //! the one part that is observed rather than reported: nothing in the bridge
@@ -23,6 +23,14 @@ use super::status::Status;
 /// polls every two seconds — never shows a number that has already been overtaken.
 const SAMPLE: Duration = Duration::from_secs(5);
 
+/// Which build this is: the tag on the commit it was built from, and the commit.
+///
+/// Both are read by `build.rs` from git rather than from a file that says so —
+/// a version is a name given to a commit, so the commit is what knows it. A
+/// commit carrying no tag is `dev`, which is the name of a build nobody has
+/// named: `v0.8.0 (f3c999a)` is a release, `dev (993e2b9)` is not.
+pub const SOFTWARE: &str = concat!(env!("CP2CL_VERSION"), " (", env!("CP2CL_COMMIT"), ")");
+
 /// What the board itself is doing.
 ///
 /// Empty until the first sample: `cpu_percent` needs two readings to compare,
@@ -44,6 +52,7 @@ pub struct Device {
 impl Device {
     pub fn json(&self) -> Value {
         json!({
+            "software": SOFTWARE,
             "cpu_percent": self.cpu_percent,
             "memory_used": self.memory_used,
             "memory_total": self.memory_total,
@@ -192,5 +201,18 @@ SwapTotal:             0 kB
         let body = Device::default().json();
         assert!(body["cpu_percent"].is_null());
         assert!(body["memory_total"].is_null());
+    }
+
+    /// The build it is running is not a sample and is never "not known": it is
+    /// a version and the commit, and a commit with no tag on it is `dev`.
+    #[test]
+    fn the_build_says_which_build_it_is() {
+        let body = Device::default().json();
+        let software = body["software"].as_str().expect("the page reads it");
+        let (version, commit) = software
+            .split_once(" (")
+            .unwrap_or_else(|| panic!("`v0.8.0 (f3c999a)`, not {software}"));
+        assert!(version == "dev" || version.starts_with('v'), "{version}");
+        assert!(commit.ends_with(')') && commit.len() >= 8, "{commit}");
     }
 }

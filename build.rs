@@ -1,4 +1,4 @@
-//! Puts `assets/` into the binary.
+//! Puts `assets/` into the binary, and what git says about the commit.
 //!
 //! Every file under `assets/` is `include_bytes!`-ed into one table, so what the
 //! program carries is read-only data of the executable itself: nothing is
@@ -11,13 +11,19 @@
 //!
 //! Names in the table are relative to `assets/` and use `/`, which is how the
 //! rest of the program spells a path.
+//!
+//! The version and the commit are read here as well, for the same reason: a
+//! version is a name given to a commit, so the commit being built is what knows
+//! what the build is called, and a file holding it would only be right until
+//! the next commit.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    let root =
-        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets this")).join("assets");
+    let manifest =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets this"));
+    let root = manifest.join("assets");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", root.display());
 
@@ -34,6 +40,39 @@ fn main() {
 
     let out = Path::new(&std::env::var("OUT_DIR").expect("cargo sets this")).join("assets.rs");
     std::fs::write(out, table).expect("the generated table is writable");
+
+    // Watched as a whole rather than file by file: a checkout moves `HEAD`, a
+    // commit moves a branch, and a tag is a third file again — any of them can
+    // be what changes the answer, and a directory is one line that covers all.
+    println!("cargo:rerun-if-changed=.git");
+    let version = git(&manifest, &["describe", "--tags", "--exact-match"])
+        .unwrap_or_else(|| "dev".to_string());
+    let commit = git(&manifest, &["rev-parse", "--short", "HEAD"])
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("cargo:rustc-env=CP2CL_VERSION={version}");
+    println!("cargo:rustc-env=CP2CL_COMMIT={commit}");
+}
+
+/// What git says about the commit being built, or nothing when it cannot say.
+///
+/// A commit with no tag on it is `dev`: it has not been given a version, and
+/// inventing one would say it had. A build with no checkout at all is the same
+/// answer, since there is nothing to name either way.
+fn git(manifest: &Path, args: &[&str]) -> Option<String> {
+    let said = std::process::Command::new("git")
+        .current_dir(manifest)
+        .args(args)
+        .output()
+        .ok()?;
+    if !said.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(said.stdout).ok()?;
+    text.lines()
+        .next()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
 }
 
 /// Every file under `dir`, as `(name in the table, path to include)`.
