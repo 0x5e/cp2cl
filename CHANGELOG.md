@@ -4,19 +4,17 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## v0.10.0 alpha — 待发布
+## v0.9.1 alpha — 2026-10-21
 
 ### 变更
 
-- 构建改为 fat LTO、单 codegen unit、strip 符号、panic 直接 abort，可执行文件 14.4 MB → 6.8 MB（`c97551e`）。
-- 日志级别只认 error/warn/info/debug 四级，非法值回落到 info，不再编入 env-filter 的正则引擎（`c97551e`）。
+- 构建改为 fat LTO、单 codegen unit、strip 符号与 panic 直接 abort，可执行文件 14.4 MB → 6.8 MB；日志级别也改为直接解析，非法值回落到 info（`c97551e`）。
 - 访问点改用信道 11、DTIM 1、20 MHz 短保护间隔，关掉组密钥轮换与低 ACK 断连（`e1397a2`）。
-- 视频、音频与事件流结束时分清「对端关闭」与「连接被打断」（`00fa8bf`）。
-- 车机位置只在参数变化时打日志，同一位置反复上报不再刷屏（`2af10b4`）。
 
 ### 修复
 
-- 手机挂断 AirPlay 连接后主动请求新会话，Wi-Fi 与蓝牙仍连着却没有画面的状态不再需要拔线（`00fa8bf`）。
+- 手机挂断 AirPlay 连接后主动请求新会话，Wi-Fi 与蓝牙仍连着却没有画面的状态不必再拔线；流结束时也分清「对端关闭」与「连接被打断」（`00fa8bf`）。
+- 车机停车时按固定频率重发同一个位置，日志被刷满；现在只在参数变化时打一行（`2af10b4`）。
 
 ## v0.9.0 alpha — 2026-10-21
 
