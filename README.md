@@ -452,8 +452,10 @@ make firmware
 ```
 
 Write that to a card and put the card in the board. Everything the board runs is
-in it: the access point, the program, and the three init scripts that start them
-in the order they have to happen.
+in it: the access point, the program, and the two init scripts that start them in
+the order they have to happen. The build runs in a container — there is no Linux
+machine here and Buildroot does not run on macOS — and the first one takes a
+while, since it compiles a toolchain and a kernel.
 
 **`buildroot/` is an external tree, not Buildroot.** Buildroot itself is a
 submodule under `vendor/`, pinned the way LIVI is; what is here is the boards, the
@@ -470,18 +472,19 @@ configuration out of `/etc/hostapd`, taking the file that names the interface
 `CP2CL_WIFI_IFACE` defaults to, so the two cannot drift apart. See
 [Wireless CarPlay](#wireless-carplay).
 
-**The boot is three scripts and no service manager.**
+**The boot is two scripts and no service manager.**
 
 | Script | What it is |
 |---|---|
-| `S15btfirmware` | the Bluetooth half's firmware, pushed over UART1, in the background |
 | `S20cp2cl-ap` | hostapd on `wlan0` at `192.168.4.1/24`, then dnsmasq for the leases |
 | `S50cp2cl` | the program, with the environment the README documents |
 
-The firmware is backgrounded on purpose: nothing needs the adapter at boot, BlueZ
-picks `hci0` up through the kernel whenever it appears, and a boot that waits for
-it is a boot that waits 34 seconds — which is what the same step cost on the
-Ubuntu image this one replaces.
+There is no third script for the Bluetooth firmware, and that is the point of
+running mainline: the device tree puts the chip on UART2 as a serdev child, so
+the kernel's own `btbcm` downloads the patchram and BlueZ finds `hci0` when it
+appears. The vendor's 4.14 image had to push it from userspace, as a systemd
+oneshot that `multi-user.target` waited on — which was 34 of that image's 45
+seconds of boot.
 
 **The root is a read-only squashfs.** There is nothing to fsck on a card that
 loses power with the ignition — and nothing that survives it either: `/var/log` is

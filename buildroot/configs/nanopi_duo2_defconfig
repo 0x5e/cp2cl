@@ -1,9 +1,11 @@
 # NanoPi Duo2 — Allwinner H3, 512 MB, AP6212 (2.4 GHz 1x1 + BCM43430 Bluetooth).
 #
-# Three values here are the vendor's and cannot be guessed: the kernel and
-# U-Boot repositories, and the U-Boot board name. Everything else is the shape
-# every board in this tree shares; what is specific to this one lives in
-# board/nanopi-duo2/ and is pulled in below.
+# Mainline U-Boot and mainline Linux, not the vendor's 4.14 BSP. The BSP is what
+# the board runs today and it cannot be built here: Buildroot 2026.02 offers GCC
+# 13, 14 and 15, and a 4.14 kernel compiles with none of them. Mainline has the
+# board's device tree — wifi, bluetooth and usb_otg are all in it — and a U-Boot
+# defconfig that names it, so the toolchain, the kernel and the bootloader come
+# from one place and one compiler.
 #
 # The target is a read-only squashfs with nothing to fsck and no udev: the board
 # loses power with the ignition, and a filesystem check on the next boot is a
@@ -13,6 +15,10 @@ BR2_arm=y
 BR2_cortex_a7=y
 BR2_ARM_FPU_VFPV4=y
 BR2_TOOLCHAIN_BUILDROOT_MUSL=y
+# Pinned rather than "same as the kernel": with a custom kernel version the
+# headers version is not known early enough for the feature symbols that
+# packages depend on, and bluez5-utils silently disappears from the menu.
+BR2_KERNEL_HEADERS_6_18=y
 
 BR2_TARGET_GENERIC_HOSTNAME="nanopi-duo2"
 BR2_TARGET_GENERIC_ISSUE="cp2cl"
@@ -23,13 +29,16 @@ BR2_INIT_BUSYBOX=y
 BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_DEVTMPFS=y
 BR2_TARGET_ROOTFS_SQUASHFS=y
 BR2_TARGET_ROOTFS_SQUASHFS4_XZ=y
-BR2_TARGET_ROOTFS_TAR=n
 
+# `sunxi` rather than `sunxi_defconfig`: Buildroot appends the suffix itself.
+#
+# 6.18 is the current longterm, not Buildroot's own default (6.19, a plain stable
+# that is replaced every few months). A car that has to be right in three years
+# wants the branch that still gets fixes then.
 BR2_LINUX_KERNEL=y
-BR2_LINUX_KERNEL_CUSTOM_GIT=y
-BR2_LINUX_KERNEL_CUSTOM_REPO_URL="TODO: FriendlyElec 的 4.14 BSP 仓库"
-BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="TODO: 分支或 tag，例如 4.14.111"
-BR2_LINUX_KERNEL_DEFCONFIG="sunxi_defconfig"
+BR2_LINUX_KERNEL_CUSTOM_VERSION=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.18.58"
+BR2_LINUX_KERNEL_DEFCONFIG="sunxi"
 BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_CP2CL_PATH)/board/common/kernel.fragment $(BR2_EXTERNAL_CP2CL_PATH)/board/nanopi-duo2/kernel.fragment"
 BR2_LINUX_KERNEL_DTS_SUPPORT=y
 BR2_LINUX_KERNEL_INTREE_DTS_NAME="sun8i-h3-nanopi-duo2"
@@ -37,13 +46,15 @@ BR2_LINUX_KERNEL_ZIMAGE=y
 BR2_LINUX_KERNEL_LZ4=y
 BR2_LINUX_KERNEL_INSTALL_TARGET=y
 
+# U-Boot's own `nanopi_duo2_defconfig`, which already has CONFIG_USB_MUSB_GADGET
+# and the DRAM clock this board's memory needs.
 BR2_TARGET_UBOOT=y
 BR2_TARGET_UBOOT_BUILD_SYSTEM_KCONFIG=y
-BR2_TARGET_UBOOT_CUSTOM_GIT=y
-BR2_TARGET_UBOOT_CUSTOM_REPO_URL="TODO: FriendlyElec 的 U-Boot 仓库"
-BR2_TARGET_UBOOT_CUSTOM_REPO_VERSION="TODO: 分支或 tag"
+BR2_TARGET_UBOOT_LATEST_VERSION=y
 BR2_TARGET_UBOOT_BOARD_DEFCONFIG="nanopi_duo2"
 BR2_TARGET_UBOOT_NEEDS_DTC=y
+BR2_TARGET_UBOOT_NEEDS_PYTHON3=y
+BR2_TARGET_UBOOT_NEEDS_PYLIBFDT=y
 BR2_TARGET_UBOOT_FORMAT_CUSTOM=y
 BR2_TARGET_UBOOT_FORMAT_CUSTOM_NAME="u-boot-sunxi-with-spl.bin"
 BR2_TARGET_UBOOT_BOOT_SCRIPT=y

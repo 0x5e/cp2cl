@@ -13,6 +13,11 @@ BOARD=$(basename "$BOARD_DIR")
 
 # Not from a package: brcmfmac-sdio-firmware carries every chip's blob and this
 # board needs one chip's. Three files, half a megabyte.
+#
+# They come off the board itself, from the image it runs now: the vendor keeps
+# them under /lib/firmware/ap6212/ with their own names, and mainline wants them
+# in /lib/firmware/brcm/ under the names below. Copying them across is a
+# `scp` and a rename; nothing about them is a build product.
 for f in brcmfmac43430-sdio.bin brcmfmac43430-sdio.txt BCM43430A1.hcd; do
 	if [ ! -f "$BOARD_DIR/firmware/$f" ]; then
 		echo "post-build: board/$BOARD/firmware/$f is missing" >&2
