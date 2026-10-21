@@ -59,11 +59,19 @@ async fn main() -> Result<()> {
     // coloured, and a copy under `/tmp` that is not, which is what the status
     // page reads and what is still there of a run that has ended. See
     // `logging::Journal` for how the copy is kept to size.
+    //
+    // The level is the terminal's alone: the copy takes every level there is.
+    // A terminal is watched as it happens, and a run cannot be dialled up to
+    // `debug` after the fact, so what is left on disk is what a question about
+    // that run is answered from — and it is asked once the run is over.
     let journal = logging::Journal::open();
     let unnoticed = journal.reason().map(str::to_owned);
     tracing_subscriber::registry()
-        .with(EnvFilter::new(config::log_filter()))
-        .with(tracing_subscriber::fmt::layer().event_format(logging::Line))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .event_format(logging::Line)
+                .with_filter(EnvFilter::new(config::log_filter())),
+        )
         .with(
             tracing_subscriber::fmt::layer()
                 .event_format(logging::Line)

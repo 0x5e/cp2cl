@@ -318,6 +318,7 @@ mod tests {
 
     use tracing_subscriber::fmt::MakeWriter as _;
     use tracing_subscriber::prelude::*;
+    use tracing_subscriber::EnvFilter;
 
     use super::{area_of, roll, Journal, Line, GREY, RESET};
 
@@ -388,6 +389,45 @@ mod tests {
             text.ends_with(" INFO [cl]      \tcl.encoder state=started\n"),
             "{text:?}"
         );
+
+        fs::remove_file(&path).ok();
+        fs::remove_file(&previous).ok();
+    }
+
+    #[test]
+    fn the_copy_takes_every_level_even_the_ones_the_terminal_is_spared() {
+        let (path, previous) = (scratch("levels.log"), scratch("levels.log.1"));
+        let journal = Journal::at(&path, &previous);
+
+        // The same pair the program installs: the level filter is on the
+        // terminal's layer, and the copy has none to be held back by.
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let subscriber = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(Line)
+                    .with_writer(move || Sink(sink.clone()))
+                    .with_filter(EnvFilter::new("info")),
+            )
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(Line)
+                    .with_ansi(false)
+                    .with_writer(journal),
+            );
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::debug!("cl.below_the_terminal");
+            tracing::info!("cl.at_the_terminal");
+        });
+
+        let terminal = String::from_utf8(seen.lock().unwrap().clone()).unwrap();
+        assert!(terminal.contains("cl.at_the_terminal"), "{terminal:?}");
+        assert!(!terminal.contains("cl.below_the_terminal"), "{terminal:?}");
+
+        let copy = fs::read_to_string(&path).unwrap();
+        assert!(copy.contains("cl.at_the_terminal"), "{copy:?}");
+        assert!(copy.contains("cl.below_the_terminal"), "{copy:?}");
 
         fs::remove_file(&path).ok();
         fs::remove_file(&previous).ok();
