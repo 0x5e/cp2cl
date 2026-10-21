@@ -195,8 +195,6 @@ async fn control_loop(
     events: mpsc::Sender<Event>,
     status: Arc<Status>,
 ) {
-    let mut asked = desc::Asked::default();
-
     loop {
         // The whole event is twelve bytes: the eight of a `usb_ctrlrequest`, the
         // type, and three of padding. Read as bytes and unpacked by hand, so
@@ -216,7 +214,7 @@ async fn control_loop(
                 let _ = events.send(Event::Disabled).await;
             }
             EVENT_SETUP => {
-                match answer(&usb, &mut identity, &mut ep0, &mut asked, &raw, &status).await {
+                match answer(&usb, &mut identity, &mut ep0, &raw, &status).await {
                     Ok(Answered::Switched) => {
                         if events.send(Event::Accessory).await.is_err() {
                             return;
@@ -243,7 +241,6 @@ async fn answer(
     usb: &Usb,
     identity: &mut desc::Identity,
     ep0: &mut tokio::fs::File,
-    asked: &mut desc::Asked,
     raw: &[u8; 12],
     status: &Status,
 ) -> Result<Answered> {
@@ -281,13 +278,13 @@ async fn answer(
             let text = String::from_utf8_lossy(&text).into_owned();
             // The six are the car's own CarLife application naming itself, and
             // they are worth keeping: they are the only description of the head
-            // unit anything here ever sees.
+            // unit anything here ever sees. They go to the page and no further —
+            // the device keeps the name it was enumerated under, as a phone does.
             status.with(|s| {
                 if let Some(slot) = s.carlife.asked.get_mut(index) {
-                    *slot = Some(text.clone());
+                    *slot = Some(text);
                 }
             });
-            asked.set(index, text);
             Ok(Answered::Nothing)
         }
         // "Switch to accessory mode and re-enumerate."
@@ -300,7 +297,7 @@ async fn answer(
                 tracing::info!("usb.accessory_switch result=already_accessory");
                 return Ok(Answered::Nothing);
             }
-            switch(usb, identity, asked).await?;
+            switch(usb, identity).await?;
             describe_identity(status, identity);
             Ok(Answered::Switched)
         }
@@ -352,13 +349,13 @@ async fn complete(ep0: &mut tokio::fs::File) -> Result<()> {
 ///
 /// What the host asked for is not a new device but the same one coming back as
 /// an accessory, which is the only way it can see a device it did not enumerate:
-/// off the bus, new numbers and the strings it just named, back on. The request
-/// itself is ended before any of that, and `usb` holds the device off the bus
-/// long enough for the host to see it go.
-async fn switch(usb: &Usb, identity: &mut desc::Identity, asked: &desc::Asked) -> Result<()> {
+/// off the bus, new numbers, back on. The request itself is ended before any of
+/// that, and `usb` holds the device off the bus long enough for the host to see
+/// it go.
+async fn switch(usb: &Usb, identity: &mut desc::Identity) -> Result<()> {
     tokio::time::sleep(SETTLE).await;
 
-    let accessory = identity.accessory(asked);
+    let accessory = identity.accessory();
     usb.reidentify(&accessory)
         .await
         .context("switching the device to its accessory form")?;

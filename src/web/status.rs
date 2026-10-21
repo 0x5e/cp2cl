@@ -25,7 +25,7 @@ use super::device::Device;
 use crate::carlife::proto::CarGps;
 
 /// How many strings a head unit may name the device with. The protocol names
-/// six; see `carlife::desc::Asked`.
+/// six; they are kept for the page and do not rename the device.
 const ASKED: usize = 6;
 
 /// The bridge's own state, as the page reads it.

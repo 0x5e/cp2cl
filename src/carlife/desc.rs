@@ -111,36 +111,6 @@ pub fn strings() -> [u8; 16] {
 /// was checked against accept either.
 pub const AOA_VERSION: u16 = 2;
 
-/// The identity a head unit asks a device to report, by the index it is sent
-/// under. The protocol names six — manufacturer, model, description, version,
-/// URI and serial number — and the three here are the ones that go somewhere: a
-/// USB device descriptor has a place for the first, the second and the last, and
-/// none for the rest, which are read and go no further.
-pub const MANUFACTURER: usize = 0;
-pub const MODEL: usize = 1;
-pub const SERIAL: usize = 5;
-
-/// The six strings a head unit sends before switching a device, in the order it
-/// sends them. A head unit that sends fewer leaves the rest empty.
-#[derive(Default)]
-pub struct Asked {
-    identity: [Option<String>; 6],
-}
-
-impl Asked {
-    /// Records one of the six. An index beyond them is not an error — the
-    /// protocol may grow another one — so it is dropped rather than refused.
-    pub fn set(&mut self, index: usize, text: String) {
-        if let Some(slot) = self.identity.get_mut(index) {
-            *slot = Some(text);
-        }
-    }
-
-    pub fn at(&self, index: usize) -> Option<&str> {
-        self.identity.get(index).and_then(|s| s.as_deref())
-    }
-}
-
 /// One control request, as FunctionFS hands it over: the eight bytes of the
 /// setup packet, in the order the kernel has them.
 #[derive(Debug, PartialEq, Eq)]
@@ -258,20 +228,30 @@ impl Identity {
         }
     }
 
-    /// What it presents afterwards: an accessory, under the strings the head unit
-    /// sent, which is what the protocol says a device must report once it has
-    /// been switched. A head unit that sent fewer than six leaves the rest as it
-    /// was.
-    pub fn accessory(&self, asked: &Asked) -> Self {
+    /// What it presents afterwards: the same device under the accessory's
+    /// numbers.
+    ///
+    /// Only the two numbers change. A phone is the case this is copied from:
+    /// checked against a Pixel 7a, its accessory form still reports Google /
+    /// Pixel 7a / its own hardware serial, not the six strings the head unit
+    /// sent. FunctionFS keeps the accessory function away from a device
+    /// descriptor's strings for the same reason — the protocol's `send string`
+    /// writes into the function, and the identity a host enumerated is left
+    /// alone.
+    ///
+    /// So what a head unit sends here is recorded for the page and goes no
+    /// further. What the host is left with is one device whose numbers changed,
+    /// which is all a switch is. A device whose *name* changed looks like a
+    /// different device to whatever was watching it before, and a head unit that
+    /// matches the accessory it finds against the phone it just switched is
+    /// entitled to match on the name.
+    pub fn accessory(&self) -> Self {
         Self {
             vid: ACCESSORY_VID,
             pid: ACCESSORY_PID,
-            manufacturer: asked
-                .at(MANUFACTURER)
-                .unwrap_or(&self.manufacturer)
-                .to_string(),
-            product: asked.at(MODEL).unwrap_or(&self.product).to_string(),
-            serial: asked.at(SERIAL).unwrap_or(&self.serial).to_string(),
+            manufacturer: self.manufacturer.clone(),
+            product: self.product.clone(),
+            serial: self.serial.clone(),
         }
     }
 
@@ -404,50 +384,23 @@ mod tests {
     }
 
     #[test]
-    fn the_six_identifiers_land_where_the_protocol_puts_them() {
-        let mut asked = Asked::default();
-        for (index, text) in ["Baidu", "CarLife", "Baidu CarLife"].iter().enumerate() {
-            asked.set(index, text.to_string());
-        }
-        // Something this protocol may grow later: dropped, not misplaced.
-        asked.set(9, "beyond the six".to_string());
-
-        assert_eq!(asked.at(MANUFACTURER), Some("Baidu"));
-        assert_eq!(asked.at(MODEL), Some("CarLife"));
-        assert_eq!(asked.at(2), Some("Baidu CarLife"), "the third of the six");
-        assert_eq!(asked.at(SERIAL), None, "one that was never sent");
-        assert_eq!(asked.at(9), None);
-    }
-
-    #[test]
     fn the_version_answer_is_two_little_endian_bytes() {
         assert_eq!(version_reply(), [2, 0], "version 2, low byte first");
     }
 
     #[test]
-    fn the_accessory_form_is_the_numbers_and_the_strings_the_head_unit_asked_for() {
+    fn the_accessory_form_is_the_same_device_under_other_numbers() {
         let phone = Identity::phone("nanopi-duo2");
         assert!(!phone.is_accessory(), "a phone is not an accessory yet");
 
-        let mut asked = Asked::default();
-        asked.set(MANUFACTURER, "Baidu".to_string());
-        asked.set(MODEL, "CarLife".to_string());
-        asked.set(SERIAL, "0720SerialNo.".to_string());
-
-        let accessory = phone.accessory(&asked);
+        let accessory = phone.accessory();
         assert_eq!((accessory.vid, accessory.pid), (0x18d1, 0x2d00));
         assert!(accessory.is_accessory());
-        assert_eq!(accessory.manufacturer, "Baidu");
-        assert_eq!(accessory.product, "CarLife");
-        assert_eq!(accessory.serial, "0720SerialNo.");
-    }
-
-    #[test]
-    fn what_a_head_unit_did_not_send_stays_as_it_was() {
-        let accessory = Identity::phone("nanopi-duo2").accessory(&Asked::default());
-
-        assert_eq!(accessory.manufacturer, "Google");
-        assert_eq!(accessory.product, "Android");
-        assert_eq!(accessory.serial, "nanopi-duo2");
+        assert_eq!(
+            accessory.manufacturer, "Google",
+            "a phone keeps its manufacturer across the switch, and so does this"
+        );
+        assert_eq!(accessory.product, "Android", "and the name it enumerated under");
+        assert_eq!(accessory.serial, "nanopi-duo2", "and the serial");
     }
 }

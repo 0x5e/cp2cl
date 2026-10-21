@@ -349,7 +349,7 @@ is where it stopped:
 [usb]     	usb.control_request request=52 direction=out type=0x40 value=0 index=0 length=5
 [usb]     	usb.ident index=0 text="Baidu"       # and five more like it
 [usb]     	usb.control_request request=53 direction=out type=0x40 value=0 index=0 length=0
-[usb]     	usb.accessory_switch result=ok identity="18d1:2d00 as Baidu / CarLife"
+[usb]     	usb.accessory_switch result=ok identity="18d1:2d00 as Google / Android"
 [usb]     	usb.enumerated action=start_session
 [cl]      	cl.version version=1.0
 [cl]      	cl.session_up                        # the gate opens here
@@ -397,12 +397,14 @@ which is what a head unit looks for before it does any of this.
 
 **The switch is not a flag, it is a new device.** `start accessory` cannot be
 answered by changing something in place: a host does not see a device it did not
-enumerate, so the gadget is unbound, its numbers and strings are rewritten —
-`18d1:2d00`, under the strings the car itself sent — and it is bound again. The
-endpoint files stay open across that, because FunctionFS holds them and the
-descriptors do not change, which is what lets the session carry on with nothing
-reopened. The one thing the program does not do is race the host: it waits 100 ms
-for the answer to leave the controller before the device goes.
+enumerate, so the gadget is unbound, its numbers are rewritten — `18d1:2d00` —
+and it is bound again. Only the numbers change: the strings stay `Google` and
+`Android`, as a phone's do across the same switch, and what the car sends is
+kept for the page. The endpoint files stay open across that, because FunctionFS
+holds them and the descriptors do not change, which is what lets the session
+carry on with nothing reopened. The one thing the program does not do is race
+the host: it waits 100 ms for the answer to leave the controller before the
+device goes.
 
 **Two things are asked of the kernel, and neither is in a stock image by
 accident**: `CONFIG_USB_CONFIGFS` with `CONFIG_USB_CONFIGFS_F_FS` — FunctionFS —
