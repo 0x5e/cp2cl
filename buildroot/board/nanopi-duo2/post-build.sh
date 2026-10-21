@@ -11,8 +11,10 @@ set -eu
 BOARD_DIR=$(cd "$(dirname "$0")" && pwd)
 BOARD=$(basename "$BOARD_DIR")
 
-# Not from a package: brcmfmac-sdio-firmware carries every chip's blob and this
-# board needs one chip's. Three files, half a megabyte.
+# Not from a package: brcmfmac-sdio-firmware carries every chip's blob and the
+# generic NVRAM that goes with them, and the NVRAM is the part that has to match
+# the board — the antenna path, the clock, the MAC. This board's comes from the
+# vendor. Three files, half a megabyte.
 #
 # They come off the board itself, from the image it runs now: the vendor keeps
 # them under /lib/firmware/ap6212/ with their own names, and mainline wants them
@@ -29,3 +31,15 @@ done
 # The root is a read-only squashfs, so this is the mount point for the tmpfs that
 # /etc/fstab puts the program's log on — and it has to exist before mount -a.
 install -d -m 0755 "$TARGET_DIR/var/log"
+
+# The skeleton gives /var/run as a directory of its own, which on a read-only root
+# is a directory nobody can write to. Point it at the tmpfs /etc/fstab mounts on
+# /run, where sshd and anything else that drops a pid file expects to be able to.
+rm -rf "$TARGET_DIR/var/run"
+ln -s ../run "$TARGET_DIR/var/run"
+
+# The overlays are rsynced with a --chmod that leaves every file 0644, and sshd
+# refuses a private key that anyone but its owner can read. The key itself is in
+# the overlay because it has to be in the image: the root is read-only, so there
+# is nowhere to generate one at boot.
+chmod 600 "$TARGET_DIR/etc/ssh/ssh_host_ed25519_key"

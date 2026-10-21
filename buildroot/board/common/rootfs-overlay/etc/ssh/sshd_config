@@ -1,0 +1,15 @@
+# sshd, for reaching the board over its own access point while debugging.
+#
+# Short on purpose. The board is on a network it serves, with a passphrase on it,
+# and nothing here is reachable from anywhere else — so root with a password is
+# the whole of it, and UseDNS is off because there is no resolver on this network
+# and every login would otherwise wait for a reverse lookup to time out.
+Port 22
+HostKey /etc/ssh/ssh_host_ed25519_key
+PermitRootLogin yes
+PasswordAuthentication yes
+PermitEmptyPasswords no
+UsePAM no
+UseDNS no
+PrintMotd no
+Subsystem sftp internal-sftp

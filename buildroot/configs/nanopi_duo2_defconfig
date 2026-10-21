@@ -24,6 +24,10 @@ BR2_TARGET_GENERIC_HOSTNAME="nanopi-duo2"
 BR2_TARGET_GENERIC_ISSUE="cp2cl"
 BR2_TARGET_GENERIC_GETTY_PORT=""
 BR2_SYSTEM_DHCP=""
+# A way in while the image is still being brought up. The board is on the access
+# point it serves and nothing here is reachable from anywhere else; change this
+# before the board goes into a car and stays there.
+BR2_TARGET_GENERIC_ROOT_PASSWD="cp2cl"
 
 BR2_INIT_BUSYBOX=y
 BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_DEVTMPFS=y
@@ -69,6 +73,10 @@ BR2_PACKAGE_HOSTAPD_DRIVER_NL80211=y
 BR2_PACKAGE_DNSMASQ=y
 BR2_PACKAGE_IW=y
 BR2_PACKAGE_KMOD=y
+BR2_PACKAGE_OPENSSH=y
+BR2_PACKAGE_OPENSSH_CLIENT=y
+BR2_PACKAGE_OPENSSH_SERVER=y
+BR2_PACKAGE_OPENSSH_KEY_UTILS=y
 BR2_PACKAGE_CP2CL=y
 BR2_PACKAGE_HOST_GENIMAGE=y
 
