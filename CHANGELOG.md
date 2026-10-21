@@ -4,6 +4,17 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## v0.10.0 alpha — 待发布
+
+### 变更
+
+- 车机静默时日志能分清「没打开管道」和「打开了不说话」，`usb.enumerated` 带上 `speed`/`state`，管道开启 2 秒仍无消息就写一帧心跳并记下是否被取走（`662a073`）。
+- 车机发来的前 8 帧按原始字节记录，非命令通道与未识别的消息类型不再只出现在 debug（`662a073`）。
+
+### 修复
+
+- 切到 accessory 形态只改 VID/PID，manufacturer、product、serial 保持本机自己的，与真机在同样切换下的表现一致（`dc6bb77`）。
+
 ## v0.9.1 alpha — 2026-10-21
 
 ### 变更
