@@ -19,6 +19,11 @@
 //! when the car has another, and an answer is only ever the picture that was
 //! asked for.
 //!
+//! `/api/log` is the other one: the copy of the log the program keeps under
+//! `/tmp`, asked for by how far the page has already read rather than in full.
+//! It is a file that is always being added to, so a page that wants to keep up
+//! with it has to say where it got to — see `log`.
+//!
 //! `axum` is here for `axum::serve` and its router, which is less code than
 //! parsing a request line by hand and less to get wrong. It used to be here for
 //! a WebSocket too, and that half went with the browser client that needed it —
@@ -31,6 +36,7 @@ mod status;
 // rest of the snapshot is reached through `Status::with` and never named.
 pub use status::{AccessPoint, Audio, Mic, Screen, Size, Statistic, Status};
 
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::extract::{RawQuery, State};
@@ -38,7 +44,11 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
+use serde_json::json;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::net::TcpListener;
+
+use crate::logging;
 
 /// The page, and the stylesheet it names. Both live in `assets/web`, so they are
 /// built into the binary with everything else: there is nothing to install
@@ -87,6 +97,7 @@ pub async fn serve(listener: TcpListener, status: Arc<Status>) {
         .route("/vendor/weui.min.css", get(stylesheet))
         .route("/api/status", get(api))
         .route("/api/cover", get(cover))
+        .route("/api/log", get(log))
         .fallback(not_found)
         .with_state(status);
     if let Err(e) = axum::serve(listener, app).await {
@@ -149,6 +160,79 @@ async fn cover(State(status): State<Arc<Status>>, RawQuery(query): RawQuery) -> 
         .into_response()
 }
 
+/// How much of the copy one fetch may carry, in bytes.
+///
+/// A page that has been closed for an hour catches up over the next few polls
+/// rather than being handed four megabytes the moment it is opened again.
+const LOG_CHUNK: u64 = 256 * 1024;
+
+/// The copy of the log, from the byte the page has read up to.
+///
+/// Asked for by offset rather than in full: the copy is written continuously
+/// and the page asks every two seconds, so what goes over the wire is only
+/// what has been written since the last answer.
+///
+/// `reset` is the one way an offset can turn out to be nowhere: the copy was
+/// rolled over and is now shorter than where the page had got to, or the
+/// program has run again. Either way the page is told to drop what it had, and
+/// is given the last chunk of the copy — which is where a page that asks for
+/// nothing at all starts too.
+async fn log(RawQuery(query): RawQuery) -> Response {
+    let (reset, from, text) = copied(Path::new(logging::PATH), from(&query)).await;
+    (
+        [
+            (header::CONTENT_TYPE, JSON),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        json!({
+            "reset": reset,
+            "from": from,
+            "next": from + text.len() as u64,
+            "text": text,
+        })
+        .to_string(),
+    )
+        .into_response()
+}
+
+/// What has been written to the copy since `from`, which is `None` when the
+/// page has not asked for a place in it yet.
+///
+/// No offset means the end of the copy, not the beginning of it: a page that
+/// has just been opened is asking what is happening now, and the copy it is
+/// looking at may be four megabytes of a run that started an hour ago.
+async fn copied(path: &Path, from: Option<u64>) -> (bool, u64, String) {
+    // No copy yet, or one that cannot be read, is an empty one: the page shows
+    // nothing and asks again.
+    let Ok(mut file) = tokio::fs::File::open(path).await else {
+        return (true, 0, String::new());
+    };
+    let written = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+    let (reset, from) = match from {
+        Some(at) if at <= written => (false, at),
+        // Nowhere in this copy: either it was rolled over and is shorter than
+        // where the page had got to, or the program has run again. The last
+        // chunk of it is what is shown, since that is where the story is.
+        _ => (true, written.saturating_sub(LOG_CHUNK)),
+    };
+
+    let mut bytes = Vec::new();
+    if file.seek(std::io::SeekFrom::Start(from)).await.is_ok() {
+        let _ = file.take(LOG_CHUNK).read_to_end(&mut bytes).await;
+    }
+    (reset, from, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The offset a request asks for out of its query string.
+///
+/// One parameter, like `named`: `from=<bytes>`, which is where the last answer
+/// left the page. Anything else is no offset, and no offset is the beginning.
+fn from(query: &Option<String>) -> Option<u64> {
+    let asked = query.as_deref()?;
+    let at = asked.split('&').find_map(|pair| pair.strip_prefix("from="))?;
+    at.parse().ok()
+}
+
 /// The name a request asks for, out of its query string.
 ///
 /// One parameter, so one split rather than a parser: `id=<name>`, sixteen hex
@@ -193,6 +277,28 @@ mod tests {
         assert!(
             weui_text().contains(".weui-cells"),
             "which is the one that was vendored"
+        );
+    }
+
+    /// The page is three tabs, and the log one is the copy on disk read
+    /// forwards: it asks from where it left off, and starts over when the
+    /// copy it was reading has been rolled away from under it.
+    #[test]
+    fn the_page_has_a_tab_for_the_log_and_reads_it_forward() {
+        for label in ["状态", "日志", "设置"] {
+            assert!(page_text().contains(label), "the tabbar names {label}");
+        }
+        assert!(
+            page_text().contains("/api/log"),
+            "the log tab reads the copy"
+        );
+        assert!(
+            page_text().contains("?from="),
+            "from where it left off, not from the beginning"
+        );
+        assert!(
+            page_text().contains("data.reset"),
+            "and starts over when the copy has been rolled"
         );
     }
 
@@ -374,6 +480,64 @@ mod tests {
         let body = status.json();
         assert_eq!(body["carlife"]["gps"]["latitude"], 30_317_880);
         assert_eq!(body["carlife"]["gps"]["longitude"], 120_128_094);
+    }
+
+    /// The log is a file that is always being added to, so the page asks for
+    /// what it has not read rather than for all of it: an answer carries what
+    /// was written since the offset, and the offset to ask from next.
+    ///
+    /// An offset that is nowhere in the copy — a copy that has been rolled over
+    /// and is shorter than where the page had got to — is answered with the
+    /// copy from the beginning, and with `reset` so the page knows to drop what
+    /// it had rather than carry on from the end of another run.
+    #[tokio::test]
+    async fn the_log_is_read_from_where_the_page_left_off() {
+        let path = std::env::temp_dir().join(format!("cp2cl-log-{}", std::process::id()));
+        std::fs::write(&path, "one\ntwo\n").unwrap();
+
+        let (reset, from, text) = copied(&path, None).await;
+        assert!(reset, "no offset is the beginning");
+        assert_eq!((from, text.as_str()), (0, "one\ntwo\n"));
+
+        // The next answer starts where that one ended, and carries nothing new.
+        let (reset, from, text) = copied(&path, Some(text.len() as u64)).await;
+        assert!(!reset, "an offset in the copy is kept");
+        assert_eq!((from, text.as_str()), (8, ""));
+
+        // Half way in is the rest of it, from there.
+        let (reset, from, text) = copied(&path, Some(4)).await;
+        assert!(!reset);
+        assert_eq!((from, text.as_str()), (4, "two\n"));
+
+        // Past the end is a copy that moved under the page: rolled, or written
+        // by another run.
+        let (reset, from, text) = copied(&path, Some(4096)).await;
+        assert!(reset);
+        assert_eq!((from, text.as_str()), (0, "one\ntwo\n"));
+
+        // A copy that is not there is an empty one, and is not an error.
+        let gone = std::env::temp_dir().join("cp2cl-log-not-here");
+        let (reset, from, text) = copied(&gone, Some(8)).await;
+        assert!(reset);
+        assert_eq!((from, text.as_str()), (0, ""));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A page that has just been opened asks what is happening now: the answer
+    /// is the last chunk of the copy, not four megabytes from an hour ago.
+    #[tokio::test]
+    async fn the_log_opens_at_its_tail() {
+        let path = std::env::temp_dir().join(format!("cp2cl-tail-{}", std::process::id()));
+        let line = "x".repeat(99) + "\n";
+        std::fs::write(&path, line.repeat(3000)).unwrap();
+
+        let (reset, from, text) = copied(&path, None).await;
+        assert!(reset, "a page with no offset starts over");
+        assert_eq!(from, 300_000 - LOG_CHUNK, "at the last chunk of the copy");
+        assert_eq!(text.len() as u64, LOG_CHUNK);
+
+        std::fs::remove_file(&path).ok();
     }
 
     /// The board's own CPU and memory are their own part of the page, and the

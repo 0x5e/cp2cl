@@ -8,9 +8,20 @@
 <link rel="stylesheet" href="/vendor/weui.min.css">
 <style>
   html,body{overscroll-behavior-x:none}
-  .page{padding:4px 0 calc(28px + env(safe-area-inset-bottom))}
+  .page{padding:4px 0 calc(76px + env(safe-area-inset-bottom))}
   .weui-cells__title{margin-top:22px}
   .weui-cells__title:first-child{margin-top:14px}
+  .panel{display:none}
+  .panel.on{display:block}
+  .tabbar{position:fixed;left:0;right:0;bottom:0;z-index:10;display:flex;
+    background:var(--weui-BG-2);border-top:1px solid var(--weui-FG-3);
+    padding-bottom:env(safe-area-inset-bottom)}
+  .tabbar .tab{flex:1;padding:12px 0 10px;font:inherit;font-size:15px;
+    color:var(--weui-FG-1);background:none;border:0;-webkit-tap-highlight-color:transparent}
+  .tabbar .tab.on{color:var(--weui-BRAND-100)}
+  .log{height:calc(100vh - 120px);overflow:auto;margin:0;padding:10px 16px;
+    font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    white-space:pre-wrap;word-break:break-all;color:var(--weui-FG-0);tab-size:4}
   .weui-cell{padding-top:11px;padding-bottom:11px}
   .weui-cell__bd{flex:0 0 auto;padding-right:16px}
   .weui-cell__ft{flex:1 1 auto;min-width:0;overflow-wrap:anywhere;font-size:14px}
@@ -27,18 +38,30 @@
 </head>
 <body>
 <div class="page">
-  <div class="weui-cells__title">CarLife 连接 · 车机端</div>
-  <div class="weui-cells" id="carlife"></div>
-  <div class="weui-cells__title">CarPlay 连接 · 手机端</div>
-  <div class="weui-cells" id="carplay"></div>
-  <div class="weui-cells__title" id="playing-title">正在播放</div>
-  <div class="weui-cells" id="playing"></div>
-  <div class="weui-cells__title" id="gps-title" style="display: none">车载数据 · GPS</div>
-  <div class="weui-cells" id="gps" style="display: none"></div>
-  <div class="weui-cells__title">设备端</div>
-  <div class="weui-cells" id="device"></div>
-  <p class="stamp" id="stamp">正在读取…</p>
+  <div class="panel on" id="panel-status">
+    <div class="weui-cells__title">CarLife 连接 · 车机端</div>
+    <div class="weui-cells" id="carlife"></div>
+    <div class="weui-cells__title">CarPlay 连接 · 手机端</div>
+    <div class="weui-cells" id="carplay"></div>
+    <div class="weui-cells__title" id="playing-title">正在播放</div>
+    <div class="weui-cells" id="playing"></div>
+    <div class="weui-cells__title" id="gps-title" style="display: none">车载数据 · GPS</div>
+    <div class="weui-cells" id="gps" style="display: none"></div>
+    <div class="weui-cells__title">设备端</div>
+    <div class="weui-cells" id="device"></div>
+    <p class="stamp" id="stamp">正在读取…</p>
+  </div>
+  <div class="panel" id="panel-log">
+    <pre class="log" id="log"></pre>
+    <p class="stamp" id="log-stamp">正在读取…</p>
+  </div>
+  <div class="panel" id="panel-settings"></div>
 </div>
+<nav class="tabbar">
+  <button class="tab on" id="tab-status" data-tab="status">状态</button>
+  <button class="tab" id="tab-log" data-tab="log">日志</button>
+  <button class="tab" id="tab-settings" data-tab="settings">设置</button>
+</nav>
 <script>
 "use strict";
 
@@ -350,28 +373,113 @@ function render(data) {
   fill(document.getElementById("gps"), GPS_ROWS, [], fix || {}, true);
 }
 
+function now() {
+  return new Date().toLocaleTimeString("zh-CN", { hour12: false });
+}
+
 const stamp = document.getElementById("stamp");
 
-async function tick() {
+async function statusTick() {
   try {
     const response = await fetch("/api/status", { cache: "no-store" });
     if (!response.ok) throw new Error("HTTP " + response.status);
     render(await response.json());
     stamp.className = "stamp";
-    stamp.textContent = "最后更新 " +
-      new Date().toLocaleTimeString("zh-CN", { hour12: false });
+    stamp.textContent = "最后更新 " + now();
   } catch (e) {
     stamp.className = "stamp v-bad";
     stamp.textContent = "读取失败：" + e.message;
   }
 }
 
-function schedule() {
-  if (document.hidden) return;
-  tick();
+// ---------------------------------------------------------------- 日志 ----
+
+// The copy of the log on the board, read forward from the byte the last answer
+// ended at. It is a file something else is writing to, so it is never fetched
+// whole: two seconds of a running bridge is a handful of lines, and asking for
+// a megabyte every two seconds is asking the board to hand over its own log
+// again and again.
+const LOG_LINES = 1000;
+
+const logBox = document.getElementById("log");
+const logStamp = document.getElementById("log-stamp");
+
+let logLines = [];   // 屏幕上已有的行，最多 LOG_LINES 条
+let logTail = "";    // 上一次没读完的半行
+let logAt = null;    // 已经读到的字节位置，null = 还没读过
+
+function atBottom() {
+  return logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 24;
 }
 
-tick();
+function appendLog(text) {
+  if (!text) return;
+  // One answer can end in the middle of a line — a chunk is a number of bytes,
+  // not of lines — so the half of it waits for the rest.
+  const parts = (logTail + text).split("\n");
+  logTail = parts.pop();
+  if (!parts.length) return;
+
+  const stick = atBottom();
+  const top = logBox.scrollTop;
+  for (const line of parts) logLines.push(line + "\n");
+  if (logLines.length > LOG_LINES) logLines.splice(0, logLines.length - LOG_LINES);
+  logBox.textContent = logLines.join("");
+  // Reading further back is not undone by a new line arriving: only a view
+  // that was already at the end follows it.
+  logBox.scrollTop = stick ? logBox.scrollHeight : top;
+}
+
+async function logTick() {
+  try {
+    const asked = logAt === null ? "" : "?from=" + logAt;
+    const response = await fetch("/api/log" + asked, { cache: "no-store" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    const data = await response.json();
+    // The copy was rolled over, or the program started again: what is on
+    // screen is another run's, or this run's before the roll.
+    if (data.reset) {
+      logLines = [];
+      logTail = "";
+      logBox.textContent = "";
+    }
+    appendLog(data.text);
+    logAt = data.next;
+    logStamp.className = "stamp";
+    logStamp.textContent = logLines.length + " 行 · 最后更新 " + now();
+  } catch (e) {
+    logStamp.className = "stamp v-bad";
+    logStamp.textContent = "读取失败：" + e.message;
+  }
+}
+
+// ---------------------------------------------------------------- tabs ----
+
+let tab = "status";
+
+function select(name) {
+  tab = name;
+  for (const id of ["status", "log", "settings"]) {
+    document.getElementById("panel-" + id).classList.toggle("on", id === name);
+    document.getElementById("tab-" + id).classList.toggle("on", id === name);
+  }
+  // Whatever is not being looked at is not asked for: the board has better
+  // things to do with its CPU than answer a hidden tab.
+  if (name === "status") statusTick();
+  if (name === "log") logTick();
+}
+
+for (const button of document.querySelectorAll(".tabbar .tab")) {
+  button.addEventListener("click", () => select(button.dataset.tab));
+}
+
+function schedule() {
+  if (document.hidden) return;
+  if (tab === "status") statusTick();
+  if (tab === "log") logTick();
+}
+
+select("status");
 setInterval(schedule, 2000);
 document.addEventListener("visibilitychange", schedule);
 </script>
