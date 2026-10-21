@@ -405,6 +405,7 @@ where
         auth,
         next_tick: Instant::now(),
         position_seen: false,
+        last_fix: None,
         delivered: false,
         handed: None,
         // Nothing is assumed about the datum before the car has named one, and a
@@ -725,8 +726,12 @@ struct Session<'a, W> {
     auth: Option<auth::Signer>,
     /// Whether the car has sent a position yet. The first one is worth a line at
     /// `info`, because it is the evidence that the subscription worked; every
-    /// one after it is the same report again and belongs in `debug`.
+    /// one after it belongs in `debug`, and only when it says something new.
     position_seen: bool,
+    /// The last fix the car reported, with the clock fields cleared — see
+    /// `untimed`. A parked car sends the same position over and over with only
+    /// the timestamp moving, and that report is not worth a line.
+    last_fix: Option<proto::CarGps>,
     /// Whether a position has been handed to the phone at all, which is the
     /// other half of that evidence: the car spoke, and the phone was told.
     delivered: bool,
@@ -903,15 +908,19 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                         fix.antenna_state
                     );
                 }
-                tracing::debug!(
-                    "cl.car_gps antenna={} latitude={latitude:.6} longitude={longitude:.6} \
-                     height={} speed={} heading={} accuracy_m={}",
-                    fix.antenna_state,
-                    fix.height,
-                    fix.speed,
-                    fix.heading,
-                    fix.hor_pos_error
-                );
+                let report = untimed(fix);
+                if self.last_fix != Some(report) {
+                    self.last_fix = Some(report);
+                    tracing::debug!(
+                        "cl.car_gps antenna={} latitude={latitude:.6} longitude={longitude:.6} \
+                         height={} speed={} heading={} accuracy_m={}",
+                        fix.antenna_state,
+                        fix.height,
+                        fix.speed,
+                        fix.heading,
+                        fix.hor_pos_error
+                    );
+                }
                 self.hand_to_phone(&fix);
                 self.status.with(|s| s.carlife.gps = Some(fix));
             }
@@ -1722,6 +1731,22 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         frame::write_chunk(&mut self.writer, channel, &message)
             .await
             .with_context(|| format!("write {service_type:#010x}"))
+    }
+}
+
+/// The fix as it is compared between reports: the clock fields cleared, because
+/// a car that has not moved reports the same position with a later timestamp,
+/// and only a change in what it says about the position is worth a line.
+fn untimed(fix: proto::CarGps) -> proto::CarGps {
+    proto::CarGps {
+        year: 0,
+        month: 0,
+        day: 0,
+        hour: 0,
+        minute: 0,
+        second: 0,
+        timestamp_ms: 0,
+        ..fix
     }
 }
 
