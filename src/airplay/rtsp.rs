@@ -28,13 +28,6 @@ impl Request {
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(0)
     }
-
-    pub fn content_length(&self) -> usize {
-        self.headers
-            .get("content-length")
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(0)
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -45,8 +38,6 @@ pub enum ParseError {
     Line(String),
     #[error("bad header: {0}")]
     Header(String),
-    #[error("short body: want {want}, have {have}")]
-    ShortBody { want: usize, have: usize },
 }
 
 /// Splits the bytes that have arrived so far into (request, consumed).

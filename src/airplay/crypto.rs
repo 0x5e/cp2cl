@@ -20,8 +20,6 @@ use hkdf::Hkdf;
 use sha2::{Digest, Sha256, Sha512};
 use x25519_dalek::{PublicKey, StaticSecret};
 
-pub type Result32 = Result<[u8; 32], CryptoError>;
-
 #[derive(Debug, thiserror::Error)]
 pub enum CryptoError {
     #[error("bad key length")]
@@ -196,13 +194,6 @@ pub fn open_frames(
     Ok(())
 }
 
-pub fn sha1(data: &[u8]) -> [u8; 20] {
-    use sha1::Digest;
-    let mut out = [0u8; 20];
-    out.copy_from_slice(&sha1::Sha1::digest(data));
-    out
-}
-
 /// Concatenated SHA-1, the way /auth-setup derives its AES key and IV.
 pub fn sha1_all(parts: &[&[u8]]) -> [u8; 20] {
     use sha1::Digest;
@@ -211,14 +202,6 @@ pub fn sha1_all(parts: &[&[u8]]) -> [u8; 20] {
         h.update(p);
     }
     let mut out = [0u8; 20];
-    out.copy_from_slice(&h.finalize());
-    out
-}
-
-pub fn sha256(data: &[u8]) -> [u8; 32] {
-    let mut h = Sha256::new();
-    h.update(data);
-    let mut out = [0u8; 32];
     out.copy_from_slice(&h.finalize());
     out
 }

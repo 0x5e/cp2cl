@@ -21,14 +21,14 @@ use super::crypto::{
 
 // ------------------------------------------------------------------ TLV8 ----
 
-pub const TYPE_METHOD: u8 = 0x00;
+// In wire order, minus the two we neither send nor read: 0x00 (method) and
+// 0x07 (error).
 pub const TYPE_IDENTIFIER: u8 = 0x01;
 pub const TYPE_SALT: u8 = 0x02;
 pub const TYPE_PUBLIC_KEY: u8 = 0x03;
 pub const TYPE_PROOF: u8 = 0x04;
 pub const TYPE_ENCRYPTED_DATA: u8 = 0x05;
 pub const TYPE_STATE: u8 = 0x06;
-pub const TYPE_ERROR: u8 = 0x07;
 pub const TYPE_SIGNATURE: u8 = 0x0a;
 
 pub type Tlv = Vec<(u8, Vec<u8>)>;
@@ -243,15 +243,6 @@ impl PairSetup {
             public_b: pad(&public).to_vec(),
             session_key: None,
         }
-    }
-
-    /// Whether the SRP exchange has produced a session key (i.e. we are past M3).
-    pub fn has_session(&self) -> bool {
-        self.session_key.is_some()
-    }
-
-    pub fn session_key(&self) -> Option<[u8; 64]> {
-        self.session_key
     }
 
     /// Consumes the phone's M1/M3/M5 and returns what to send back.
