@@ -1,0 +1,7 @@
+# The root is a read-only squashfs; everything that is written lives in a tmpfs
+# and is gone at power off. That is the trade the image makes: nothing to fsck
+# on a card that loses power with the ignition, and no log that survives it.
+/dev/root	/		squashfs	ro,noatime		0 0
+tmpfs		/tmp		tmpfs		mode=1777		0 0
+tmpfs		/run		tmpfs		mode=0755		0 0
+tmpfs		/var/log	tmpfs		mode=0755,size=4M	0 0

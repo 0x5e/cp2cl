@@ -1,0 +1,16 @@
+# H3 + AP6212, on top of board/common/kernel.fragment.
+#
+# The radio is on SDIO, the Bluetooth half of the same chip is on UART1, and the
+# OTG port is musb with the sunxi glue under it. Nothing here is portable, which
+# is why it is not in the common fragment.
+
+CONFIG_MMC_SUNXI=y
+CONFIG_MMC_SUNXI_SLOT_EXTRA=2
+CONFIG_BRCMFMAC=y
+CONFIG_BRCMUTIL=y
+CONFIG_SERIAL_8250=y
+CONFIG_SERIAL_8250_NR_UARTS=8
+CONFIG_SERIAL_8250_RUNTIME_UARTS=8
+CONFIG_USB_MUSB_SUNXI=y
+CONFIG_PHY_SUN4I_USB=y
+CONFIG_SUNXI_SRAM=y

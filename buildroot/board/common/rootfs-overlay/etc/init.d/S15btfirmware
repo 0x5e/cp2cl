@@ -1,0 +1,31 @@
+#!/bin/sh
+#
+# The Bluetooth half of the AP6212 needs its firmware pushed over UART1 before
+# BlueZ sees an adapter at all.
+#
+# On the Ubuntu image this ran as a systemd oneshot that multi-user.target
+# waited on, and it held the boot for 34 s. Here it is backgrounded, because
+# nothing needs the adapter at boot: BlueZ picks hci0 up through the kernel
+# whenever it appears, and cp2cl only needs it by the time a phone asks to come
+# back over Wi-Fi.
+#
+# If the kernel's own btbcm does the download instead (hci_uart with the bcm
+# protocol, which is what CONFIG_BT_HCIUART_BCM is), this script has nothing to
+# do and should be deleted.
+case "$1" in
+	start)
+		printf 'Starting Bluetooth firmware: '
+		brcm_patchram_plus \
+			--enable_hci --no2bytes --tosleep 200000 \
+			--baudrate 1500000 \
+			--patchram /lib/firmware/brcm/BCM43430A1.hcd \
+			/dev/ttyS1 &
+		echo "ok"
+		;;
+	stop)
+		;;
+	*)
+		echo "Usage: $0 {start|stop}"
+		exit 1
+		;;
+esac

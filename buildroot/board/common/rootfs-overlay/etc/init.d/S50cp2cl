@@ -1,0 +1,37 @@
+#!/bin/sh
+#
+# cp2cl, last: it needs the access point up (it reads the network it hands the
+# phone out of /etc/hostapd) and, for wireless, BlueZ registered.
+#
+# The environment is the one the README documents. They are set here rather
+# than in a settings file because the program has no settings file — everything
+# it takes from outside comes from the environment.
+#
+# The log goes to /var/log, which is a tmpfs on this image because the root is a
+# read-only squashfs. That means it does not survive a power cut: a run that
+# ends in a fault is gone with it. A third partition, or an overlay on one, is
+# what buys that back.
+case "$1" in
+	start)
+		printf 'Starting cp2cl: '
+		CP2CL_WIRELESS=1 \
+		CP2CL_LOG_LEVEL=info \
+		CP2CL_WIFI_IFACE=wlan0 \
+		CP2CL_BT_ADAPTER=hci0 \
+			setsid /usr/bin/cp2cl >>/var/log/cp2cl.log 2>&1 &
+		echo $! > /run/cp2cl.pid
+		echo "ok"
+		;;
+	stop)
+		start-stop-daemon -K -q -p /run/cp2cl.pid
+		;;
+	restart|reload)
+		"$0" stop
+		sleep 1
+		"$0" start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+		;;
+esac

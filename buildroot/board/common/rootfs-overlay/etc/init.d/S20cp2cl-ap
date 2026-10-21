@@ -1,0 +1,32 @@
+#!/bin/sh
+#
+# The access point: the only way to reach the board, and the network the phone
+# comes back on. The same two things the Ubuntu image runs as cp2cl-ap.service
+# and cp2cl-ap-dhcp.service, in the order they have to happen.
+#
+# It is one script rather than two because there is no unit ordering to express
+# here: hostapd has to be beaconing before a client can ask dnsmasq for an
+# address, and that is a line order.
+case "$1" in
+	start)
+		printf 'Starting access point: '
+		iw dev wlan0 set power_save off
+		ip addr replace 192.168.4.1/24 dev wlan0
+		hostapd -B -P /run/hostapd.pid /etc/hostapd/hostapd.conf
+		dnsmasq --interface=wlan0 --bind-interfaces \
+			--dhcp-range=192.168.4.2,192.168.4.100,255.255.255.0,12h \
+			--dhcp-sequential-ip \
+			--dhcp-option=3 \
+			--dhcp-option=6 \
+			--port=0
+		echo "ok"
+		;;
+	stop)
+		[ -r /run/hostapd.pid ] && kill "$(cat /run/hostapd.pid)" 2>/dev/null
+		killall dnsmasq 2>/dev/null
+		;;
+	*)
+		echo "Usage: $0 {start|stop}"
+		exit 1
+		;;
+esac
