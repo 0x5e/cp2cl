@@ -176,7 +176,7 @@ impl Visit for Said {
 /// kept. Both are in `/tmp`, which is memory on the board, which is why neither
 /// is left to grow: see `CAP`.
 pub const PATH: &str = "/tmp/cp2cl.log";
-const PREVIOUS: &str = "/tmp/cp2cl.log.1";
+pub const PREVIOUS: &str = "/tmp/cp2cl.log.1";
 
 /// How big a chunk is allowed to get before it is rolled over, in bytes.
 ///

@@ -22,7 +22,8 @@
 //! `/api/log` is the other one: the copy of the log the program keeps under
 //! `/tmp`, asked for by how far the page has already read rather than in full.
 //! It is a file that is always being added to, so a page that wants to keep up
-//! with it has to say where it got to — see `log`.
+//! with it has to say where it got to — see `log`. `/api/log/download` is the
+//! same copy as one file, for taking off the board.
 //!
 //! `axum` is here for `axum::serve` and its router, which is less code than
 //! parsing a request line by hand and less to get wrong. It used to be here for
@@ -67,6 +68,7 @@ const HTML: &str = "text/html; charset=utf-8";
 const CSS: &str = "text/css; charset=utf-8";
 const JSON: &str = "application/json";
 const JPEG: &str = "image/jpeg";
+const PLAIN: &str = "text/plain; charset=utf-8";
 
 /// A cover is fetched by the name of the cover, so an answer is good for as
 /// long as that name is — which is until the car is given another picture.
@@ -98,6 +100,7 @@ pub async fn serve(listener: TcpListener, status: Arc<Status>) {
         .route("/api/status", get(api))
         .route("/api/cover", get(cover))
         .route("/api/log", get(log))
+        .route("/api/log/download", get(download))
         .fallback(not_found)
         .with_state(status);
     if let Err(e) = axum::serve(listener, app).await {
@@ -221,6 +224,44 @@ async fn copied(path: &Path, from: Option<u64>) -> (bool, u64, String) {
         let _ = file.take(LOG_CHUNK).read_to_end(&mut bytes).await;
     }
     (reset, from, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Everything the board still has of the log, for taking away.
+///
+/// The page keeps up with the copy a chunk at a time and draws it with whatever
+/// level is being looked at, which is what watching a run go by wants — and not
+/// what is wanted by someone asking afterwards what happened. This answers with
+/// both chunks as they were written: the one that was rolled over, since it is
+/// the older of the two, then the one being added to.
+async fn download() -> Response {
+    let bytes = both(Path::new(logging::PREVIOUS), Path::new(logging::PATH)).await;
+    if bytes.is_empty() {
+        return (StatusCode::NOT_FOUND, "no log\n").into_response();
+    }
+    (
+        [
+            (header::CONTENT_TYPE, PLAIN),
+            (header::CONTENT_DISPOSITION, "attachment; filename=cp2cl.log"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+/// The two chunks of the copy as one answer, the older one first.
+///
+/// A chunk that cannot be read is not a reason to answer with nothing: what is
+/// there is still the log, and the one that could be read is better than none
+/// of it.
+async fn both(first: &Path, then: &Path) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for path in [first, then] {
+        if let Ok(mut file) = tokio::fs::File::open(path).await {
+            let _ = file.read_to_end(&mut bytes).await;
+        }
+    }
+    bytes
 }
 
 /// The offset a request asks for out of its query string.
@@ -554,6 +595,28 @@ mod tests {
         assert_eq!(text.len() as u64, LOG_CHUNK);
 
         std::fs::remove_file(&path).ok();
+    }
+
+    /// Taking the copy away is the whole of it rather than what the page is
+    /// showing: both chunks, the older one first, and no level left out.
+    #[tokio::test]
+    async fn the_whole_copy_is_both_chunks_with_the_older_one_first() {
+        let dir = std::env::temp_dir();
+        let before = dir.join(format!("cp2cl-before-{}", std::process::id()));
+        let now = dir.join(format!("cp2cl-now-{}", std::process::id()));
+        std::fs::write(&before, "debug\nbefore\n").unwrap();
+        std::fs::write(&now, "now\n").unwrap();
+
+        assert_eq!(both(&before, &now).await, b"debug\nbefore\nnow\n".to_vec());
+
+        // A chunk that is not there is only the other one, not nothing.
+        std::fs::remove_file(&before).unwrap();
+        assert_eq!(both(&before, &now).await, b"now\n".to_vec());
+
+        // Neither of them is a copy at all.
+        assert!(both(&before, &before).await.is_empty());
+
+        std::fs::remove_file(&now).ok();
     }
 
     /// The board's own CPU and memory are their own part of the page, and the
