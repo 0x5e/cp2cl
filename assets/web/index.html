@@ -32,13 +32,19 @@
   .log [hidden]{display:none}
   /* The level is what a log is read for, so what is below the one being looked
      for is dropped rather than scrolled past. */
-  .log-bar{display:flex;align-items:center;gap:10px;padding:8px 16px;
+  /* A label and the value it names are one thing, so they sit together: a
+     label at one edge of the bar and its value at the other reads as two. */
+  .log-bar{display:flex;align-items:center;gap:16px;padding:8px 16px;
     border-bottom:1px solid var(--weui-FG-3);background:var(--weui-BG-2);
-    font-size:13px;color:var(--weui-FG-1)}
-  .log-bar select{flex:1;min-width:0;font:inherit;color:var(--weui-FG-0);
-    background:none;border:0;padding:2px 0;text-align:right}
-  .log-fold{flex:none;display:flex;align-items:center;gap:4px;white-space:nowrap}
+    font-size:13px;color:var(--weui-FG-1);white-space:nowrap}
+  .log-pick{display:flex;align-items:center;gap:6px;min-width:0}
+  .log-bar select{font:inherit;color:var(--weui-FG-0);
+    background:none;border:0;padding:2px 0;min-width:0}
+  .log-fold{display:flex;align-items:center;gap:4px}
   .log-fold input{accent-color:var(--weui-BRAND);margin:0}
+  /* Taking the copy away is the one control here that is not about looking at
+     it, so it is at the other end of the bar from the two that are. */
+  .log-grab{margin-left:auto;color:var(--weui-BRAND-100);text-decoration:none}
   /* Not wrapping gives a line back its shape, which is what a line is read by:
      the whole of it goes on one row and the box scrolls sideways for the rest. */
   .log.nowrap{white-space:pre;word-break:normal;overflow-x:auto}
@@ -81,17 +87,21 @@
   </div>
   <div class="panel" id="panel-log">
     <div class="log-bar">
-      <label for="log-level">级别</label>
-      <select id="log-level">
-        <option value="trace">全部</option>
-        <option value="debug">DEBUG</option>
-        <option value="info">INFO</option>
-        <option value="warn">WARN</option>
-        <option value="error">ERROR</option>
-      </select>
+      <span class="log-pick">
+        <label for="log-level">级别</label>
+        <select id="log-level">
+          <option value="trace">全部</option>
+          <option value="debug">DEBUG</option>
+          <option value="info">INFO</option>
+          <option value="warn">WARN</option>
+          <option value="error">ERROR</option>
+        </select>
+      </span>
       <label class="log-fold" for="log-wrap">
         <input type="checkbox" id="log-wrap" checked>自动换行
       </label>
+      <a class="log-grab" id="log-grab" href="/api/log/download"
+         download title="下载完整日志">下载</a>
     </div>
     <pre class="log" id="log"></pre>
     <p class="stamp" id="log-stamp">正在读取…</p>

@@ -357,6 +357,10 @@ mod tests {
             page_text().contains("id=\"log-wrap\""),
             "and a line kept on one row instead of wrapped"
         );
+        assert!(
+            page_text().contains("/api/log/download"),
+            "and the whole of it can be taken away"
+        );
     }
 
     /// The page is one document and reads one key per part, so the snapshot has
