@@ -308,6 +308,10 @@ mod tests {
             page_text().contains("level.className = \"lv \" + LEVELS[found[2]]"),
             "and its level is coloured by which level it is"
         );
+        assert!(
+            page_text().contains("id=\"log-level\""),
+            "and the lowest level it shows can be picked"
+        );
     }
 
     /// The page is one document and reads one key per part, so the snapshot has
