@@ -300,6 +300,14 @@ mod tests {
             page_text().contains("data.reset"),
             "and starts over when the copy has been rolled"
         );
+        assert!(
+            page_text().contains("stamp.className = \"tm\""),
+            "the stamp of a line is greyed, as on the terminal"
+        );
+        assert!(
+            page_text().contains("level.className = \"lv \" + LEVELS[found[2]]"),
+            "and its level is coloured by which level it is"
+        );
     }
 
     /// The page is one document and reads one key per part, so the snapshot has

@@ -29,6 +29,14 @@
   .log{flex:1 1 auto;min-height:0;overflow-y:auto;margin:0;padding:10px 16px;
     font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
     white-space:pre-wrap;word-break:break-all;color:var(--weui-FG-0);tab-size:4}
+  /* The same reads as the terminal's: the stamp is greyed because it is looked
+     up rather than read, and a level says how loud it is by its colour. */
+  .log .tm{color:var(--weui-FG-2)}
+  .log .lv.error{color:var(--weui-RED)}
+  .log .lv.warn{color:var(--weui-ORANGE)}
+  .log .lv.info{color:var(--weui-BRAND)}
+  .log .lv.debug{color:var(--weui-BLUE)}
+  .log .lv.trace{color:var(--weui-PURPLE)}
   .weui-cell{padding-top:11px;padding-bottom:11px}
   .weui-cell__bd{flex:0 0 auto;padding-right:16px}
   .weui-cell__ft{flex:1 1 auto;min-width:0;overflow-wrap:anywhere;font-size:14px}
@@ -415,6 +423,35 @@ let logLines = [];   // 屏幕上已有的行，最多 LOG_LINES 条
 let logTail = "";    // 上一次没读完的半行
 let logAt = null;    // 已经读到的字节位置，null = 还没读过
 
+const LEVELS = {
+  TRACE: "trace", DEBUG: "debug", INFO: "info", WARN: "warn", ERROR: "error",
+};
+
+// A line is `<stamp> <LEVEL> [area]\t<event> <fields>`, and it is read as the
+// three parts the terminal colours: the stamp is looked up, the level is how
+// loud it is, and the rest is what was said. A line that does not parse is left
+// whole — a line of an unexpected shape is still the line that was written.
+function logRow(text) {
+  const row = document.createElement("div");
+  const found = /^(\d+\.\d+) +(TRACE|DEBUG|INFO|WARN|ERROR) +([\s\S]*)$/.exec(text);
+  if (!found) {
+    row.textContent = text;
+    return row;
+  }
+  const stamp = document.createElement("span");
+  stamp.className = "tm";
+  stamp.textContent = found[1];
+  const level = document.createElement("span");
+  level.className = "lv " + LEVELS[found[2]];
+  level.textContent = " " + found[2].padStart(5) + " ";
+  const rest = document.createElement("span");
+  rest.textContent = found[3];
+  row.appendChild(stamp);
+  row.appendChild(level);
+  row.appendChild(rest);
+  return row;
+}
+
 function atBottom() {
   return logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 24;
 }
@@ -429,9 +466,16 @@ function appendLog(text) {
 
   const stick = atBottom();
   const top = logBox.scrollTop;
-  for (const line of parts) logLines.push(line + "\n");
-  if (logLines.length > LOG_LINES) logLines.splice(0, logLines.length - LOG_LINES);
-  logBox.textContent = logLines.join("");
+  for (const line of parts) {
+    logLines.push(line);
+    logBox.appendChild(logRow(line));
+  }
+  // Only the newest lines are kept: what is being watched is what is happening,
+  // and the copy itself is what has the rest of it.
+  while (logLines.length > LOG_LINES) {
+    logLines.shift();
+    logBox.removeChild(logBox.firstChild);
+  }
   // Reading further back is not undone by a new line arriving: only a view
   // that was already at the end follows it.
   logBox.scrollTop = stick ? logBox.scrollHeight : top;
