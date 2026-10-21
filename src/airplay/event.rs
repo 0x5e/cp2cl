@@ -28,6 +28,7 @@ use tokio::sync::Mutex;
 use super::bplist::to_binary;
 use super::crypto::{open_frames, seal_frames, SymKey};
 use super::info::{KNOB_HID_UID, MAIN_UUID, MEDIA_HID_UID, TELEPHONY_HID_UID, TOUCH_HID_UID};
+use super::server::ended;
 use super::rtsp;
 use crate::commands::{self, Command, TouchContact};
 
@@ -158,8 +159,12 @@ pub(crate) async fn pump_events(
 
     loop {
         let n = match read.read(&mut buf).await {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break,
             Ok(n) => n,
+            Err(e) => {
+                ended("event", "read", &e);
+                break;
+            }
         };
         enc.extend_from_slice(&buf[..n]);
 

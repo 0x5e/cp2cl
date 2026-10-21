@@ -669,6 +669,21 @@ enum Wakeup {
     Silent,
 }
 
+/// Says how a media stream ended, and which of the two ways it was.
+///
+/// A phone tearing a session down closes cleanly, and `read_exact` reports that
+/// as `UnexpectedEof` — the same error it reports for a frame that stopped
+/// halfway. Everything else is the connection failing underneath us. The counts
+/// in the closing line cannot tell the two apart, and which one it was is the
+/// first question anyone asks of a dropped stream, so the log says it here.
+pub(super) fn ended(what: &str, part: &str, e: &std::io::Error) {
+    if e.kind() == std::io::ErrorKind::UnexpectedEof {
+        tracing::info!("{}.stream_eof part={}", what, part);
+    } else {
+        tracing::warn!("{}.stream_read_failed part={} err={}", what, part, e);
+    }
+}
+
 impl Session {
     async fn run(
         &mut self,
@@ -759,6 +774,19 @@ impl Session {
             };
             if n == 0 {
                 tracing::info!("airplay.disconnected peer={}", self.peer);
+                // A phone that hung up has not necessarily left: the car's
+                // session is still up and this half is still open, but nothing
+                // will knock again on its own. So this ends like the silence
+                // above rather than like the socket — the same nudge, for the
+                // same reason, because a fresh iAP2 session is what carries the
+                // start message. Without it the phone sits there paired and
+                // associated with a session that no longer exists, and nothing
+                // asks it back. A session a newer connection has replaced stays
+                // quiet: that one is the phone's.
+                self.close_streams().await;
+                if self.newest.load(Ordering::SeqCst) == self.serial {
+                    let _ = self.restart_tx.send(());
+                }
                 return Ok(());
             }
             self.in_buf.extend_from_slice(&buf[..n]);
@@ -1636,7 +1664,8 @@ impl Session {
         let mut header = [0u8; screen::HEADER_LEN];
         let mut frames: u64 = 0;
         loop {
-            if socket.read_exact(&mut header).await.is_err() {
+            if let Err(e) = socket.read_exact(&mut header).await {
+                ended("video", "header", &e);
                 break;
             }
             let len = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
@@ -1651,7 +1680,8 @@ impl Session {
                 continue;
             }
             let mut body = vec![0u8; len];
-            if socket.read_exact(&mut body).await.is_err() {
+            if let Err(e) = socket.read_exact(&mut body).await {
+                ended("video", "body", &e);
                 break;
             }
             // The codec description is the one message that says which profile
@@ -1766,7 +1796,15 @@ impl Session {
                     }
                 }
                 got = socket.recv(&mut buf) => {
-                    let Ok(n) = got else { break };
+                    let n = match got {
+                        Ok(n) => n,
+                        // UDP has no end of file, so anything here is the socket
+                        // itself failing — worth a line, unlike a close.
+                        Err(e) => {
+                            tracing::warn!("audio.stream_recv_failed stream={} err={}", name, e);
+                            break;
+                        }
+                    };
                     let now = Instant::now();
                     let gap = now - last_at;
                     worst_gap = worst_gap.max(gap);
