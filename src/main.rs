@@ -34,6 +34,8 @@ use livi_runtime::mfi_async::SharedCoprocessor;
 use livi_runtime::vehicle::Vehicle;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::EnvFilter;
 
 use crate::airplay::clock::SyncedClock;
 use crate::airplay::pairing::Pairings;
@@ -52,10 +54,26 @@ async fn main() -> Result<()> {
     // It is installed before the config is read on purpose: a setting that
     // cannot be used is reported by a log line, and that line needs somewhere
     // to go.
-    tracing_subscriber::fmt()
-        .event_format(logging::Line)
-        .with_env_filter(config::log_filter())
+    //
+    // It goes to two places, and it is the same lines in both: the terminal,
+    // coloured, and a copy under `/tmp` that is not, which is what the status
+    // page reads and what is still there of a run that has ended. See
+    // `logging::Journal` for how the copy is kept to size.
+    let journal = logging::Journal::open();
+    let unnoticed = journal.reason().map(str::to_owned);
+    tracing_subscriber::registry()
+        .with(EnvFilter::new(config::log_filter()))
+        .with(tracing_subscriber::fmt::layer().event_format(logging::Line))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .event_format(logging::Line)
+                .with_ansi(false)
+                .with_writer(journal),
+        )
         .init();
+    if let Some(reason) = unnoticed {
+        tracing::warn!("logging.copy_unavailable path={} err={reason}", logging::PATH);
+    }
 
     let cfg = Arc::new(Config::from_env());
 

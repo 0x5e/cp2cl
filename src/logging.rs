@@ -1,5 +1,5 @@
 //! What every line is made of: the stamp in front of it and the module column
-//! beside the event name.
+//! beside the event name, and where a copy of them is kept.
 //!
 //! `tracing_subscriber`'s own timer writes an ISO 8601 instant — date, time and
 //! zone — which is more than a run that lasts minutes needs, and the board's
@@ -7,16 +7,26 @@
 //! the car's — carries a wall clock it could be set from. What is wanted is a
 //! stamp that only ever goes up, so lines can be put in order against each
 //! other and spaced: seconds since boot, to the millisecond.
+//!
+//! Two layers write them, and it is the same formatter in both: one to the
+//! terminal, coloured, and one to a copy on disk that is not, because the copy
+//! is read by a page and by a shell rather than by an eye at a terminal. The
+//! copy is capped and rolled — see `Journal` — since `/tmp` on the board is
+//! memory, and it is what the status page reads.
 
 use std::fmt::{self, Write as _};
+use std::fs::{self, File, OpenOptions};
+use std::io;
 use std::mem::MaybeUninit;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
 use tracing_subscriber::fmt::time::FormatTime;
-use tracing_subscriber::fmt::FmtContext;
+use tracing_subscriber::fmt::{FmtContext, MakeWriter};
 use tracing_subscriber::registry::LookupSpan;
 
 /// Writes the seconds since boot, to the millisecond (`123.456`). The space
@@ -160,12 +170,228 @@ impl Visit for Said {
     }
 }
 
+// --------------------------------------------------------------- the copy ---
+
+/// Where the plain copy of the log is written, and where the chunk before it is
+/// kept. Both are in `/tmp`, which is memory on the board, which is why neither
+/// is left to grow: see `CAP`.
+pub const PATH: &str = "/tmp/cp2cl.log";
+const PREVIOUS: &str = "/tmp/cp2cl.log.1";
+
+/// How big a chunk is allowed to get before it is rolled over, in bytes.
+///
+/// At the level a session is watched at — a line for every link that comes up,
+/// every stream that opens and every second of audio — four megabytes is the
+/// better part of an hour; at `debug` it is minutes. What the copy is for is
+/// the run that is happening and the one before it, and no more.
+const CAP: u64 = 4 * 1024 * 1024;
+
+/// The copy of the log that goes to disk: the same lines, uncoloured.
+///
+/// A `MakeWriter` rather than a writer, because the layer asks for one per line
+/// and that is the moment to see whether the chunk has reached `CAP` and roll
+/// it. A line is written whole — the layer formats it into a buffer and hands
+/// it over in one `write` — so a copy that is read while it is being written
+/// never has half a line at the end of it.
+pub struct Journal {
+    path: PathBuf,
+    previous: PathBuf,
+    file: Mutex<Option<File>>,
+    /// Why there is no copy, if there is not one. Said by the caller, once the
+    /// subscriber is up: from in here there is nowhere to say it, since saying
+    /// it is what would have to be written.
+    reason: Option<String>,
+}
+
+impl Journal {
+    /// Opens the copy, keeping the one the run before this one left behind.
+    ///
+    /// The run that is looked at is usually the one that just ended, so it is
+    /// moved aside rather than appended to: a copy with two runs in it has to
+    /// be read around, and the moment they meet is the moment that matters.
+    pub fn open() -> Self {
+        Self::at(Path::new(PATH), Path::new(PREVIOUS))
+    }
+
+    /// Why there was no copy to start, which is `None` when there was one.
+    pub fn reason(&self) -> Option<&str> {
+        self.reason.as_deref()
+    }
+
+    fn at(path: &Path, previous: &Path) -> Self {
+        match start(path, previous) {
+            Ok(file) => Self {
+                path: path.to_owned(),
+                previous: previous.to_owned(),
+                file: Mutex::new(Some(file)),
+                reason: None,
+            },
+            Err(e) => Self {
+                path: path.to_owned(),
+                previous: previous.to_owned(),
+                file: Mutex::new(None),
+                reason: Some(format!("{e:#}")),
+            },
+        }
+    }
+}
+
+fn start(path: &Path, previous: &Path) -> io::Result<File> {
+    // Nothing to keep on a first run, and a rename that finds nothing is not
+    // worth an answer of its own.
+    let _ = fs::rename(path, previous);
+    chunk(path)
+}
+
+/// Opens the chunk for writing at its end.
+///
+/// Not with `append`, because a file opened that way cannot be truncated and a
+/// chunk that could not be moved aside has to be cut back to nothing instead.
+/// The position is the end all the same: the layer writes a whole line at a
+/// time, one writer holds the file while it does, and a rolled chunk is opened
+/// again.
+fn chunk(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+}
+
+impl<'a> MakeWriter<'a> for Journal {
+    type Writer = Sink<'a>;
+
+    fn make_writer(&'a self) -> Sink<'a> {
+        let mut file = self.file.lock().unwrap_or_else(PoisonError::into_inner);
+        if file.as_ref().is_some_and(|open| over(open, CAP)) {
+            *file = roll(&self.path, &self.previous);
+        }
+        Sink(file)
+    }
+}
+
+/// Whether the chunk has reached the cap, which is when it is rolled.
+fn over(file: &File, cap: u64) -> bool {
+    file.metadata().map(|m| m.len() >= cap).unwrap_or(false)
+}
+
+/// Moves the chunk aside and starts another, giving back the open file.
+///
+/// `None` when there is no copy to be had any more, which ends it: a board
+/// cannot be filled up by its own log, and the terminal still has the lines.
+fn roll(path: &Path, previous: &Path) -> Option<File> {
+    // The chunk is moved aside whole, so what is opened in its place is a new
+    // file; where the move fails, the chunk is cut back to nothing instead of
+    // being left to grow.
+    let _ = fs::rename(path, previous);
+    chunk(path).ok()
+}
+
+/// What the layer writes a copy through: the open chunk, or nowhere at all
+/// when there is not one.
+pub struct Sink<'a>(MutexGuard<'a, Option<File>>);
+
+impl io::Write for Sink<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self.0.as_mut() {
+            Some(file) => io::Write::write(file, buf),
+            // Nowhere to put it is not a reason to stop printing it: the layer
+            // is told it was written so it carries on to the next line.
+            None => Ok(buf.len()),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self.0.as_mut() {
+            Some(file) => io::Write::flush(file),
+            None => Ok(()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fs::{self, OpenOptions};
     use std::io;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
-    use super::{area_of, Line, GREY, RESET};
+    use tracing_subscriber::fmt::MakeWriter as _;
+    use tracing_subscriber::prelude::*;
+
+    use super::{area_of, roll, Journal, Line, GREY, RESET};
+
+    /// A chunk of the copy in the temporary directory, under a name of its own
+    /// so that a test never writes where the program would.
+    fn scratch(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("cp2cl-{}-{name}", std::process::id()));
+        path
+    }
+
+    #[test]
+    fn a_chunk_that_reaches_the_cap_is_rolled_over() {
+        let (path, previous) = (scratch("roll.log"), scratch("roll.log.1"));
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        io::Write::write_all(&mut file, b"12345").unwrap();
+
+        assert!(super::over(&file, 5), "five bytes against a cap of five");
+        assert!(!super::over(&file, 6), "and not against one of six");
+
+        let rolled = roll(&path, &previous).expect("a chunk can be rolled");
+        assert_eq!(fs::read(&previous).unwrap(), b"12345", "the old one is kept");
+        assert!(!super::over(&rolled, 1), "and the new one starts empty");
+
+        fs::remove_file(&path).ok();
+        fs::remove_file(&previous).ok();
+    }
+
+    #[test]
+    fn a_copy_that_cannot_be_started_says_why_and_loses_the_lines() {
+        let journal = Journal::at(
+            Path::new("/nonexistent/cp2cl.log"),
+            Path::new("/nonexistent/cp2cl.log.1"),
+        );
+        assert!(
+            journal.reason().is_some(),
+            "a copy in a directory that is not there has a reason"
+        );
+
+        // What is written to it goes nowhere, and writing to it is not an
+        // error: the terminal still has the lines.
+        let mut sink = journal.make_writer();
+        io::Write::write_all(&mut sink, b"dropped\n").unwrap();
+    }
+
+    #[test]
+    fn the_copy_is_the_same_line_without_the_colour() {
+        let (path, previous) = (scratch("plain.log"), scratch("plain.log.1"));
+        let journal = Journal::at(&path, &previous);
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .event_format(Line)
+                .with_ansi(false)
+                .with_writer(journal),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("cl.encoder state=started");
+        });
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains('\x1b'), "{text:?}");
+        assert!(
+            text.ends_with(" INFO [cl]      \tcl.encoder state=started\n"),
+            "{text:?}"
+        );
+
+        fs::remove_file(&path).ok();
+        fs::remove_file(&previous).ok();
+    }
 
     #[test]
     fn the_area_is_the_first_segment_of_the_event_name() {
