@@ -457,11 +457,11 @@ the order they have to happen. The build runs in a container — there is no Lin
 machine here and Buildroot does not run on macOS — and the first one takes a
 while, since it compiles a toolchain and a kernel.
 
-**`buildroot/` is an external tree, not Buildroot.** Buildroot itself is a
-submodule under `vendor/`, pinned the way LIVI is; what is here is the boards, the
-kernel fragments, and the one package, which is this crate. What is specific to a
-board lives under `buildroot/board/<board>/`, laid out as the filesystem it lands
-on — the Duo2's access point configuration is
+**`buildroot/` is an external tree, not Buildroot.** Buildroot itself is not in
+this repository: the build image clones a pinned release into `/opt/buildroot`, and
+what is here is the boards, the kernel fragments, and the one package, which is
+this crate. What is specific to a board lives under `buildroot/board/<board>/`,
+laid out as the filesystem it lands on — the Duo2's access point configuration is
 `buildroot/board/nanopi-duo2/rootfs-overlay/etc/hostapd/hostapd.conf`, which is
 `/etc/hostapd/hostapd.conf` on the board.
 
@@ -472,12 +472,13 @@ configuration out of `/etc/hostapd`, taking the file that names the interface
 `CP2CL_WIFI_IFACE` defaults to, so the two cannot drift apart. See
 [Wireless CarPlay](#wireless-carplay).
 
-**The boot is two scripts and no service manager.**
+**The boot is three scripts and no service manager.**
 
 | Script | What it is |
 |---|---|
 | `S20cp2cl-ap` | hostapd on `wlan0` at `192.168.4.1/24`, then dnsmasq for the leases |
 | `S50cp2cl` | the program, with the environment the README documents |
+| `S50sshd` | sshd, for the console the image does not otherwise have |
 
 There is no third script for the Bluetooth firmware, and that is the point of
 running mainline: the device tree puts the chip on UART2 as a serdev child, so
@@ -492,9 +493,22 @@ a tmpfs, so a run that ends in a fault is gone with the power. The program's log
 is `/var/log/cp2cl.log`, and it is the whole of what the board says.
 
 **The board is reached on its access point.** `192.168.4.1`, and nothing else: the
-program has no port of its own to log into. Nothing about the board needs the USB
-port: it composes the device itself, so a board with nothing running on the port
-at all still boots, brings up its access point, and can be logged into.
+program has no port of its own to log into. Join `nanopi-duo2` and log in:
+
+```bash
+ssh root@192.168.4.1        # password: cp2cl
+```
+
+That password is `BR2_TARGET_GENERIC_ROOT_PASSWD` in the board's defconfig, and it
+is the one line to change before a board leaves the bench. There is no serial
+console — the image starts no getty — so sshd is the way in, and its host key is
+baked into the image rather than generated at boot because the root is read-only.
+The same reason makes `ssh-copy-id` useless: `/root/.ssh` is gone at power off, so
+a key that should persist goes into the board's `rootfs-overlay` instead.
+
+Nothing about the board needs the USB port: it composes the device itself, so a
+board with nothing running on the port at all still boots, brings up its access
+point, and can be logged into.
 
 **If the port stays empty, the reason is on the program's own output.** It says
 what it could not do: no configfs, a controller already held, a mount that did not
