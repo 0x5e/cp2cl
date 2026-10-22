@@ -468,6 +468,10 @@ laid out as the filesystem it lands on — the Duo2's access point configuration
 `buildroot/board/nanopi-duo2/rootfs-overlay/etc/hostapd/hostapd.conf`, which is
 `/etc/hostapd/hostapd.conf` on the board.
 
+What the program needs from the machine under it — kernel symbols, firmware,
+mounts, paths, ports — is `buildroot/README.md`, as a list of values. It is what
+a rootfs other than this one has to satisfy.
+
 `hostapd.conf` is the one file the operator tunes: the interface, the SSID and
 the passphrase are this board's. Changing it is also how the network the phone is
 told to join is changed, and where on it we are — wireless CarPlay reads its own
