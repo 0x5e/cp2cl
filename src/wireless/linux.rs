@@ -42,11 +42,19 @@ pub async fn watch(
     // The iAP service is what tells the phone there is CarPlay here, so it is
     // not published until there is: with CarLife in the picture the CarPlay half
     // only exists for as long as the car's session does.
+    //
+    // Said out loud, because the wait is silent and can last as long as the car
+    // takes to turn up: a log that stops here looks like a run that failed
+    // rather than one that is waiting.
+    if !*gate.borrow() {
+        tracing::info!("wireless.waiting_for_car consequence=nothing_published");
+    }
     while !*gate.borrow() {
         if gate.changed().await.is_err() {
             return;
         }
     }
+    tracing::info!("wireless.car_up action=publish_service");
 
     let (conn, mut incoming, held) =
         match livi_runtime::bt::start(&cfg.bt_adapter, &cfg.name, true).await {

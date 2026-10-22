@@ -90,6 +90,19 @@ async fn main() -> Result<()> {
     // that follow. It is the same string the page shows, from the same place.
     tracing::info!("process.version software={:?}", web::device::SOFTWARE);
 
+    // The settings this run was handed, because "why is nothing happening" is
+    // nearly always one of them. The two halves of the program log different
+    // things — a wired run never says `wireless.*`, and a wireless run waits for
+    // the car before it says anything at all — so a log that does not name its
+    // own mode is one that cannot be read.
+    tracing::info!(
+        "process.config wireless={} wifi_iface={} bt_adapter={} ppi={}",
+        cfg.wireless,
+        cfg.wifi_iface,
+        cfg.bt_adapter,
+        cfg.ppi
+    );
+
     // Everything the page shows is reported from wherever it is learned, and
     // nothing reads it back: see `web::status`. Started before anything else so
     // that the first thing a page says is never "nothing yet" for want of a
