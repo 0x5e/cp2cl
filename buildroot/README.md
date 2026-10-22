@@ -197,7 +197,9 @@ the core; none is loaded on this chip.
     DRM, framebuffer, ALSA, USB mass storage, DNS resolver
 
 Leftovers in this image, doing nothing: `S11modules` (no `/etc/modules`),
-`S40network` (no interfaces), `S50crond` (no crontabs).
+`S40network` (no interfaces), `S50crond` (no crontabs). `S80dnsmasq` is deleted
+by `post-build.sh`: it would start a second dnsmasq after the one in
+`S20cp2cl-ap`, from `/etc/dnsmasq.conf`, which sets no `dhcp-range`.
 
 ### 3.7 Traps, one line each
 
@@ -212,6 +214,3 @@ Leftovers in this image, doing nothing: `S11modules` (no `/etc/modules`),
                                     wlan0 is invisible to every check
     XDG_DATA_HOME                   unset with HOME=/ resolves to
                                     /.local/share/cp2cl and fails with EROFS
-    /etc/init.d/S80dnsmasq          a second dnsmasq, started after the one in
-                                    S20cp2cl-ap; /etc/dnsmasq.conf sets no
-                                    dhcp-range, so it only races for tcp/53

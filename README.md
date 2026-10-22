@@ -479,7 +479,7 @@ configuration out of `/etc/hostapd`, taking the file that names the interface
 `CP2CL_WIFI_IFACE` defaults to, so the two cannot drift apart. See
 [Wireless CarPlay](#wireless-carplay).
 
-**The boot is four scripts and no service manager.**
+**The boot is five scripts and no service manager.**
 
 | Script | What it is |
 |---|---|
@@ -488,6 +488,11 @@ configuration out of `/etc/hostapd`, taking the file that names the interface
 | `S20cp2cl-ap` | hostapd on `wlan0` at `192.168.4.1/24`, then dnsmasq for the leases |
 | `S50cp2cl` | the program, with the environment the README documents |
 | `S50dropbear` | dropbear, for the console the image does not otherwise have |
+
+The dnsmasq package brings a start script of its own, and it is deleted in
+`post-build.sh`: it runs at `S80` from `/etc/dnsmasq.conf`, which sets no
+`dhcp-range`, so it is a second daemon behind the one `S20cp2cl-ap` started with
+the range the phone is handed. The binary stays, the script goes.
 
 `brcmfmac` is the one module in the image, and it is a module for the ordering,
 not the size: a built-in driver probes before the root is mounted, when

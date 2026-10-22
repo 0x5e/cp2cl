@@ -68,6 +68,13 @@ for f in usr/bin/gio usr/bin/gdbus usr/bin/gsettings usr/bin/gresource \
 	rm -f "$TARGET_DIR/$f"*
 done
 
+# The dnsmasq package installs a start script of its own, which runs at S80 with
+# /etc/dnsmasq.conf — after S20cp2cl-ap has already started the one instance this
+# board wants, on wlan0, with the range the phone is handed. A second copy adds
+# a DNS server on :53 that nothing asked for and takes the same port the
+# configured one deliberately leaves off. The binary stays; the script goes.
+rm -f "$TARGET_DIR/etc/init.d/S80dnsmasq"
+
 # Buildroot writes the getty line into /etc/inittab whatever the port is, and an
 # empty port leaves `getty -L "" 0 vt100`: it fails to open a device that has no
 # name, init respawns it five times, and the boot ends with "respawning too
