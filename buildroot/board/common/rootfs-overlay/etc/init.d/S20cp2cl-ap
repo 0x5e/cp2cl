@@ -14,9 +14,9 @@
 # beacons again, which from a phone is the same as a radio that never came up.
 # The loop below is systemd's Restart=on-failure, written out.
 #
-# Both daemons log to /log when it is mounted. The board has no console, and
-# hostapd's own reason for refusing a channel is not something to guess at.
-LOG=/log
+# Both daemons log to /var/log. The board has no console, and hostapd's own
+# reason for refusing a channel is not something to guess at.
+LOG=/var/log
 
 log() {
 	echo "$*"

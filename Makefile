@@ -56,7 +56,10 @@ dist: all
 # the container starts as root, hands it over, and drops to the builder with su —
 # one container, because the chown only matters to the process that follows it.
 # Only the finished image crosses back, in a second container running as you, so
-# the file is not owned by uid 1000 on the host.
+# the file is not owned by uid 1000 on the host. `dd` rather than `cp`: on the
+# bind mount into this machine cp finishes the write and then fails to deallocate
+# the tail of the file it just made ("Invalid argument"), which leaves a copy of
+# the right length and an exit status that stops the build.
 firmware: dist buildroot-image
 	mkdir -p $(BR_OUT)
 	docker volume create $(BR_VOL) >/dev/null
@@ -68,7 +71,7 @@ firmware: dist buildroot-image
 			&& su -s /bin/sh builder -c "make -C /opt/buildroot O=/build BR2_EXTERNAL=/ext $(BOARD)_defconfig \
 				&& make -C /opt/buildroot O=/build -j$$(nproc)"'
 	docker run --rm -u $(UID_GID) -v $(BR_VOL):/build -v "$(CURDIR)/$(BR_OUT)":/out \
-		$(BR_IMAGE) cp /build/images/sdcard.img /out/
+		$(BR_IMAGE) dd if=/build/images/sdcard.img of=/out/sdcard.img bs=1M status=none
 	@echo "image: $(BR_OUT)/sdcard.img"
 
 # Once per machine, and again only when the Dockerfile changes.

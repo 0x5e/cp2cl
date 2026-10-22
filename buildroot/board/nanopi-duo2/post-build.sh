@@ -28,48 +28,30 @@ for f in brcmfmac43430-sdio.bin brcmfmac43430-sdio.txt BCM43430A1.hcd; do
 	install -D -m 0644 "$BOARD_DIR/firmware/$f" "$TARGET_DIR/lib/firmware/brcm/$f"
 done
 
-# The root is a read-only squashfs, so this is the mount point for the tmpfs that
-# /etc/fstab puts the program's log on — and it has to exist before mount -a.
+# Where the program's log and the boot's own diagnostics land. The skeleton makes
+# /var/log a symlink to /tmp, which is right for a read-only root and wrong for
+# this one: /tmp is a tmpfs, so a log written there is gone at the next boot and
+# the run that ended badly is the one that has to be explained. On a writable
+# root it is a directory on the disk.
+rm -rf "$TARGET_DIR/var/log"
 install -d -m 0755 "$TARGET_DIR/var/log"
 
-# Same for the log partition. An overlay cannot carry it: it is an empty
-# directory, and git does not keep those.
-install -d -m 0755 "$TARGET_DIR/log"
+# And where the program keeps the identity it presents to the phone. Created
+# here so the first run does not have to, and so it is owned by root rather than
+# by whatever the program's own create_dir_all would have made.
+install -d -m 0755 "$TARGET_DIR/var/lib"
 
-# The log partition's one file at flash time — what to look at once the card is
-# in a reader. It is also what keeps genimage from copying the whole images
-# directory into a 512 KB filesystem, which is what an empty file list means.
-BINARIES_DIR=${2:-${BINARIES_DIR:-.}}
-mkdir -p "$BINARIES_DIR"
-cat > "$BINARIES_DIR/log-readme.txt" <<'EOF'
-cp2cl — log partition
-
-Nothing here needs keeping. This is what the last boot had to say about itself,
-written by /etc/init.d/S00diag on the board:
-
-  boot.log      one block per boot: uptime, kernel command line, interfaces
-  dmesg.log     the kernel ring buffer, from the top
-  state.log     a sample every five seconds: interfaces, sdio devices, wlan0
-  wifi.log      what S10wifi did — modules loaded, how long wlan0 took
-  ap.log        hostapd and dnsmasq
-  hostapd.log   hostapd's own log
-  cp2cl.log     the program
-
-If this file is all that is here, the kernel never reached userspace: the card
-boots no further than U-Boot, and nothing above can help.
-EOF
-
-# The skeleton gives /var/run as a directory of its own, which on a read-only root
-# is a directory nobody can write to. Point it at the tmpfs /etc/fstab mounts on
-# /run, where dropbear and anything else that drops a pid file expects to be able
-# to.
+# The skeleton gives /var/run as a directory of its own, while everything that
+# writes a pid file expects the /run the kernel mounts as a tmpfs — and a
+# directory from the image would survive a reboot with stale pids in it. Point
+# one at the other.
 rm -rf "$TARGET_DIR/var/run"
 ln -s ../run "$TARGET_DIR/var/run"
 
 # The overlays are rsynced with a --chmod that leaves every file 0644, and
-# dropbear refuses a host key that anyone but its owner can read. The key itself
-# is in the overlay because it has to be in the image: the root is read-only, so
-# there is nowhere to generate one at boot.
+# dropbear refuses a host key that anyone but its owner can read. The key is in
+# the image rather than generated at first boot so that the fingerprint a client
+# has accepted stays the same across a reflash.
 chmod 600 "$TARGET_DIR/etc/dropbear/dropbear_ed25519_host_key"
 
 # bluez5-utils selects libglib2 unconditionally, and glib2 installs a set of

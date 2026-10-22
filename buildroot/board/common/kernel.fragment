@@ -2,9 +2,9 @@
 #
 # A defconfig is a distribution's idea of a kernel: HDMI, sound, USB host,
 # storage, netfilter, every filesystem. What this program uses is a USB device
-# controller, a radio, and the two filesystems its root lives on. The rest is
-# boot time and image size, so it is off — and it is off with the `is not set`
-# form, because a fragment that says `CONFIG_X=n` is a line olddefconfig drops.
+# controller, a radio, and the filesystem its root lives on. The rest is boot
+# time and image size, so it is off — and it is off with the `is not set` form,
+# because a fragment that says `CONFIG_X=n` is a line olddefconfig drops.
 
 CONFIG_MODULES=y
 
@@ -43,9 +43,6 @@ CONFIG_BT_HCIUART_BCM=y
 CONFIG_SERIAL_DEV_BUS=y
 
 CONFIG_EXT4_FS=y
-CONFIG_SQUASHFS=y
-CONFIG_SQUASHFS_XZ=y
-CONFIG_OVERLAY_FS=y
 CONFIG_TMPFS=y
 CONFIG_DEVTMPFS=y
 CONFIG_DEVTMPFS_MOUNT=y
@@ -57,10 +54,9 @@ CONFIG_INET=y
 # exits before it ever serves a page. sunxi_defconfig turns it off.
 CONFIG_IPV6=y
 
-# The log partition is FAT, so that a card pulled out of the board reads on a
-# laptop with no extra software. sunxi_defconfig carries FAT_FS but not VFAT_FS,
-# and without it the mount fails and there is no log — which is the one thing
-# this image exists to produce.
+# FAT, for the boot partition and for a USB stick: the one way to carry a file
+# off a board whose network did not come up. sunxi_defconfig carries FAT_FS but
+# not VFAT_FS, and the two are not the same thing.
 CONFIG_VFAT_FS=y
 CONFIG_NLS_CODEPAGE_437=y
 CONFIG_NLS_ISO8859_1=y

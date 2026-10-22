@@ -1,27 +1,22 @@
-# The root is a read-only squashfs; everything that is written lives in a tmpfs
-# and is gone at power off. That is the trade the image makes: nothing to fsck
-# on a card that loses power with the ignition.
+# The root is a writable ext4. It was a read-only squashfs, which made the board
+# a thing that could not be changed: a binary could not be replaced, a key could
+# not be added, and the program had nowhere to write the identity it presents to
+# the phone. The journal is what a card pulled mid-write costs — a replay of a
+# few milliseconds on the next boot — and it is worth it.
 #
-# The four kernel filesystems are not optional, and leaving them out is silent:
+# `noauto` on the root because the kernel has already mounted it from the command
+# line; this line is here for the options, not the mount.
+#
+# The kernel filesystems below are not optional, and leaving them out is silent:
 # no /sys means no /sys/class/net, so a driver that bound perfectly well looks
-# like a driver that never loaded — the first image of this board had a working
-# radio and no wlan0 for exactly that reason. No devpts means dropbear takes the
-# connection and then cannot allocate a terminal.
-#
-# /log is the one partition that is written: a FAT holding what the boot had to
-# say about itself. It is a separate partition rather than a file on the boot one
-# so that a card pulled mid-write cannot damage what U-Boot reads, and it is FAT
-# so that it mounts on a laptop with the card in a reader.
-/dev/root	/		squashfs	ro,noatime		0 0
+# like a driver that never loaded; no configfs means no USB device to present to
+# the head unit; no devpts means dropbear takes the connection and cannot give it
+# a terminal.
+/dev/root	/		ext4		rw,noatime,noauto,errors=remount-ro	0 1
 proc		/proc		proc		defaults		0 0
 sysfs		/sys		sysfs		defaults		0 0
-# The USB device the program composes lives in configfs, and it says so when the
-# directory is not there: nothing can be presented to the head unit without it.
-# The mount point is created by the kernel, not by the image.
 configfs	/sys/kernel/config	configfs	defaults	0 0
 devpts		/dev/pts	devpts		gid=5,mode=620		0 0
 tmpfs		/dev/shm	tmpfs		mode=1777		0 0
 tmpfs		/tmp		tmpfs		mode=1777		0 0
 tmpfs		/run		tmpfs		mode=0755		0 0
-tmpfs		/var/log	tmpfs		mode=0755,size=4M	0 0
-/dev/mmcblk0p3	/log		vfat		rw,noatime,umask=0022	0 0

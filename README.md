@@ -453,11 +453,12 @@ make firmware
 
 Write that to a card and put the card in the board. Everything the board runs is
 in it: the access point, the program, and the init scripts that start them in the
-order they have to happen. It comes out at 15.4 MB, which is what fits a 16 MB
-part: a 6.4 MB squashfs for the root, a 6.8 MB kernel on the boot partition, and
-512 KB for the log. The build runs in a container — there is no Linux
-machine here and Buildroot does not run on macOS — and the first one takes a
-while, since it compiles a toolchain and a kernel.
+order they have to happen. It comes out at 73 MB — an 8 MB boot partition with a
+6.8 MB kernel, and a 64 MB ext4 root of which 17 MB is used. The size that
+matters is the root's: it is a filesystem to be worked in, and the 36 MB left
+over is what a binary, a key or a log has to fit in. The build runs in a container —
+there is no Linux machine here and Buildroot does not run on macOS — and the
+first one takes a while, since it compiles a toolchain and a kernel.
 
 **`buildroot/` is an external tree, not Buildroot.** Buildroot itself is not in
 this repository: the build image clones a pinned release into `/opt/buildroot`, and
@@ -478,7 +479,7 @@ configuration out of `/etc/hostapd`, taking the file that names the interface
 
 | Script | What it is |
 |---|---|
-| `S00diag` | writes what the boot had to say to the log partition, then samples it for two minutes |
+| `S00diag` | writes what the boot had to say to `/var/log`, then samples the radio for two minutes |
 | `S10wifi` | loads `brcmutil` and `brcmfmac`, and waits for `wlan0` |
 | `S20cp2cl-ap` | hostapd on `wlan0` at `192.168.4.1/24`, then dnsmasq for the leases |
 | `S50cp2cl` | the program, with the environment the README documents |
@@ -499,32 +500,32 @@ appears. The vendor's 4.14 image had to push it from userspace, as a systemd
 oneshot that `multi-user.target` waited on — which was 34 of that image's 45
 seconds of boot.
 
-**The root is a read-only squashfs, and the log is its own partition.** There is
-nothing to fsck on a card that loses power with the ignition, so `/` is a
-squashfs and `/var/log` is a tmpfs. The one thing written is the third
-partition, `/log`: a 512 KB FAT that `S00diag` fills with the kernel ring buffer,
-the command line, the interfaces that exist and a sample of them every five
-seconds. It is a partition of its own rather than a file on the boot one so that
-a card pulled mid-write cannot damage what U-Boot reads, and it is FAT so that it
-opens on a laptop.
+**The root is a writable ext4, and that is the point of it.** It was a read-only
+squashfs, on the argument that a card which loses power with the ignition should
+have nothing to fsck — and the argument cost more than it saved: a binary could
+not be replaced, a key could not be added, a setting could not be edited, and the
+program had nowhere to write the identity it presents to the phone. The journal
+is what a card pulled mid-write costs, and that is a replay of milliseconds.
 
-**That partition is the console this image does not have.** A board that never
-got past U-Boot and a board whose radio did not come up look the same from a
-phone — no SSID — and the difference is a file. Pull the card, mount it, and
-read:
+**The log is `/var/log`, on the disk.** `S00diag` writes the kernel ring buffer,
+the command line and the interfaces that exist before anything else runs, then
+samples the radio every five seconds for two minutes — enough to tell "appeared
+late" from "never appeared", which a single snapshot cannot. `S10wifi`,
+`S20cp2cl-ap` and the program write beside it:
 
 ```bash
-ls /Volumes/CP2CL-LOG 2>/dev/null || ls /Volumes/*/   # boot, and the log partition
-cat /Volumes/*/dmesg.log | grep -i brcmf
-cat /Volumes/*/wifi.log /Volumes/*/ap.log /Volumes/*/cp2cl.log
+ssh root@192.168.4.1 'tail -50 /var/log/cp2cl.log'
+ssh root@192.168.4.1 'cat /var/log/wifi.log /var/log/ap.log /var/log/hostapd.log'
+ssh root@192.168.4.1 'cat /var/log/boot.log; grep -i brcmf /var/log/dmesg.log'
 ```
 
-An empty partition means the kernel never reached userspace. A `dmesg.log` with
-no `wlan0` in it means the boot finished and the radio is the problem — and
-`state.log` has the samples that say whether it appeared late, or never.
+When the network did not come up at all, pull the card and read the same files
+from the root partition — it is ext4, so that takes a Linux machine, or a reader
+on anything with `ext4fuse`. That is the one thing the read-only image's FAT log
+partition did better, and it was not worth a root nothing could be changed on.
 
-The program's log is also `/var/log/cp2cl.log` while the board runs, and on the
-log partition it is `/log/cp2cl.log`.
+The program's own copy is `/var/log/cp2cl.log`, and it is the same lines the
+status page shows.
 
 
 **The board is reached on its access point.** `192.168.4.1`, and nothing else: the
@@ -536,16 +537,14 @@ ssh root@192.168.4.1        # password: cp2cl
 
 That password is `BR2_TARGET_GENERIC_ROOT_PASSWD` in the board's defconfig, and it
 is the one line to change before a board leaves the bench. There is no serial
-console — the image starts no getty — so dropbear is the way in, and its host key
-is baked into the image rather than generated at boot because the root is
-read-only. The same reason makes `ssh-copy-id` useless: `/root/.ssh` is gone at
-power off, so a key that should persist goes into the board's `rootfs-overlay`
-instead.
+console — the image starts no getty — so dropbear is the way in. Its host key is
+baked into the image rather than generated at first boot, so the fingerprint a
+client has already accepted survives a reflash. `ssh-copy-id root@192.168.4.1`
+works now that the root is writable, and the key stays.
 
 `scp` works; `sftp` does not, because dropbear does not carry an sftp server. That
-is the whole of what dropbear costs, and it is what keeps the image inside a
-16 MB part: openssh is 7 MB of binaries and pulls in 4.7 MB of libcrypto and
-libssl that nothing else here uses.
+is the whole of what dropbear costs: openssh is 7 MB of binaries and pulls in
+4.7 MB of libcrypto and libssl that nothing else here uses.
 
 Nothing about the board needs the USB port: it composes the device itself, so a
 board with nothing running on the port at all still boots, brings up its access

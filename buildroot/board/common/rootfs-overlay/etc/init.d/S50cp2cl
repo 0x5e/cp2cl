@@ -5,38 +5,28 @@
 #
 # The environment is the one the README documents. They are set here rather
 # than in a settings file because the program has no settings file — everything
-# it takes from outside comes from the environment.
-#
-# The log goes to /var/log, which is a tmpfs: the root is a read-only squashfs,
-# so it does not survive a power cut, and a run that ends in a fault is gone with
-# it. When the log partition is mounted it goes there instead — same file, on a
-# partition that is still there after the ignition is turned off.
+# it takes from outside comes from the environment. This script is the settings
+# file: the root is writable, so a setting is a line to edit and a restart.
 case "$1" in
 	start)
 		printf 'Starting cp2cl: '
-		log=/var/log/cp2cl.log
-		[ -w /log ] && log=/log/cp2cl.log
 
-		# Where the program keeps the accessory identity it presents to the
-		# phone, and the controllers it has paired with. It creates the
-		# directory on first run under $XDG_DATA_HOME, and with that unset
-		# it goes to $HOME/.local/share/cp2cl — which on this image is the
-		# read-only squashfs, so the first write fails with EROFS and the
-		# program exits before it has done anything at all.
+		# Where the program keeps the accessory identity it presents to
+		# the phone and the controllers it has paired with. It creates
+		# the directory on first run under $XDG_DATA_HOME, and with that
+		# unset it goes to $HOME/.local/share/cp2cl — on a board whose
+		# HOME is /, and which used to boot from a read-only image, that
+		# first write was the whole of what a run ever did: it failed
+		# with EROFS and the program exited before anything else.
 		#
-		# The log partition survives a power cut, so the phone keeps
-		# recognising this board as the same accessory across boots. /run
-		# is the fallback for a card whose log partition did not mount,
-		# and there the identity is new every boot.
-		data=/run
-		[ -w /log ] && data=/log
-
-		XDG_DATA_HOME="$data" \
+		# /var/lib rather than /run: the identity has to outlive the boot,
+		# or the phone meets a new accessory every time the ignition turns.
+		XDG_DATA_HOME=/var/lib \
 		CP2CL_WIRELESS=1 \
 		CP2CL_LOG_LEVEL=info \
 		CP2CL_WIFI_IFACE=wlan0 \
 		CP2CL_BT_ADAPTER=hci0 \
-			setsid /usr/bin/cp2cl >>"$log" 2>&1 &
+			setsid /usr/bin/cp2cl >>/var/log/cp2cl.log 2>&1 &
 		echo $! > /run/cp2cl.pid
 		echo "ok"
 		;;
