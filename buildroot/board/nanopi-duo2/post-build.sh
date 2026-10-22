@@ -34,12 +34,27 @@ install -d -m 0755 "$TARGET_DIR/var/log"
 
 # The skeleton gives /var/run as a directory of its own, which on a read-only root
 # is a directory nobody can write to. Point it at the tmpfs /etc/fstab mounts on
-# /run, where sshd and anything else that drops a pid file expects to be able to.
+# /run, where dropbear and anything else that drops a pid file expects to be able
+# to.
 rm -rf "$TARGET_DIR/var/run"
 ln -s ../run "$TARGET_DIR/var/run"
 
-# The overlays are rsynced with a --chmod that leaves every file 0644, and sshd
-# refuses a private key that anyone but its owner can read. The key itself is in
-# the overlay because it has to be in the image: the root is read-only, so there
-# is nowhere to generate one at boot.
-chmod 600 "$TARGET_DIR/etc/ssh/ssh_host_ed25519_key"
+# The overlays are rsynced with a --chmod that leaves every file 0644, and
+# dropbear refuses a host key that anyone but its owner can read. The key itself
+# is in the overlay because it has to be in the image: the root is read-only, so
+# there is nowhere to generate one at boot.
+chmod 600 "$TARGET_DIR/etc/dropbear/dropbear_ed25519_host_key"
+
+# bluez5-utils selects libglib2 unconditionally, and glib2 installs a set of
+# command line tools and a GIO that nothing on this board links. What bluetoothd
+# and bluetoothctl actually need is libglib-2.0 and libdbus; the rest is 3.3 MB
+# of the rootfs. Listed by name rather than globbed by directory so that a
+# package which later does need one of these fails loudly instead of quietly
+# shipping a rootfs with a hole in it.
+for f in usr/bin/gio usr/bin/gdbus usr/bin/gsettings usr/bin/gresource \
+	 usr/bin/gapplication usr/bin/gi-compile-repository \
+	 usr/bin/gi-decompile-typelib usr/bin/gi-inspect-typelib \
+	 usr/lib/libgio-2.0.so usr/lib/libgobject-2.0.so \
+	 usr/lib/libgirepository-2.0.so; do
+	rm -f "$TARGET_DIR/$f"*
+done

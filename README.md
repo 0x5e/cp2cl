@@ -448,12 +448,14 @@ installed onto it. One command, from the checkout:
 
 ```bash
 make firmware
-# buildroot/output/images/sdcard.img
+# buildroot/output/sdcard.img
 ```
 
 Write that to a card and put the card in the board. Everything the board runs is
-in it: the access point, the program, and the two init scripts that start them in
-the order they have to happen. The build runs in a container — there is no Linux
+in it: the access point, the program, and the three init scripts that start them
+in the order they have to happen. It comes out at 14 MB, which is what fits a
+16 MB part: the root is a squashfs of 6.3 MB and the boot partition holds a 6.3 MB
+kernel. The build runs in a container — there is no Linux
 machine here and Buildroot does not run on macOS — and the first one takes a
 while, since it compiles a toolchain and a kernel.
 
@@ -478,7 +480,7 @@ configuration out of `/etc/hostapd`, taking the file that names the interface
 |---|---|
 | `S20cp2cl-ap` | hostapd on `wlan0` at `192.168.4.1/24`, then dnsmasq for the leases |
 | `S50cp2cl` | the program, with the environment the README documents |
-| `S50sshd` | sshd, for the console the image does not otherwise have |
+| `S50dropbear` | dropbear, for the console the image does not otherwise have |
 
 There is no third script for the Bluetooth firmware, and that is the point of
 running mainline: the device tree puts the chip on UART2 as a serdev child, so
@@ -501,10 +503,16 @@ ssh root@192.168.4.1        # password: cp2cl
 
 That password is `BR2_TARGET_GENERIC_ROOT_PASSWD` in the board's defconfig, and it
 is the one line to change before a board leaves the bench. There is no serial
-console — the image starts no getty — so sshd is the way in, and its host key is
-baked into the image rather than generated at boot because the root is read-only.
-The same reason makes `ssh-copy-id` useless: `/root/.ssh` is gone at power off, so
-a key that should persist goes into the board's `rootfs-overlay` instead.
+console — the image starts no getty — so dropbear is the way in, and its host key
+is baked into the image rather than generated at boot because the root is
+read-only. The same reason makes `ssh-copy-id` useless: `/root/.ssh` is gone at
+power off, so a key that should persist goes into the board's `rootfs-overlay`
+instead.
+
+`scp` works; `sftp` does not, because dropbear does not carry an sftp server. That
+is the whole of what dropbear costs, and it is what keeps the image inside a
+16 MB part: openssh is 7 MB of binaries and pulls in 4.7 MB of libcrypto and
+libssl that nothing else here uses.
 
 Nothing about the board needs the USB port: it composes the device itself, so a
 board with nothing running on the port at all still boots, brings up its access

@@ -1,0 +1,63 @@
+#!/bin/sh
+#
+# dropbear, for reaching the board over the access point while debugging.
+#
+# This replaces Buildroot's own S50dropbear, and the difference is what it does
+# not do: that script runs `dropbearkey` when /etc/dropbear is empty, and the
+# root here is a read-only squashfs with nowhere to put a key. The key is in the
+# image instead — etc/dropbear/ in the board's overlay — and -r points at it, so
+# dropbear never goes looking for one it would have to create.
+#
+# -R is absent for the same reason. It generates host keys at startup, which on
+# this root means failing to write them on every boot and handing out a new
+# fingerprint each time.
+
+DAEMON="dropbear"
+PIDFILE="/var/run/$DAEMON.pid"
+KEY="/etc/dropbear/dropbear_ed25519_host_key"
+
+start() {
+	printf "Starting %s: " "$DAEMON"
+	start-stop-daemon --start --quiet --pidfile "$PIDFILE" \
+		--exec "/usr/sbin/$DAEMON" -- \
+		-r "$KEY" -P "$PIDFILE" -p 22
+	status=$?
+	if [ "$status" -eq 0 ]; then
+		echo "OK"
+	else
+		echo "FAIL"
+	fi
+	return "$status"
+}
+
+stop() {
+	printf "Stopping %s: " "$DAEMON"
+	start-stop-daemon --stop --quiet --pidfile "$PIDFILE" \
+		--exec "/usr/sbin/$DAEMON"
+	status=$?
+	if [ "$status" -eq 0 ]; then
+		echo "OK"
+	else
+		echo "FAIL"
+	fi
+	return "$status"
+}
+
+case "$1" in
+	start)
+		start
+		;;
+	stop)
+		stop
+		;;
+	restart|reload)
+		stop
+		start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+		;;
+esac
+
+exit $?
