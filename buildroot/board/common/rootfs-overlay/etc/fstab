@@ -15,6 +15,10 @@
 /dev/root	/		squashfs	ro,noatime		0 0
 proc		/proc		proc		defaults		0 0
 sysfs		/sys		sysfs		defaults		0 0
+# The USB device the program composes lives in configfs, and it says so when the
+# directory is not there: nothing can be presented to the head unit without it.
+# The mount point is created by the kernel, not by the image.
+configfs	/sys/kernel/config	configfs	defaults	0 0
 devpts		/dev/pts	devpts		gid=5,mode=620		0 0
 tmpfs		/dev/shm	tmpfs		mode=1777		0 0
 tmpfs		/tmp		tmpfs		mode=1777		0 0

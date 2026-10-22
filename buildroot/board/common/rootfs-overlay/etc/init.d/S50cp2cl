@@ -16,6 +16,22 @@ case "$1" in
 		printf 'Starting cp2cl: '
 		log=/var/log/cp2cl.log
 		[ -w /log ] && log=/log/cp2cl.log
+
+		# Where the program keeps the accessory identity it presents to the
+		# phone, and the controllers it has paired with. It creates the
+		# directory on first run under $XDG_DATA_HOME, and with that unset
+		# it goes to $HOME/.local/share/cp2cl — which on this image is the
+		# read-only squashfs, so the first write fails with EROFS and the
+		# program exits before it has done anything at all.
+		#
+		# The log partition survives a power cut, so the phone keeps
+		# recognising this board as the same accessory across boots. /run
+		# is the fallback for a card whose log partition did not mount,
+		# and there the identity is new every boot.
+		data=/run
+		[ -w /log ] && data=/log
+
+		XDG_DATA_HOME="$data" \
 		CP2CL_WIRELESS=1 \
 		CP2CL_LOG_LEVEL=info \
 		CP2CL_WIFI_IFACE=wlan0 \
