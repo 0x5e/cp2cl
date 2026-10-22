@@ -28,7 +28,8 @@ const SAMPLE: Duration = Duration::from_secs(5);
 /// Both are read by `build.rs` from git rather than from a file that says so —
 /// a version is a name given to a commit, so the commit is what knows it. A
 /// commit carrying no tag is `dev`, which is the name of a build nobody has
-/// named: `v0.8.0 (f3c999a)` is a release, `dev (993e2b9)` is not.
+/// named: `v0.9.1 (a12935f)` is a release, `dev (993e2b9)` is not. A build from
+/// a tree that does not match the commit says so: `v0.9.1 (a12935f-dirty)`.
 pub const SOFTWARE: &str = concat!(env!("CP2CL_VERSION"), " (", env!("CP2CL_COMMIT"), ")");
 
 /// What the board itself is doing.

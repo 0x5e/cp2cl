@@ -47,8 +47,15 @@ fn main() {
     println!("cargo:rerun-if-changed=.git");
     let version = git(&manifest, &["describe", "--tags", "--exact-match"])
         .unwrap_or_else(|| "dev".to_string());
-    let commit = git(&manifest, &["rev-parse", "--short", "HEAD"])
+    // A tree that does not match the commit is not that commit's build: what
+    // ends up in the binary — `assets/` above all — is whatever was in the
+    // working tree at the time. Said in the word `git describe --dirty` uses,
+    // so a build from a modified tree is recognisable at a glance.
+    let mut commit = git(&manifest, &["rev-parse", "--short", "HEAD"])
         .unwrap_or_else(|| "unknown".to_string());
+    if dirty(&manifest) {
+        commit.push_str("-dirty");
+    }
     println!("cargo:rustc-env=CP2CL_VERSION={version}");
     println!("cargo:rustc-env=CP2CL_COMMIT={commit}");
 }
@@ -73,6 +80,24 @@ fn git(manifest: &Path, args: &[&str]) -> Option<String> {
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(str::to_owned)
+}
+
+/// Whether the working tree holds anything the commit does not.
+///
+/// `status` rather than `diff-index`: an untracked file under `assets/` goes
+/// into the binary exactly as a changed one does. Ignored paths are left out of
+/// it, which is what keeps `target/` and the built-in credentials from making
+/// every build dirty. A tree git cannot be asked about is not called dirty —
+/// the hash is still the right answer there.
+fn dirty(manifest: &Path) -> bool {
+    match std::process::Command::new("git")
+        .current_dir(manifest)
+        .args(["status", "--porcelain"])
+        .output()
+    {
+        Ok(said) => said.status.success() && !said.stdout.is_empty(),
+        Err(_) => false,
+    }
 }
 
 /// Every file under `dir`, as `(name in the table, path to include)`.
