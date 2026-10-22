@@ -453,9 +453,9 @@ make firmware
 
 Write that to a card and put the card in the board. Everything the board runs is
 in it: the access point, the program, and the three init scripts that start them
-in the order they have to happen. It comes out at 14 MB, which is what fits a
-16 MB part: the root is a squashfs of 6.3 MB and the boot partition holds a 6.3 MB
-kernel. The build runs in a container — there is no Linux
+in the order they have to happen. It comes out at 15 MB, which is what fits a
+16 MB part: a 6.3 MB squashfs for the root and a 7 MB kernel on the boot
+partition. The build runs in a container — there is no Linux
 machine here and Buildroot does not run on macOS — and the first one takes a
 while, since it compiles a toolchain and a kernel.
 

@@ -7,6 +7,9 @@
 
 CONFIG_MMC_SUNXI=y
 CONFIG_BRCMFMAC=y
+# Defaults to y once BRCMFMAC is on, but it is the line that decides whether the
+# chip is reachable at all: without it the driver exists and binds to nothing.
+CONFIG_BRCMFMAC_SDIO=y
 CONFIG_BRCMUTIL=y
 CONFIG_SERIAL_8250=y
 CONFIG_SERIAL_8250_NR_UARTS=8

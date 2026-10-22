@@ -23,6 +23,14 @@ CONFIG_MMC=y
 # Wi-Fi and Bluetooth. Both chips sit on a bus the device tree describes, so
 # these bind at probe; nothing has to be loaded or poked from userspace, and the
 # Bluetooth firmware is downloaded by btbcm rather than by a patcher script.
+#
+# The first two are menuconfigs, and sunxi_defconfig — like most minimal vendor
+# defconfigs — turns both off. With them off nothing underneath exists, and the
+# lines below are not overridden but dropped: olddefconfig removes CFG80211,
+# MAC80211 and BRCMFMAC without a word, the build succeeds, and the board comes
+# up with no radio at all.
+CONFIG_WIRELESS=y
+CONFIG_WLAN=y
 CONFIG_CFG80211=y
 CONFIG_MAC80211=y
 CONFIG_RFKILL=y

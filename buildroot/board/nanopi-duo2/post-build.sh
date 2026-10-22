@@ -58,3 +58,10 @@ for f in usr/bin/gio usr/bin/gdbus usr/bin/gsettings usr/bin/gresource \
 	 usr/lib/libgirepository-2.0.so; do
 	rm -f "$TARGET_DIR/$f"*
 done
+
+# Buildroot writes the getty line into /etc/inittab whatever the port is, and an
+# empty port leaves `getty -L "" 0 vt100`: it fails to open a device that has no
+# name, init respawns it five times, and the boot ends with "respawning too
+# fast" on a console nobody asked for. The image deliberately starts no getty —
+# dropbear over the access point is the way in — so the line goes.
+sed -i '/GENERIC_SERIAL/d' "$TARGET_DIR/etc/inittab"
