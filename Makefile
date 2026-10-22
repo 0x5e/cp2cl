@@ -60,6 +60,15 @@ dist: all
 # bind mount into this machine cp finishes the write and then fails to deallocate
 # the tail of the file it just made ("Invalid argument"), which leaves a copy of
 # the right length and an exit status that stops the build.
+#
+# `cp2cl-rebuild` between the two makes is what makes a new binary reach the card.
+# The package's site is `local`, and Buildroot rsyncs a local site once, when
+# `.stamp_rsynced` is written — not on every run. So a `make firmware` after
+# `make dist` rebuilt the program would find every stamp in place, skip the
+# package, and produce an image with the previous binary on it. The rebuild
+# target re-runs rsync and the install, and the second make regenerates the
+# rootfs and the image around it. It has to come after the first make: on a
+# volume that has never been built there is no target directory to install into.
 firmware: dist buildroot-image
 	mkdir -p $(BR_OUT)
 	docker volume create $(BR_VOL) >/dev/null
@@ -69,6 +78,8 @@ firmware: dist buildroot-image
 		-e BR2_DL_DIR=/build/dl \
 		$(BR_IMAGE) sh -c 'chown $(BR_UID):$(BR_UID) /build \
 			&& su -s /bin/sh builder -c "make -C /opt/buildroot O=/build BR2_EXTERNAL=/ext $(BOARD)_defconfig \
+				&& make -C /opt/buildroot O=/build -j$$(nproc) \
+				&& make -C /opt/buildroot O=/build cp2cl-rebuild \
 				&& make -C /opt/buildroot O=/build -j$$(nproc)"'
 	docker run --rm -u $(UID_GID) -v $(BR_VOL):/build -v "$(CURDIR)/$(BR_OUT)":/out \
 		$(BR_IMAGE) dd if=/build/images/sdcard.img of=/out/sdcard.img bs=1M status=none
