@@ -34,7 +34,13 @@ echo "$boots" > "$LOG/boots"
 	echo "cmdline: $(cat /proc/cmdline)"
 	echo "model:   $(tr -d '\0' < /proc/device-tree/model 2>/dev/null)"
 	echo "kernel:  $(uname -r)"
+	echo "mounts:  $(awk '{print $2"="$3}' /proc/mounts | tr '\n' ' ')"
 	echo "net:     $(ls /sys/class/net | tr '\n' ' ')"
+	# A missing /sys is not a missing radio, and the two look identical from
+	# every other line in this directory: /sys/class/net is where a network
+	# interface is, so without the mount there is nothing to see however well
+	# the driver worked. Say so rather than leaving it to be inferred.
+	[ -d /sys/class/net ] || echo "WARNING: /sys is not mounted — nothing below can see an interface"
 } >> "$LOG/boot.log"
 
 # The whole ring buffer, which quiet does not touch: quiet decides what is

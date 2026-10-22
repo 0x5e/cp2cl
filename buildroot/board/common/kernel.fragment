@@ -52,6 +52,10 @@ CONFIG_DEVTMPFS_MOUNT=y
 CONFIG_PROC_FS=y
 CONFIG_SYSFS=y
 CONFIG_INET=y
+# AirPlay is an IPv6 protocol: the receiver's listener is an AF_INET6 socket, and
+# with IPv6 out of the kernel that bind fails with EAFNOSUPPORT and the program
+# exits before it ever serves a page. sunxi_defconfig turns it off.
+CONFIG_IPV6=y
 
 # The log partition is FAT, so that a card pulled out of the board reads on a
 # laptop with no extra software. sunxi_defconfig carries FAT_FS but not VFAT_FS,

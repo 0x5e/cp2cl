@@ -87,6 +87,10 @@ BR2_PACKAGE_HOSTAPD=y
 BR2_PACKAGE_HOSTAPD_DRIVER_NL80211=y
 BR2_PACKAGE_DNSMASQ=y
 BR2_PACKAGE_IW=y
+# The regulatory database. Without it cfg80211 stays in the world domain and the
+# `country_code` hostapd asks for is a request nothing can answer; it is 8 KB and
+# it is what makes channel 11 legal rather than merely tolerated.
+BR2_PACKAGE_WIRELESS_REGDB=y
 # No kmod. The one module this image has is brcmfmac, loaded by name and path
 # from /etc/init.d/S10wifi, so busybox's insmod is enough and there is no depmod
 # to run: the two modules are listed in the order they have to be loaded.
