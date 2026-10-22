@@ -21,8 +21,9 @@ CONFIG_NOP_USB_XCEIV=y
 CONFIG_MMC=y
 
 # Wi-Fi and Bluetooth. Both chips sit on a bus the device tree describes, so
-# these bind at probe; nothing has to be loaded or poked from userspace, and the
-# Bluetooth firmware is downloaded by btbcm rather than by a patcher script.
+# these bind at probe; the Bluetooth firmware is downloaded by btbcm rather than
+# by a patcher script. The Wi-Fi driver is the one thing loaded from userspace
+# (see the board fragment: its firmware has to exist before it probes).
 #
 # The first two are menuconfigs, and sunxi_defconfig — like most minimal vendor
 # defconfigs — turns both off. With them off nothing underneath exists, and the
@@ -51,6 +52,15 @@ CONFIG_DEVTMPFS_MOUNT=y
 CONFIG_PROC_FS=y
 CONFIG_SYSFS=y
 CONFIG_INET=y
+
+# The log partition is FAT, so that a card pulled out of the board reads on a
+# laptop with no extra software. sunxi_defconfig carries FAT_FS but not VFAT_FS,
+# and without it the mount fails and there is no log — which is the one thing
+# this image exists to produce.
+CONFIG_VFAT_FS=y
+CONFIG_NLS_CODEPAGE_437=y
+CONFIG_NLS_ISO8859_1=y
+CONFIG_NLS_UTF8=y
 
 # CONFIG_DRM is not set
 # CONFIG_FB is not set

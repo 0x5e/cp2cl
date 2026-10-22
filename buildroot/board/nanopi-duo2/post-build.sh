@@ -32,6 +32,33 @@ done
 # /etc/fstab puts the program's log on — and it has to exist before mount -a.
 install -d -m 0755 "$TARGET_DIR/var/log"
 
+# Same for the log partition. An overlay cannot carry it: it is an empty
+# directory, and git does not keep those.
+install -d -m 0755 "$TARGET_DIR/log"
+
+# The log partition's one file at flash time — what to look at once the card is
+# in a reader. It is also what keeps genimage from copying the whole images
+# directory into a 512 KB filesystem, which is what an empty file list means.
+BINARIES_DIR=${2:-${BINARIES_DIR:-.}}
+mkdir -p "$BINARIES_DIR"
+cat > "$BINARIES_DIR/log-readme.txt" <<'EOF'
+cp2cl — log partition
+
+Nothing here needs keeping. This is what the last boot had to say about itself,
+written by /etc/init.d/S00diag on the board:
+
+  boot.log      one block per boot: uptime, kernel command line, interfaces
+  dmesg.log     the kernel ring buffer, from the top
+  state.log     a sample every five seconds: interfaces, sdio devices, wlan0
+  wifi.log      what S10wifi did — modules loaded, how long wlan0 took
+  ap.log        hostapd and dnsmasq
+  hostapd.log   hostapd's own log
+  cp2cl.log     the program
+
+If this file is all that is here, the kernel never reached userspace: the card
+boots no further than U-Boot, and nothing above can help.
+EOF
+
 # The skeleton gives /var/run as a directory of its own, which on a read-only root
 # is a directory nobody can write to. Point it at the tmpfs /etc/fstab mounts on
 # /run, where dropbear and anything else that drops a pid file expects to be able

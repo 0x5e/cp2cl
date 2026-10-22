@@ -7,18 +7,20 @@
 # than in a settings file because the program has no settings file — everything
 # it takes from outside comes from the environment.
 #
-# The log goes to /var/log, which is a tmpfs on this image because the root is a
-# read-only squashfs. That means it does not survive a power cut: a run that
-# ends in a fault is gone with it. A third partition, or an overlay on one, is
-# what buys that back.
+# The log goes to /var/log, which is a tmpfs: the root is a read-only squashfs,
+# so it does not survive a power cut, and a run that ends in a fault is gone with
+# it. When the log partition is mounted it goes there instead — same file, on a
+# partition that is still there after the ignition is turned off.
 case "$1" in
 	start)
 		printf 'Starting cp2cl: '
+		log=/var/log/cp2cl.log
+		[ -w /log ] && log=/log/cp2cl.log
 		CP2CL_WIRELESS=1 \
 		CP2CL_LOG_LEVEL=info \
 		CP2CL_WIFI_IFACE=wlan0 \
 		CP2CL_BT_ADAPTER=hci0 \
-			setsid /usr/bin/cp2cl >>/var/log/cp2cl.log 2>&1 &
+			setsid /usr/bin/cp2cl >>"$log" 2>&1 &
 		echo $! > /run/cp2cl.pid
 		echo "ok"
 		;;

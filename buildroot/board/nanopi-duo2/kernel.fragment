@@ -6,11 +6,18 @@
 # not in the common fragment.
 
 CONFIG_MMC_SUNXI=y
-CONFIG_BRCMFMAC=y
+
+# A module, and not for the size. A built-in brcmfmac probes at device_initcall,
+# which is before the kernel mounts the squashfs root — so /lib/firmware does not
+# exist yet, the firmware request fails with -ENOENT, and nothing retries: the
+# SDIO function stays bound to a driver that never initialised the chip, and the
+# board comes up with no wlan0 at all. As a module it is loaded by
+# /etc/init.d/S10wifi, after the root is mounted and the blobs are there.
+CONFIG_BRCMFMAC=m
 # Defaults to y once BRCMFMAC is on, but it is the line that decides whether the
 # chip is reachable at all: without it the driver exists and binds to nothing.
 CONFIG_BRCMFMAC_SDIO=y
-CONFIG_BRCMUTIL=y
+CONFIG_BRCMUTIL=m
 CONFIG_SERIAL_8250=y
 CONFIG_SERIAL_8250_NR_UARTS=8
 CONFIG_SERIAL_8250_RUNTIME_UARTS=8

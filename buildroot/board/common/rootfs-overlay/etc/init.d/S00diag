@@ -1,0 +1,63 @@
+#!/bin/sh
+#
+# The first thing that runs after the root is mounted: everything the boot can
+# say about itself, written where it survives the power going away.
+#
+# This image has no serial console and no display, so a board that comes up
+# without a radio and a board that never got past U-Boot look exactly alike from
+# outside — both are "no SSID on the phone". The difference is a file, and this
+# is the script that writes it: if /log stays empty, the kernel never reached
+# userspace; if it has a dmesg in it, the boot finished and the answer is in
+# there.
+#
+# /log is the third partition, a FAT that a card reader mounts on any laptop.
+# It is written once at boot and then sampled for two minutes, so a run that
+# ends badly does not leave the card with an unflushed cluster chain.
+
+LOG=/log
+PART=/dev/mmcblk0p3
+
+[ -d "$LOG" ] || exit 0
+if ! grep -q " $LOG vfat " /proc/mounts; then
+	mount -t vfat -o rw,noatime "$PART" "$LOG" 2>/dev/null || exit 0
+fi
+# A FAT that came back read-only (a card pulled mid-write, a bad block) is no use
+# here, and writing to it would only fail once per line.
+[ -w "$LOG" ] || exit 0
+
+boots=$(cat "$LOG/boots" 2>/dev/null || echo 0)
+boots=$((boots + 1))
+echo "$boots" > "$LOG/boots"
+
+{
+	echo "=== boot $boots at uptime $(cut -d' ' -f1 /proc/uptime)"
+	echo "cmdline: $(cat /proc/cmdline)"
+	echo "model:   $(tr -d '\0' < /proc/device-tree/model 2>/dev/null)"
+	echo "kernel:  $(uname -r)"
+	echo "net:     $(ls /sys/class/net | tr '\n' ' ')"
+} >> "$LOG/boot.log"
+
+# The whole ring buffer, which quiet does not touch: quiet decides what is
+# printed to a console, and there is no console — the buffer keeps everything.
+dmesg > "$LOG/dmesg.log" 2>/dev/null
+
+# What the radio is doing, once every five seconds for two minutes. Enough to
+# see wlan0 appear late, or never; short enough that a boot that hangs still
+# leaves the samples before the hang on the card.
+(
+	i=0
+	while [ "$i" -lt 24 ]; do
+		i=$((i + 1))
+		{
+			echo "--- t=$(cut -d' ' -f1 /proc/uptime)" \
+				"net=[$(ls /sys/class/net | tr '\n' ' ')]" \
+				"sdio=[$(ls /sys/bus/sdio/devices 2>/dev/null | tr '\n' ' ')]" \
+				"wlan0=$(cat /sys/class/net/wlan0/address 2>/dev/null)"
+			dmesg | grep -i brcmf | tail -n 3
+		} >> "$LOG/state.log"
+		sync
+		sleep 5
+	done
+) &
+
+exit 0

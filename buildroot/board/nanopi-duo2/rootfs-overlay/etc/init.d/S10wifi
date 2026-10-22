@@ -1,0 +1,85 @@
+#!/bin/sh
+#
+# brcmfmac, loaded here rather than compiled in.
+#
+# A built-in driver probes during device_initcall, before the kernel has mounted
+# the squashfs root — /lib/firmware does not exist yet, the firmware request
+# fails with -ENOENT, and brcmfmac does not retry: the SDIO function stays bound
+# to a driver that never brought the chip up, and the board runs with no wlan0
+# and no message anywhere. Loaded from here, the root is mounted and the blobs
+# under /lib/firmware/brcm are readable.
+#
+# brcmutil first: brcmfmac links against it, and there is no depmod in this
+# image — busybox insmod does not resolve dependencies, so the order is written
+# out. Everything this does is appended to /log/wifi.log, because the board has
+# no console and "no SSID" and "no driver" look the same from a phone.
+
+MODDIR=/lib/modules/$(uname -r)
+LOG=/log
+
+log() {
+	echo "$*"
+	[ -w "$LOG" ] && echo "$*" >> "$LOG/wifi.log"
+}
+
+start() {
+	printf 'Loading wifi: '
+	ERR=/dev/null
+	if [ -w "$LOG" ]; then
+		: > "$LOG/wifi.log"
+		ERR=$LOG/wifi.log
+	fi
+
+	for m in brcmutil brcmfmac; do
+		ko=$(find "$MODDIR" -name "$m.ko" 2>/dev/null | head -n 1)
+		if [ -z "$ko" ]; then
+			log "missing $m.ko under $MODDIR"
+			continue
+		fi
+		if insmod "$ko" 2>>"$ERR"; then
+			log "loaded $ko"
+		else
+			log "insmod $ko failed"
+		fi
+	done
+
+	# The interface appears when the chip has taken its firmware, which is
+	# a second or two after the module is loaded and the SDIO function
+	# probes. Twenty seconds is a generous ceiling: if it has not happened
+	# by then it is not going to, and the reason is in dmesg.
+	i=0
+	while [ ! -e /sys/class/net/wlan0 ]; do
+		i=$((i + 1))
+		if [ "$i" -gt 20 ]; then
+			log "wlan0 did not appear in 20 s"
+			dmesg | grep -i -E 'brcmf|mmc1|sdio' >> "$ERR" 2>/dev/null
+			echo "no wlan0"
+			return 1
+		fi
+		sleep 1
+	done
+
+	log "wlan0 appeared after ${i}s: $(cat /sys/class/net/wlan0/address 2>/dev/null)"
+	echo "ok"
+}
+
+stop() {
+	printf 'Unloading wifi: '
+	rmmod brcmfmac 2>/dev/null
+	rmmod brcmutil 2>/dev/null
+	echo "ok"
+}
+
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart|reload)
+		"$0" stop
+		sleep 1
+		"$0" start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+		;;
+esac

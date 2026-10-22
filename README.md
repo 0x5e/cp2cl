@@ -452,10 +452,10 @@ make firmware
 ```
 
 Write that to a card and put the card in the board. Everything the board runs is
-in it: the access point, the program, and the three init scripts that start them
-in the order they have to happen. It comes out at 15 MB, which is what fits a
-16 MB part: a 6.3 MB squashfs for the root and a 7 MB kernel on the boot
-partition. The build runs in a container — there is no Linux
+in it: the access point, the program, and the init scripts that start them in the
+order they have to happen. It comes out at 15.4 MB, which is what fits a 16 MB
+part: a 6.4 MB squashfs for the root, a 6.8 MB kernel on the boot partition, and
+512 KB for the log. The build runs in a container — there is no Linux
 machine here and Buildroot does not run on macOS — and the first one takes a
 while, since it compiles a toolchain and a kernel.
 
@@ -474,13 +474,23 @@ configuration out of `/etc/hostapd`, taking the file that names the interface
 `CP2CL_WIFI_IFACE` defaults to, so the two cannot drift apart. See
 [Wireless CarPlay](#wireless-carplay).
 
-**The boot is three scripts and no service manager.**
+**The boot is four scripts and no service manager.**
 
 | Script | What it is |
 |---|---|
+| `S00diag` | writes what the boot had to say to the log partition, then samples it for two minutes |
+| `S10wifi` | loads `brcmutil` and `brcmfmac`, and waits for `wlan0` |
 | `S20cp2cl-ap` | hostapd on `wlan0` at `192.168.4.1/24`, then dnsmasq for the leases |
 | `S50cp2cl` | the program, with the environment the README documents |
 | `S50dropbear` | dropbear, for the console the image does not otherwise have |
+
+`brcmfmac` is the one module in the image, and it is a module for the ordering,
+not the size: a built-in driver probes before the root is mounted, when
+`/lib/firmware` does not exist yet, and a firmware request that fails at that
+point is not retried — the board comes up with no `wlan0` and nothing said
+anywhere. Loaded from `S10wifi` it runs after the root is there, and `S20cp2cl-ap`
+retries hostapd five times because the interface it beacons on belongs to a
+module loaded a second earlier.
 
 There is no third script for the Bluetooth firmware, and that is the point of
 running mainline: the device tree puts the chip on UART2 as a serdev child, so
@@ -489,10 +499,33 @@ appears. The vendor's 4.14 image had to push it from userspace, as a systemd
 oneshot that `multi-user.target` waited on — which was 34 of that image's 45
 seconds of boot.
 
-**The root is a read-only squashfs.** There is nothing to fsck on a card that
-loses power with the ignition — and nothing that survives it either: `/var/log` is
-a tmpfs, so a run that ends in a fault is gone with the power. The program's log
-is `/var/log/cp2cl.log`, and it is the whole of what the board says.
+**The root is a read-only squashfs, and the log is its own partition.** There is
+nothing to fsck on a card that loses power with the ignition, so `/` is a
+squashfs and `/var/log` is a tmpfs. The one thing written is the third
+partition, `/log`: a 512 KB FAT that `S00diag` fills with the kernel ring buffer,
+the command line, the interfaces that exist and a sample of them every five
+seconds. It is a partition of its own rather than a file on the boot one so that
+a card pulled mid-write cannot damage what U-Boot reads, and it is FAT so that it
+opens on a laptop.
+
+**That partition is the console this image does not have.** A board that never
+got past U-Boot and a board whose radio did not come up look the same from a
+phone — no SSID — and the difference is a file. Pull the card, mount it, and
+read:
+
+```bash
+ls /Volumes/CP2CL-LOG 2>/dev/null || ls /Volumes/*/   # boot, and the log partition
+cat /Volumes/*/dmesg.log | grep -i brcmf
+cat /Volumes/*/wifi.log /Volumes/*/ap.log /Volumes/*/cp2cl.log
+```
+
+An empty partition means the kernel never reached userspace. A `dmesg.log` with
+no `wlan0` in it means the boot finished and the radio is the problem — and
+`state.log` has the samples that say whether it appeared late, or never.
+
+The program's log is also `/var/log/cp2cl.log` while the board runs, and on the
+log partition it is `/log/cp2cl.log`.
+
 
 **The board is reached on its access point.** `192.168.4.1`, and nothing else: the
 program has no port of its own to log into. Join `nanopi-duo2` and log in:

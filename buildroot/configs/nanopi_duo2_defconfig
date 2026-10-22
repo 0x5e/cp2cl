@@ -87,8 +87,9 @@ BR2_PACKAGE_HOSTAPD=y
 BR2_PACKAGE_HOSTAPD_DRIVER_NL80211=y
 BR2_PACKAGE_DNSMASQ=y
 BR2_PACKAGE_IW=y
-# No kmod: everything the board needs is compiled into the kernel, so there is
-# no module to load and modprobe is a busybox applet that never finds one.
+# No kmod. The one module this image has is brcmfmac, loaded by name and path
+# from /etc/init.d/S10wifi, so busybox's insmod is enough and there is no depmod
+# to run: the two modules are listed in the order they have to be loaded.
 
 # dropbear rather than openssh. openssh is 7 MB of binaries and 4.7 MB of
 # libcrypto and libssl, and it is the only thing in this image that selects
