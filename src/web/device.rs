@@ -1,5 +1,5 @@
 //! What the board itself is doing: how much CPU it is using, how much memory
-//! is left, and which build it is running.
+//! is left, which system it is running on, and which build it is running.
 //!
 //! This is the one part of the page that is about neither end of the bridge, and
 //! the one part that is observed rather than reported: nothing in the bridge
@@ -11,7 +11,7 @@
 //! would be shown a share of whatever interval happened to sit between its own
 //! two requests, which is a different measurement every time the page is opened.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -32,10 +32,76 @@ const SAMPLE: Duration = Duration::from_secs(5);
 /// a tree that does not match the commit says so: `v0.9.1 (a12935f-dirty)`.
 pub const SOFTWARE: &str = concat!(env!("CP2CL_VERSION"), " (", env!("CP2CL_COMMIT"), ")");
 
+/// The two answers below, kept after the first one: neither changes under a
+/// running program, and both cost a file read.
+static FIRMWARE: OnceLock<Option<String>> = OnceLock::new();
+static KERNEL: OnceLock<Option<String>> = OnceLock::new();
+
+/// The distribution this program is running on, as `Ubuntu 24.04` or
+/// `ImmortalWrt 23.05.3`.
+///
+/// `PRETTY_NAME` is nearly this and not quite — OpenWrt and its derivatives put
+/// the revision in it (`ImmortalWrt 23.05.3 r27840-6b0f2b1`) — so the name and
+/// the version are read as two fields instead of taking whichever string the
+/// builder thought to write.
+pub fn firmware() -> Option<&'static str> {
+    FIRMWARE
+        .get_or_init(|| os_release().as_deref().and_then(os_firmware))
+        .as_deref()
+}
+
+/// The kernel's own release string, as `uname -r` prints it:
+/// `6.6.31-rockchip64`.
+pub fn kernel() -> Option<&'static str> {
+    KERNEL
+        .get_or_init(|| {
+            let text = std::fs::read_to_string("/proc/sys/kernel/osrelease").ok()?;
+            let release = text.trim();
+            (!release.is_empty()).then(|| release.to_string())
+        })
+        .as_deref()
+}
+
+/// `/etc/os-release`, or the copy systemd keeps in `/usr/lib` for the images
+/// that leave `/etc` to the administrator.
+fn os_release() -> Option<String> {
+    ["/etc/os-release", "/usr/lib/os-release"]
+        .into_iter()
+        .find_map(|path| std::fs::read_to_string(path).ok())
+}
+
+/// `<NAME> <VERSION_ID>` out of an `os-release` file.
+///
+/// The version falls back to `VERSION` because not every builder writes an id —
+/// Buildroot writes both, and Ubuntu's `VERSION` carries the release name and
+/// the id does not.
+fn os_firmware(text: &str) -> Option<String> {
+    let name = os_field(text, "NAME")?;
+    match os_field(text, "VERSION_ID").or_else(|| os_field(text, "VERSION")) {
+        Some(version) => Some(format!("{name} {version}")),
+        None => Some(name),
+    }
+}
+
+/// One field of an `os-release` file, without the quotes it may be written in.
+///
+/// The key is matched whole: `ID` is a line of its own and not the beginning of
+/// `ID_LIKE`.
+fn os_field(text: &str, key: &str) -> Option<String> {
+    let value = text.lines().find_map(|line| {
+        let (found, value) = line.split_once('=')?;
+        (found.trim() == key).then_some(value.trim())
+    })?;
+    let value = value.trim_matches('"').trim_matches('\'');
+    (!value.is_empty()).then(|| value.to_string())
+}
+
 /// What the board itself is doing.
 ///
-/// Empty until the first sample: `cpu_percent` needs two readings to compare,
-/// and the memory figures arrive with them.
+/// Only what is sampled is here, and it is empty until the first sample:
+/// `cpu_percent` needs two readings to compare, and the memory figures arrive
+/// with them. What the machine *is* needs no sampling and is not a field — see
+/// `SOFTWARE`, `firmware` and `kernel`.
 #[derive(Debug, Clone, Default)]
 pub struct Device {
     /// Share of the CPU used since the last sample, over every core at once:
@@ -54,6 +120,8 @@ impl Device {
     pub fn json(&self) -> Value {
         json!({
             "software": SOFTWARE,
+            "firmware": firmware(),
+            "kernel": kernel(),
             "cpu_percent": self.cpu_percent,
             "memory_used": self.memory_used,
             "memory_total": self.memory_total,
@@ -215,5 +283,56 @@ SwapTotal:             0 kB
             .unwrap_or_else(|| panic!("`v0.8.0 (f3c999a)`, not {software}"));
         assert!(version == "dev" || version.starts_with('v'), "{version}");
         assert!(commit.ends_with(')') && commit.len() >= 8, "{commit}");
+    }
+
+    /// The three systems this is built for, in the two words the page shows:
+    /// the distribution's own name, and the version without anything the
+    /// builder added around it.
+    #[test]
+    fn the_firmware_is_the_distribution_and_its_version() {
+        let ubuntu = "\
+PRETTY_NAME=\"Ubuntu 24.04.1 LTS\"
+NAME=\"Ubuntu\"
+VERSION_ID=\"24.04\"
+VERSION=\"24.04.1 LTS (Noble Numbat)\"
+";
+        assert_eq!(os_firmware(ubuntu).as_deref(), Some("Ubuntu 24.04"));
+
+        // Buildroot old enough to write no id: the version is the one there is.
+        let buildroot = "NAME=Buildroot\nVERSION=2024.02.1\nID=buildroot\n";
+        assert_eq!(os_firmware(buildroot).as_deref(), Some("Buildroot 2024.02.1"));
+
+        // The revision is in the pretty name and is not part of the version.
+        let immortal = "\
+NAME=\"ImmortalWrt\"
+VERSION=\"23.05.3\"
+ID=\"immortalwrt\"
+VERSION_ID=\"23.05.3\"
+PRETTY_NAME=\"ImmortalWrt 23.05.3 r27840-6b0f2b1\"
+";
+        assert_eq!(
+            os_firmware(immortal).as_deref(),
+            Some("ImmortalWrt 23.05.3")
+        );
+    }
+
+    /// Quotes are the file's business, and a key is matched whole: `ID` is a
+    /// line of its own, not the first half of `ID_LIKE`.
+    #[test]
+    fn a_field_is_read_without_its_quotes() {
+        let text = "# a comment\nNAME='Alpine Linux'\nVERSION_ID=\"3.20\"\nID=alpine\n";
+        assert_eq!(os_field(text, "NAME").as_deref(), Some("Alpine Linux"));
+        assert_eq!(os_field(text, "VERSION_ID").as_deref(), Some("3.20"));
+        assert_eq!(os_field(text, "ID_LIKE"), None, "a key that starts the same");
+        assert_eq!(os_field(text, "MISSING"), None, "a key that is not there");
+    }
+
+    /// A page is shown which system it is talking to on its first answer, not
+    /// after the first sample: neither version is a reading of a counter.
+    #[test]
+    fn the_system_is_named_on_every_answer() {
+        let body = Device::default().json();
+        assert!(body.get("firmware").is_some(), "the key is there");
+        assert!(body.get("kernel").is_some(), "and so is the other");
     }
 }

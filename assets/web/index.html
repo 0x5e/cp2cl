@@ -284,6 +284,8 @@ const CARPLAY_BLOCKS = [
 const DEVICE_ROWS = [
   ["CPU 占用率", d => percent(d.cpu_percent)],
   ["内存占用率", d => memory(d)],
+  ["固件版本", d => d.firmware],
+  ["内核版本", d => d.kernel],
   ["软件版本", d => d.software],
 ];
 
