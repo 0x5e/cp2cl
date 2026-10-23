@@ -22,10 +22,10 @@ BR2_TARGET_GENERIC_HOSTNAME="nanopi-duo2"
 BR2_TARGET_GENERIC_ISSUE="cp2cl"
 BR2_TARGET_GENERIC_GETTY_PORT=""
 BR2_SYSTEM_DHCP=""
-# A way in while the image is still being brought up. The board is on the access
-# point it serves and nothing here is reachable from anywhere else; change this
-# before the board goes into a car and stays there.
-BR2_TARGET_GENERIC_ROOT_PASSWD="cp2cl"
+# Root has no password. It is Buildroot's default — an empty field in the
+# skeleton's /etc/shadow — so there is no BR2_TARGET_GENERIC_ROOT_PASSWD line
+# here, and the way in is the key in root/.ssh/authorized_keys. Said out loud
+# because the option's absence reads like an oversight.
 
 BR2_INIT_BUSYBOX=y
 BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_DEVTMPFS=y
