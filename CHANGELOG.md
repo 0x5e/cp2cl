@@ -10,11 +10,15 @@
 
 - 车机静默时日志能分清「没打开管道」和「打开了不说话」，`usb.enumerated` 带上 `speed`/`state`，管道开启 2 秒仍无消息就写一帧心跳并记下是否被取走（`662a073`）。
 - 车机发来的前 8 帧按原始字节记录，非命令通道与未识别的消息类型不再只出现在 debug（`662a073`）。
+- 前 8 帧改记前 64 字节，日志键 `head=` 改 `body=`，一次运行就能看出消息头与消息体的分界（`483e9c7`）。
+- `dr_mode = "otg"` 的板子上 OTG 口能被主机看到了，组装 gadget 前会把控制器的 `mode` 写成 `peripheral`（`0d785ec`）。
 - 构建时工作区不干净，版本串在提交短哈希后面带 `-dirty`，如 `v0.9.1 (a12935f-dirty)`（`4f8ecb0`）。
 
 ### 修复
 
 - 切到 accessory 形态只改 VID/PID，manufacturer、product、serial 保持本机自己的，与真机在同样切换下的表现一致（`dc6bb77`）。
+- 组装 gadget 中途失败不再留下注册着的 FunctionFS 函数；此前这一次失败会让之后每次启动都报 `Directory not empty`（`067bf27`）。
+- 控制器被别的 gadget 占住时，日志不再断言那是上一次留下的，configfs 里没人认领就写明没人认领（`5f44fe3`）。
 
 ## v0.9.1 alpha — 2026-10-21
 
