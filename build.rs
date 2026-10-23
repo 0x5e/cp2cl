@@ -41,10 +41,27 @@ fn main() {
     let out = Path::new(&std::env::var("OUT_DIR").expect("cargo sets this")).join("assets.rs");
     std::fs::write(out, table).expect("the generated table is writable");
 
-    // Watched as a whole rather than file by file: a checkout moves `HEAD`, a
-    // commit moves a branch, and a tag is a third file again — any of them can
-    // be what changes the answer, and a directory is one line that covers all.
-    println!("cargo:rerun-if-changed=.git");
+    // Watched file by file, not as `.git` itself. The `git status` below creates
+    // and deletes `.git/index.lock` and rewrites `.git/index`, and a create or a
+    // delete in a directory brings that directory's own mtime forward — so
+    // watching `.git` made every build find it changed, rerun this script, and
+    // rebuild the crate: forty seconds for a binary nothing had touched. These
+    // are the paths whose content is the answer — a checkout writes `HEAD`, a
+    // commit writes a branch under `refs/heads/`, a tag is a file under
+    // `refs/tags/`, and a `git gc` moves both kinds of ref into `packed-refs`.
+    // `refs/remotes/` and `refs/stash` are left out: neither can change what
+    // this is called. A path that does not exist is skipped rather than named,
+    // because a repository that has never been packed has no `packed-refs`.
+    for path in [
+        ".git/HEAD",
+        ".git/refs/heads",
+        ".git/refs/tags",
+        ".git/packed-refs",
+    ] {
+        if manifest.join(path).exists() {
+            println!("cargo:rerun-if-changed={path}");
+        }
+    }
     let version = git(&manifest, &["describe", "--tags", "--exact-match"])
         .unwrap_or_else(|| "dev".to_string());
     // A tree that does not match the commit is not that commit's build: what
