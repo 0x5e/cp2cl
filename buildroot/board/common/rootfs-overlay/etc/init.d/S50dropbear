@@ -2,15 +2,12 @@
 #
 # dropbear, for reaching the board over the access point while debugging.
 #
-# This replaces Buildroot's own S50dropbear, and the difference is what it does
-# not do: that script runs `dropbearkey` when /etc/dropbear is empty, and the
-# root here is a read-only squashfs with nowhere to put a key. The key is in the
-# image instead — etc/dropbear/ in the board's overlay — and -r points at it, so
-# dropbear never goes looking for one it would have to create.
+# Buildroot's own S50dropbear runs `dropbearkey` when /etc/dropbear is empty. The
+# key is in the image instead, so the fingerprint a client has accepted survives
+# a reflash, and -r points at it.
 #
-# -R is absent for the same reason. It generates host keys at startup, which on
-# this root means failing to write them on every boot and handing out a new
-# fingerprint each time.
+# -R is absent: it generates host keys at startup and reads none from disk, so
+# every boot would hand out a new fingerprint.
 
 DAEMON="dropbear"
 PIDFILE="/var/run/$DAEMON.pid"

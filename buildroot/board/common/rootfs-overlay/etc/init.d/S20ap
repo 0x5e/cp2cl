@@ -1,21 +1,17 @@
 #!/bin/sh
 #
 # The access point: the only way to reach the board, and the network the phone
-# comes back on. The same two things the Ubuntu image runs as cp2cl-ap.service
-# and cp2cl-ap-dhcp.service, in the order they have to happen.
+# comes back on.
 #
-# It is one script rather than two because there is no unit ordering to express
-# here: hostapd has to be beaconing before a client can ask dnsmasq for an
-# address, and that is a line order.
+# hostapd has to be beaconing before a client can ask dnsmasq for an address,
+# and that is a line order, so the two are one script.
 #
-# What it takes from those units is the retry. hostapd exits immediately when
-# wlan0 is not there, and on this image wlan0 belongs to a module loaded a
-# moment earlier: a start that runs once loses that race once and then never
-# beacons again, which from a phone is the same as a radio that never came up.
-# The loop below is systemd's Restart=on-failure, written out.
+# hostapd exits immediately when wlan0 is not there, and on this image wlan0
+# belongs to a module loaded a moment earlier: a start that runs once loses that
+# race once and never beacons again. The loop below retries it.
 #
-# Both daemons log to /var/log. The board has no console, and hostapd's own
-# reason for refusing a channel is not something to guess at.
+# Both daemons log to /var/log: the board has no console, and hostapd's reason
+# for refusing a channel is not something to guess at.
 LOG=/var/log
 
 log() {

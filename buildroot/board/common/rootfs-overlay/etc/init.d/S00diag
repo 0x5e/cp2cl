@@ -1,17 +1,11 @@
 #!/bin/sh
 #
-# The first thing that runs after the root is mounted: everything the boot can
-# say about itself, written to the disk it booted from.
+# Everything the boot can say about itself, written to the disk it booted from.
 #
-# This board has no serial console and no display, and a run that goes wrong is
-# diagnosed afterwards — over ssh if the network came up, off the card if it did
-# not. Either way from these files, and the earlier they are written the more of
-# the failure they hold: the ring buffer below is the whole of the kernel's boot,
-# including the parts that happened before there was a filesystem to write them
-# to.
-#
-# The samples after it answer the one question a single snapshot cannot: whether
-# something appeared late, or never appeared at all.
+# The board has no console and no display, and a run that goes wrong is
+# diagnosed afterwards: over ssh if the network came up, off the card if it did
+# not. The ring buffer is the whole of the kernel's boot, including the part
+# before there was a filesystem to write to.
 
 LOG=/var/log
 

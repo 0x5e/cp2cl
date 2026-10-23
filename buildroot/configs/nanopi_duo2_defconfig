@@ -1,18 +1,13 @@
 # NanoPi Duo2 — Allwinner H3, 512 MB, AP6212 (2.4 GHz 1x1 + BCM43430 Bluetooth).
 #
-# Mainline U-Boot and mainline Linux, not the vendor's 4.14 BSP. The BSP is what
-# the board runs today and it cannot be built here: Buildroot 2026.02 offers GCC
-# 13, 14 and 15, and a 4.14 kernel compiles with none of them. Mainline has the
-# board's device tree — wifi, bluetooth and usb_otg are all in it — and a U-Boot
-# defconfig that names it, so the toolchain, the kernel and the bootloader come
-# from one place and one compiler.
+# Mainline U-Boot and mainline Linux, not the vendor's 4.14 BSP: Buildroot 2026.02
+# offers GCC 13, 14 and 15, and a 4.14 kernel compiles with none of them. Mainline
+# has the board's device tree and a U-Boot defconfig that names it.
 #
 # The target is a writable ext4 with no udev. It was a read-only squashfs, on the
 # argument that a card which loses power with the ignition should have nothing to
-# fsck — but the price was a root nothing could be changed on: no binary to
-# replace, no key to add, no setting to edit, and a program that has to be told
-# where to put the files it creates because the obvious place does not exist.
-# Debugging is worth more than the journal replay costs, which is milliseconds.
+# fsck — but the price was a root nothing could be changed on. Debugging is worth
+# more than the journal replay costs.
 
 BR2_arm=y
 BR2_cortex_a7=y
@@ -36,9 +31,8 @@ BR2_INIT_BUSYBOX=y
 BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_DEVTMPFS=y
 BR2_TARGET_ROOTFS_EXT2=y
 BR2_TARGET_ROOTFS_EXT2_4=y
-# 64 MB for a tree that is 20: the rest is for the things this image exists to
-# make possible — a binary to replace, a key to add, a log that grows. One line
-# to change, and the card is 29 GB.
+# 64 MB for a tree that is 20: the rest is room for a binary to replace, a key to
+# add, and a log that grows.
 BR2_TARGET_ROOTFS_EXT2_SIZE="64M"
 # ext4 keeps 5% back for root by default, which is 3 MB of a 64 MB partition on a
 # filesystem where root is the only user.
@@ -106,14 +100,12 @@ BR2_PACKAGE_WIRELESS_REGDB=y
 # from /etc/init.d/S10wifi, so busybox's insmod is enough and there is no depmod
 # to run: the two modules are listed in the order they have to be loaded.
 
-# dropbear rather than openssh. openssh is 7 MB of binaries and 4.7 MB of
-# libcrypto and libssl, and it is the only thing in this image that selects
-# OpenSSL at all: without it hostapd builds its own TLS and the whole library
-# goes with it. What is left is a shell to log into and scp to copy a file —
-# sftp is the one thing that does not come along, and nothing here uses it.
+# dropbear rather than openssh: openssh is 7 MB of binaries and 4.7 MB of
+# libcrypto and libssl, and it is the only thing here that selects OpenSSL at
+# all. sftp does not come along, and nothing here uses it.
 #
-# The client stays: dropbear's scp is always built but shells out to dbclient
-# for the connection, so turning the client off would leave a broken scp.
+# The client stays: dropbear's scp is always built but shells out to dbclient for
+# the connection, so turning the client off would leave a broken scp.
 BR2_PACKAGE_DROPBEAR=y
 BR2_PACKAGE_DROPBEAR_CLIENT=y
 # The board is the access point and there is no resolver behind it. A reverse

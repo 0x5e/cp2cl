@@ -1,18 +1,15 @@
 #!/bin/sh
 #
-# brcmfmac, loaded here rather than compiled in.
+# brcmfmac, loaded from here rather than compiled in.
 #
-# A built-in driver probes during device_initcall, before the kernel has mounted
-# the root filesystem — /lib/firmware does not exist yet, the firmware request
-# fails with -ENOENT, and brcmfmac does not retry: the SDIO function stays bound
-# to a driver that never brought the chip up, and the board runs with no wlan0
-# and no message anywhere. Loaded from here, the root is mounted and the blobs
-# under /lib/firmware/brcm are readable.
+# A built-in driver probes during device_initcall, before the root is mounted.
+# /lib/firmware does not exist yet, the firmware request fails with -ENOENT, and
+# brcmfmac does not retry: the SDIO function stays bound to a driver that never
+# brought the chip up, and the board runs with no wlan0 and no message anywhere.
 #
-# brcmutil first: brcmfmac links against it, and there is no depmod in this
-# image — busybox insmod does not resolve dependencies, so the order is written
-# out. Everything this does is appended to /var/log/wifi.log, because the board
-# has no console and "no SSID" and "no driver" look the same from a phone.
+# brcmutil first: brcmfmac links against it and there is no depmod in this image,
+# so the order is written out. Everything here goes to /var/log/wifi.log, because
+# "no SSID" and "no driver" look the same from a phone.
 
 MODDIR=/lib/modules/$(uname -r)
 LOG=/var/log

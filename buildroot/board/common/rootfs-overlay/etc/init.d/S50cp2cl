@@ -1,23 +1,19 @@
 #!/bin/sh
 #
-# cp2cl, last: it needs the access point up (it reads the network it hands the
-# phone out of /etc/hostapd) and, for wireless, BlueZ registered.
+# cp2cl, last: it reads the access point's network out of /etc/hostapd, and for
+# wireless it needs BlueZ registered.
 #
-# The environment is the one the README documents. They are set here rather
-# than in a settings file because the program has no settings file — everything
-# it takes from outside comes from the environment. This script is the settings
-# file: the root is writable, so a setting is a line to edit and a restart.
+# The program has no settings file; everything it takes from outside comes from
+# the environment. This script is the settings file.
 case "$1" in
 	start)
 		printf 'Starting cp2cl: '
 
 		# Where the program keeps the accessory identity it presents to
 		# the phone and the controllers it has paired with. It creates
-		# the directory on first run under $XDG_DATA_HOME, and with that
-		# unset it goes to $HOME/.local/share/cp2cl — on a board whose
-		# HOME is /, and which used to boot from a read-only image, that
-		# first write was the whole of what a run ever did: it failed
-		# with EROFS and the program exited before anything else.
+		# the directory under $XDG_DATA_HOME on first run; with that
+		# unset it goes to $HOME/.local/share/cp2cl, and this board's
+		# HOME is /.
 		#
 		# /var/lib rather than /run: the identity has to outlive the boot,
 		# or the phone meets a new accessory every time the ignition turns.

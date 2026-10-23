@@ -44,31 +44,22 @@ dist: all
 
 # BOARD=<name> builds any board that has a configs/<name>_defconfig.
 #
-# The build directory is a named volume rather than a bind mount: the host's
-# filesystem is case-insensitive and Buildroot's output is not, and the failures
-# that causes arrive hours into a build. `dl/` is put in the volume as well, with
-# BR2_DL_DIR, because Buildroot's default is `dl/` beside the sources — inside the
-# image, where it is neither writable nor kept between runs.
+# The build directory is a named volume, not a bind mount: the host's filesystem
+# is case-insensitive and Buildroot's output is not. `dl/` goes in the volume too,
+# with BR2_DL_DIR, because the default is beside the sources inside the image.
 #
-# The build runs as the container's unprivileged user, not as root: Buildroot is
-# not supported as root and host-tar's configure refuses to run there at all. The
-# volume's root directory is root-owned when it is created and stays that way, so
-# the container starts as root, hands it over, and drops to the builder with su —
-# one container, because the chown only matters to the process that follows it.
-# Only the finished image crosses back, in a second container running as you, so
-# the file is not owned by uid 1000 on the host. `dd` rather than `cp`: on the
-# bind mount into this machine cp finishes the write and then fails to deallocate
-# the tail of the file it just made ("Invalid argument"), which leaves a copy of
+# The build runs as uid 1000, not as root: host-tar's configure refuses to run as
+# root. The volume is root-owned when it is created, so the container starts as
+# root, hands it over, and drops to the builder. Only the image crosses back, in
+# a second container running as you. `dd` rather than `cp`: on this bind mount cp
+# finishes the write and then fails to deallocate the tail, which leaves a copy of
 # the right length and an exit status that stops the build.
 #
 # `cp2cl-rebuild` between the two makes is what makes a new binary reach the card.
-# The package's site is `local`, and Buildroot rsyncs a local site once, when
-# `.stamp_rsynced` is written — not on every run. So a `make firmware` after
-# `make dist` rebuilt the program would find every stamp in place, skip the
-# package, and produce an image with the previous binary on it. The rebuild
-# target re-runs rsync and the install, and the second make regenerates the
-# rootfs and the image around it. It has to come after the first make: on a
-# volume that has never been built there is no target directory to install into.
+# A `local` site is rsynced once, when `.stamp_rsynced` is written, so a second
+# `make firmware` would find every stamp in place and produce an image with the
+# previous binary on it. The rebuild has to come after the first make: on a fresh
+# volume there is no target directory to install into.
 firmware: dist buildroot-image
 	mkdir -p $(BR_OUT)
 	docker volume create $(BR_VOL) >/dev/null

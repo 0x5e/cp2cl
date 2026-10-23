@@ -485,20 +485,20 @@ configuration out of `/etc/hostapd`, taking the file that names the interface
 |---|---|
 | `S00diag` | writes what the boot had to say to `/var/log`, then samples the radio for two minutes |
 | `S10wifi` | loads `brcmutil` and `brcmfmac`, and waits for `wlan0` |
-| `S20cp2cl-ap` | hostapd on `wlan0` at `192.168.4.1/24`, then dnsmasq for the leases |
+| `S20ap` | hostapd on `wlan0` at `192.168.4.1/24`, then dnsmasq for the leases |
 | `S50cp2cl` | the program, with the environment the README documents |
 | `S50dropbear` | dropbear, for the console the image does not otherwise have |
 
 The dnsmasq package brings a start script of its own, and it is deleted in
 `post-build.sh`: it runs at `S80` from `/etc/dnsmasq.conf`, which sets no
-`dhcp-range`, so it is a second daemon behind the one `S20cp2cl-ap` started with
+`dhcp-range`, so it is a second daemon behind the one `S20ap` started with
 the range the phone is handed. The binary stays, the script goes.
 
 `brcmfmac` is the one module in the image, and it is a module for the ordering,
 not the size: a built-in driver probes before the root is mounted, when
 `/lib/firmware` does not exist yet, and a firmware request that fails at that
 point is not retried — the board comes up with no `wlan0` and nothing said
-anywhere. Loaded from `S10wifi` it runs after the root is there, and `S20cp2cl-ap`
+anywhere. Loaded from `S10wifi` it runs after the root is there, and `S20ap`
 retries hostapd five times because the interface it beacons on belongs to a
 module loaded a second earlier.
 
@@ -520,7 +520,7 @@ is what a card pulled mid-write costs, and that is a replay of milliseconds.
 the command line and the interfaces that exist before anything else runs, then
 samples the radio every five seconds for two minutes — enough to tell "appeared
 late" from "never appeared", which a single snapshot cannot. `S10wifi`,
-`S20cp2cl-ap` and the program write beside it:
+`S20ap` and the program write beside it:
 
 ```bash
 ssh root@192.168.4.1 'tail -50 /var/log/cp2cl.log'
@@ -572,7 +572,7 @@ give it. Both options are written with no value, which is what suppresses them �
 removing the line would restore dnsmasq's default of advertising itself. The DNS
 option is suppressed for a second reason: `--port=0` means nothing answers DNS here.
 
-**A DHCP range on the wrong subnet is silent.** `S20cp2cl-ap` serves
+**A DHCP range on the wrong subnet is silent.** `S20ap` serves
 `192.168.4.2`–`100`, and the line above it is what puts `192.168.4.1/24` on the
 interface. dnsmasq accepts a range that does not sit on that interface's subnet
 and then serves nothing, saying so only on its own output. The two are one line
