@@ -801,12 +801,15 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             return;
         }
         self.frames_seen += 1;
-        let head = &chunk.body[..chunk.body.len().min(8)];
+        // Enough of the message to see where its head ends and its body starts.
+        // Eight bytes was enough to tell a frame from a frame and not enough to
+        // tell a head from the bytes around it.
+        let body = &chunk.body[..chunk.body.len().min(64)];
         tracing::info!(
-            "cl.frame channel={} bytes={} head={:02x?}",
+            "cl.frame channel={} bytes={} body={:02x?}",
             chunk.channel,
             chunk.body.len(),
-            head
+            body
         );
     }
 
