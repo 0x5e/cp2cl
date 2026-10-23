@@ -16,6 +16,7 @@
 
 use std::fs;
 use std::io;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
@@ -31,6 +32,7 @@ use crate::assets;
 use crate::config::Config;
 use crate::web::Status;
 
+use super::aio::{Context as AioContext, IoEvent};
 use super::auth;
 use super::desc;
 use super::session::{self, Frames};
@@ -386,22 +388,149 @@ fn describe_identity(status: &Status, identity: &desc::Identity) {
     });
 }
 
+/// How much one read on the car's endpoint asks for.
+///
+/// A read there becomes one `usb_request` of that size, and the controller ends
+/// the request at the first short packet. A request with no room for a whole
+/// packet loses the rest of it: the packet is acknowledged to the host, the
+/// request takes what fits, and the remainder is dropped. At this size a packet
+/// always fits. Sixteen kilobytes is what adbd asks for on the same kind of
+/// endpoint, on its note that not every controller takes more.
+const READ_SIZE: usize = 16 * 1024;
+
+/// How many reads are kept outstanding — a queue, not a buffer.
+///
+/// A packet is safe only while a request is queued for it. The controller takes
+/// a packet into its receive fifo whether or not one is, and flushes that fifo
+/// when the next request is queued. A queue that never empties is what removes
+/// the window rather than narrowing it. Eight is adbd's depth, for the same
+/// reason.
+const AHEAD: usize = 8;
+
 /// A byte pipe over the two bulk endpoints, the shape `session` wants.
 ///
 /// The descriptors are duplicated rather than reopened: there is one set of them
-/// for the life of the process, and both copies refer to the same endpoint. Reads
-/// and writes are blocking calls, handed to tokio's blocking pool, which is what a
-/// bulk endpoint is — a read waits until the car sends something and a write waits
-/// until it has taken it.
+/// for the life of the process, and both copies refer to the same endpoint.
+/// Writes are blocking calls handed to tokio's blocking pool — a write waits
+/// until the endpoint has taken it. Reads are not: see `read_ahead`.
 fn bulk(from_car: &fs::File, to_car: &fs::File) -> io::Result<Bulk> {
     Ok(Bulk {
-        from_car: tokio::fs::File::from_std(from_car.try_clone()?),
+        from_car: read_ahead(from_car.try_clone()?)?,
         to_car: tokio::fs::File::from_std(to_car.try_clone()?),
     })
 }
 
+/// Reads the endpoint ahead of whoever consumes it, with several requests
+/// queued at once.
+///
+/// This is what an application can do about the lost packet. FunctionFS gives a
+/// read whatever one transfer delivered and no more, so a read that was late
+/// cannot get it back, and reading in a loop with one request at a time only
+/// shortens the gap between reads. Keeping the endpoint's queue full closes it.
+/// `aio` has the rest.
+///
+/// The thread ends when a read comes back with nothing or with an error. A host
+/// that goes quiet without either leaves it waiting: the session has dropped its
+/// end of the channel, but a wait on the endpoint has no way to notice that, and
+/// no deadline either. It holds `AHEAD` buffers until the endpoint is disabled,
+/// which is what a re-enumeration does.
+fn read_ahead(source: fs::File) -> io::Result<Arrivals> {
+    let (tx, pieces) = mpsc::channel(AHEAD);
+    std::thread::Builder::new()
+        .name("carlife-read".into())
+        .spawn(move || {
+            let fd = source.as_raw_fd();
+            if let Err(e) = fill(fd, &tx) {
+                let _ = tx.blocking_send(Err(e));
+            }
+        })?;
+    Ok(Arrivals {
+        pieces,
+        pending: Vec::new(),
+        at: 0,
+    })
+}
+
+/// Keeps `AHEAD` reads outstanding and hands each one over as it finishes.
+fn fill(fd: RawFd, tx: &mpsc::Sender<io::Result<Vec<u8>>>) -> io::Result<()> {
+    let ctx = AioContext::new(AHEAD)?;
+    // One buffer per request. A buffer belongs to the kernel from the moment it
+    // is submitted until its event comes back.
+    let mut buffers: Vec<Vec<u8>> = (0..AHEAD).map(|_| vec![0u8; READ_SIZE]).collect();
+    for (slot, buffer) in buffers.iter_mut().enumerate() {
+        ctx.submit(fd, buffer, slot as u64)?;
+    }
+
+    let mut events = [IoEvent::default(); AHEAD];
+    loop {
+        let done = ctx.wait(&mut events)?;
+        for event in &events[..done] {
+            let slot = event.data as usize;
+            if event.res < 0 {
+                return Err(io::Error::from_raw_os_error(-event.res as i32));
+            }
+            // Nothing at all is the host gone; closing the channel is how the
+            // reader downstream is told.
+            if event.res == 0 {
+                return Ok(());
+            }
+            // The replacement is queued before the bytes are handed over, so
+            // the queue is never short while the consumer is being woken.
+            let mut arrived = std::mem::replace(&mut buffers[slot], vec![0u8; READ_SIZE]);
+            arrived.truncate(event.res as usize);
+            ctx.submit(fd, &mut buffers[slot], slot as u64)?;
+            if tx.blocking_send(Ok(arrived)).is_err() {
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// What the reading thread has handed over and nobody has taken yet.
+struct Arrivals {
+    pieces: mpsc::Receiver<io::Result<Vec<u8>>>,
+    /// The piece being consumed, and how much of it has been.
+    pending: Vec<u8>,
+    at: usize,
+}
+
+impl AsyncRead for Arrivals {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let me = self.get_mut();
+        let room = buf.remaining();
+        if room == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        // A caller reading a header asks for eight bytes, and the piece in hand
+        // is a whole packet: the rest of it stays here for the read after.
+        if me.at < me.pending.len() {
+            let taken = room.min(me.pending.len() - me.at);
+            buf.put_slice(&me.pending[me.at..me.at + taken]);
+            me.at += taken;
+            return Poll::Ready(Ok(()));
+        }
+        match me.pieces.poll_recv(cx) {
+            Poll::Ready(Some(Ok(piece))) => {
+                let taken = room.min(piece.len());
+                buf.put_slice(&piece[..taken]);
+                me.pending = piece;
+                me.at = taken;
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Err(e)),
+            // Nothing filled and nothing left: the end of the stream.
+            Poll::Ready(None) => Poll::Ready(Ok(())),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
 struct Bulk {
-    from_car: tokio::fs::File,
+    from_car: Arrivals,
     to_car: tokio::fs::File,
 }
 
@@ -430,5 +559,60 @@ impl AsyncWrite for Bulk {
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().to_car).poll_shutdown(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::carlife::frame;
+
+    /// A reader holding a queue that can be filled the way the reading thread
+    /// fills it.
+    fn fed(pieces: Vec<Vec<u8>>) -> Arrivals {
+        let (tx, pieces_rx) = mpsc::channel(pieces.len().max(1));
+        for piece in pieces {
+            tx.try_send(Ok(piece)).expect("room for it");
+        }
+        drop(tx);
+        Arrivals {
+            pieces: pieces_rx,
+            pending: Vec::new(),
+            at: 0,
+        }
+    }
+
+    fn message() -> Vec<u8> {
+        frame::encode(frame::CMD, 0x0001_8001, 0, &[0x08, 0x03, 0x10, 0x00])
+    }
+
+    #[tokio::test]
+    async fn a_body_in_its_own_read_is_joined_to_its_header() {
+        // A head unit writes the eight-byte outer header and then the message
+        // as two transfers, so two reads. Where one read ends must not matter.
+        let message = message();
+        let mut reader = fed(vec![
+            frame::outer_head(frame::CMD, message.len()).to_vec(),
+            message.clone(),
+        ]);
+
+        let chunk = frame::read_chunk(&mut reader).await.unwrap().expect("a chunk");
+        assert_eq!(chunk.channel, frame::CMD);
+        assert_eq!(chunk.body, message);
+    }
+
+    #[tokio::test]
+    async fn a_header_is_taken_out_of_a_read_that_carries_more() {
+        // The other half: whatever a read brought in and the caller did not
+        // want stays for the read after it, rather than being dropped.
+        let message = message();
+        let mut both = frame::outer_head(frame::CMD, message.len()).to_vec();
+        both.extend_from_slice(&message);
+        let mut reader = fed(vec![both]);
+
+        let chunk = frame::read_chunk(&mut reader).await.unwrap().expect("a chunk");
+        assert_eq!(chunk.channel, frame::CMD);
+        assert_eq!(chunk.body, message);
     }
 }

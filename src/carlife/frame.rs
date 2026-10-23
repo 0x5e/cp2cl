@@ -46,15 +46,6 @@ pub const TOUCH: u32 = 6;
 /// The outer header, the same for every channel.
 pub const OUTER_HEAD: usize = 8;
 
-/// The size of one read, and of the buffer it fills.
-///
-/// A read on a FunctionFS bulk endpoint becomes one `usb_request` of that size.
-/// The controller fills a request with whole packets and drops the rest when it
-/// acknowledges the packet. So an eight-byte read for an outer header loses the
-/// body that arrived in the same packet. At this size a read always covers a
-/// whole packet, and the host decides where the stream is cut.
-pub const READ_CHUNK: usize = 16 * 1024;
-
 /// The largest CarLife message that may follow it. The reference uses 640 KB,
 /// which is the video body's 600 KB plus its header and room to spare.
 pub const MAX_MESSAGE: u32 = 640 * 1024;
@@ -239,12 +230,6 @@ async fn fill<R: AsyncRead + Unpin>(reader: &mut R, buf: &mut [u8]) -> io::Resul
 mod tests {
     use super::*;
 
-    use std::collections::VecDeque;
-    use std::pin::Pin;
-    use std::task::{Context, Poll};
-
-    use tokio::io::{BufReader, ReadBuf};
-
     #[test]
     fn the_command_channel_has_an_eight_byte_header_and_a_sixteen_bit_length() {
         let message = encode(CMD, 0x0001_0002, 0, &[0x08, 0x01]);
@@ -361,61 +346,5 @@ mod tests {
         let (car, mut device) = tokio::io::duplex(64);
         drop(car);
         assert!(read_chunk(&mut device).await.unwrap().is_none());
-    }
-
-    /// A reader that behaves like the controller: it delivers as much of a
-    /// packet as the request has room for, and drops the rest.
-    struct Packets {
-        queue: VecDeque<Vec<u8>>,
-        asked: Vec<usize>,
-    }
-
-    impl AsyncRead for Packets {
-        fn poll_read(
-            mut self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-            buf: &mut ReadBuf<'_>,
-        ) -> Poll<io::Result<()>> {
-            let room = buf.remaining();
-            self.asked.push(room);
-            let Some(packet) = self.queue.pop_front() else {
-                return Poll::Ready(Ok(()));
-            };
-            let taken = room.min(packet.len());
-            buf.put_slice(&packet[..taken]);
-            Poll::Ready(Ok(()))
-        }
-    }
-
-    #[tokio::test]
-    async fn a_frame_survives_a_controller_that_drops_what_does_not_fit() {
-        // Header and body in one packet, as a host that buffers both writes
-        // sends them. Read eight bytes at a time, the controller delivers the
-        // header and drops the body with the packet. The bytes that follow then
-        // decode as the next frame's header, and everything after is eight
-        // bytes out of step.
-        let message = encode(CMD, 0x0001_8001, 0, &[0x08, 0x03, 0x10, 0x00]);
-        let mut packet = outer_head(CMD, message.len()).to_vec();
-        packet.extend_from_slice(&message);
-
-        let mut device = BufReader::with_capacity(
-            READ_CHUNK,
-            Packets {
-                queue: VecDeque::from([packet]),
-                asked: Vec::new(),
-            },
-        );
-
-        let chunk = read_chunk(&mut device).await.unwrap().expect("a chunk");
-        assert_eq!(chunk.channel, CMD);
-        assert_eq!(chunk.body, message);
-
-        // No read was smaller than a packet, so there was never a remainder to
-        // drop.
-        let asked = &device.get_ref().asked;
-        assert!(
-            asked.iter().all(|&room| room >= 512),
-            "every read asks for at least a packet: {asked:?}"
-        );
     }
 }

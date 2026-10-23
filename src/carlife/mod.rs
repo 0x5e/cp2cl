@@ -12,7 +12,7 @@
 //!
 //! `auth`, `desc`, `frame`, `gps`, `proto` and `session` are plain code with no
 //! USB in them, which is what lets them be tested against an in-memory pipe.
-//! `usb` and `gadget` are the two that need the board.
+//! `usb`, `gadget` and `aio` are the ones that need the board.
 
 pub mod auth;
 pub mod desc;
@@ -21,6 +21,7 @@ pub mod gps;
 pub mod proto;
 pub mod session;
 
+mod aio;
 pub mod gadget;
 pub mod usb;
 
