@@ -1,0 +1,22 @@
+# The root is a writable ext4. It was a read-only squashfs, which made the board
+# a thing that could not be changed: a binary could not be replaced, a key could
+# not be added, and the program had nowhere to write the identity it presents to
+# the phone. The journal is what a card pulled mid-write costs — a replay of a
+# few milliseconds on the next boot — and it is worth it.
+#
+# `noauto` on the root because the kernel has already mounted it from the command
+# line; this line is here for the options, not the mount.
+#
+# The kernel filesystems below are not optional, and leaving them out is silent:
+# no /sys means no /sys/class/net, so a driver that bound perfectly well looks
+# like a driver that never loaded; no configfs means no USB device to present to
+# the head unit; no devpts means dropbear takes the connection and cannot give it
+# a terminal.
+/dev/root	/		ext4		rw,noatime,noauto,errors=remount-ro	0 1
+proc		/proc		proc		defaults		0 0
+sysfs		/sys		sysfs		defaults		0 0
+configfs	/sys/kernel/config	configfs	defaults	0 0
+devpts		/dev/pts	devpts		gid=5,mode=620		0 0
+tmpfs		/dev/shm	tmpfs		mode=1777		0 0
+tmpfs		/tmp		tmpfs		mode=1777		0 0
+tmpfs		/run		tmpfs		mode=0755		0 0

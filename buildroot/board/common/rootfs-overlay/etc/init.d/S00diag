@@ -1,0 +1,52 @@
+#!/bin/sh
+#
+# Everything the boot can say about itself, written to the disk it booted from.
+#
+# The board has no console and no display, and a run that goes wrong is
+# diagnosed afterwards: over ssh if the network came up, off the card if it did
+# not. The ring buffer is the whole of the kernel's boot, including the part
+# before there was a filesystem to write to.
+
+LOG=/var/log
+
+boots=$(cat "$LOG/boots" 2>/dev/null || echo 0)
+boots=$((boots + 1))
+echo "$boots" > "$LOG/boots"
+
+{
+	echo "=== boot $boots at uptime $(cut -d' ' -f1 /proc/uptime)"
+	echo "cmdline: $(cat /proc/cmdline)"
+	echo "model:   $(tr -d '\0' < /proc/device-tree/model 2>/dev/null)"
+	echo "kernel:  $(uname -r)"
+	echo "mounts:  $(awk '{print $2"="$3}' /proc/mounts | tr '\n' ' ')"
+	echo "net:     $(ls /sys/class/net | tr '\n' ' ')"
+	# A missing /sys is not a missing radio, and the two look identical from
+	# every other line in this directory: /sys/class/net is where a network
+	# interface is, so without the mount there is nothing to see however well
+	# the driver worked. Say so rather than leaving it to be inferred.
+	[ -d /sys/class/net ] || echo "WARNING: /sys is not mounted — nothing below can see an interface"
+} >> "$LOG/boot.log"
+
+# The whole ring buffer, which quiet does not touch: quiet decides what is
+# printed to a console, and there is no console — the buffer keeps everything.
+dmesg > "$LOG/dmesg.log" 2>/dev/null
+
+# What the radio is doing, once every five seconds for two minutes. Enough to
+# see wlan0 appear late, or never; short enough that a boot which hangs still
+# leaves the samples before the hang on the card.
+(
+	i=0
+	while [ "$i" -lt 24 ]; do
+		i=$((i + 1))
+		{
+			echo "--- t=$(cut -d' ' -f1 /proc/uptime)" \
+				"net=[$(ls /sys/class/net | tr '\n' ' ')]" \
+				"sdio=[$(ls /sys/bus/sdio/devices 2>/dev/null | tr '\n' ' ')]" \
+				"wlan0=$(cat /sys/class/net/wlan0/address 2>/dev/null)"
+			dmesg | grep -i brcmf | tail -n 3
+		} >> "$LOG/state.log"
+		sleep 5
+	done
+) &
+
+exit 0

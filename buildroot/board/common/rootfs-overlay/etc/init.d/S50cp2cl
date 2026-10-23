@@ -1,0 +1,41 @@
+#!/bin/sh
+#
+# cp2cl, last: it reads the access point's network out of /etc/hostapd, and for
+# wireless it needs BlueZ registered.
+#
+# The program has no settings file; everything it takes from outside comes from
+# the environment. This script is the settings file.
+case "$1" in
+	start)
+		printf 'Starting cp2cl: '
+
+		# Where the program keeps the accessory identity it presents to
+		# the phone and the controllers it has paired with. It creates
+		# the directory under $XDG_DATA_HOME on first run; with that
+		# unset it goes to $HOME/.local/share/cp2cl, and this board's
+		# HOME is /.
+		#
+		# /var/lib rather than /run: the identity has to outlive the boot,
+		# or the phone meets a new accessory every time the ignition turns.
+		XDG_DATA_HOME=/var/lib \
+		CP2CL_WIRELESS=1 \
+		CP2CL_LOG_LEVEL=info \
+		CP2CL_WIFI_IFACE=wlan0 \
+		CP2CL_BT_ADAPTER=hci0 \
+			setsid /usr/bin/cp2cl >>/var/log/cp2cl.log 2>&1 &
+		echo $! > /run/cp2cl.pid
+		echo "ok"
+		;;
+	stop)
+		start-stop-daemon -K -q -p /run/cp2cl.pid
+		;;
+	restart|reload)
+		"$0" stop
+		sleep 1
+		"$0" start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+		;;
+esac

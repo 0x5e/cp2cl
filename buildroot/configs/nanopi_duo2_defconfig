@@ -1,0 +1,120 @@
+# NanoPi Duo2 — Allwinner H3, 512 MB, AP6212 (2.4 GHz 1x1 + BCM43430 Bluetooth).
+#
+# Mainline U-Boot and mainline Linux, not the vendor's 4.14 BSP: Buildroot 2026.02
+# offers GCC 13, 14 and 15, and a 4.14 kernel compiles with none of them. Mainline
+# has the board's device tree and a U-Boot defconfig that names it.
+#
+# The target is a writable ext4 with no udev. It was a read-only squashfs, on the
+# argument that a card which loses power with the ignition should have nothing to
+# fsck — but the price was a root nothing could be changed on. Debugging is worth
+# more than the journal replay costs.
+
+BR2_arm=y
+BR2_cortex_a7=y
+BR2_ARM_FPU_VFPV4=y
+BR2_TOOLCHAIN_BUILDROOT_MUSL=y
+# Pinned rather than "same as the kernel": with a custom kernel version the
+# headers version is not known early enough for the feature symbols that
+# packages depend on, and bluez5-utils silently disappears from the menu.
+BR2_KERNEL_HEADERS_6_18=y
+
+BR2_TARGET_GENERIC_HOSTNAME="nanopi-duo2"
+BR2_TARGET_GENERIC_ISSUE="cp2cl"
+BR2_TARGET_GENERIC_GETTY_PORT=""
+BR2_SYSTEM_DHCP=""
+# A way in while the image is still being brought up. The board is on the access
+# point it serves and nothing here is reachable from anywhere else; change this
+# before the board goes into a car and stays there.
+BR2_TARGET_GENERIC_ROOT_PASSWD="cp2cl"
+
+BR2_INIT_BUSYBOX=y
+BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_DEVTMPFS=y
+BR2_TARGET_ROOTFS_EXT2=y
+BR2_TARGET_ROOTFS_EXT2_4=y
+# 64 MB for a tree that is 20: the rest is room for a binary to replace, a key to
+# add, and a log that grows.
+BR2_TARGET_ROOTFS_EXT2_SIZE="64M"
+# ext4 keeps 5% back for root by default, which is 3 MB of a 64 MB partition on a
+# filesystem where root is the only user.
+BR2_TARGET_ROOTFS_EXT2_RESBLKS=1
+BR2_TARGET_ROOTFS_EXT2_LABEL="rootfs"
+
+# `sunxi` rather than `sunxi_defconfig`: Buildroot appends the suffix itself.
+#
+# 6.18 is the current longterm, not Buildroot's own default (6.19, a plain stable
+# that is replaced every few months). A car that has to be right in three years
+# wants the branch that still gets fixes then.
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.18.58"
+BR2_LINUX_KERNEL_DEFCONFIG="sunxi"
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_CP2CL_PATH)/board/common/kernel.fragment $(BR2_EXTERNAL_CP2CL_PATH)/board/nanopi-duo2/kernel.fragment"
+BR2_LINUX_KERNEL_DTS_SUPPORT=y
+# The vendor directory in the path: 6.18 keeps the Allwinner device trees under
+# arch/arm/boot/dts/allwinner/, and the name Buildroot installs keeps only the
+# basename, so boot.cmd still loads sun8i-h3-nanopi-duo2.dtb.
+BR2_LINUX_KERNEL_INTREE_DTS_NAME="allwinner/sun8i-h3-nanopi-duo2"
+BR2_LINUX_KERNEL_ZIMAGE=y
+BR2_LINUX_KERNEL_LZ4=y
+# Not installed into /boot: the kernel and the device tree are on the boot
+# partition, where boot.cmd loads them from, and a second copy in the rootfs is
+# 6.4 MB of a 24 MB partition that nothing reads. The option defaults to on, so
+# this is the "not set" form rather than a missing line.
+# BR2_LINUX_KERNEL_INSTALL_TARGET is not set
+
+# U-Boot's own `nanopi_duo2_defconfig`, which already has CONFIG_USB_MUSB_GADGET
+# and the DRAM clock this board's memory needs.
+BR2_TARGET_UBOOT=y
+BR2_TARGET_UBOOT_BUILD_SYSTEM_KCONFIG=y
+BR2_TARGET_UBOOT_LATEST_VERSION=y
+BR2_TARGET_UBOOT_BOARD_DEFCONFIG="nanopi_duo2"
+BR2_TARGET_UBOOT_NEEDS_DTC=y
+BR2_TARGET_UBOOT_NEEDS_PYTHON3=y
+BR2_TARGET_UBOOT_NEEDS_PYLIBFDT=y
+# U-Boot's own tools include openssl/evp.h unconditionally in 2026.01, so the
+# build needs host-openssl even though nothing here signs a FIT image.
+BR2_TARGET_UBOOT_NEEDS_OPENSSL=y
+BR2_TARGET_UBOOT_FORMAT_CUSTOM=y
+BR2_TARGET_UBOOT_FORMAT_CUSTOM_NAME="u-boot-sunxi-with-spl.bin"
+
+# The boot script is mkimage's job, not U-Boot's: Buildroot moved it to
+# host-uboot-tools, and the old BR2_TARGET_UBOOT_BOOT_SCRIPT symbol survives only
+# as a legacy stub that stops the build outright.
+BR2_PACKAGE_HOST_UBOOT_TOOLS=y
+BR2_PACKAGE_HOST_UBOOT_TOOLS_BOOT_SCRIPT=y
+BR2_PACKAGE_HOST_UBOOT_TOOLS_BOOT_SCRIPT_SOURCE="$(BR2_EXTERNAL_CP2CL_PATH)/board/nanopi-duo2/boot.cmd"
+
+BR2_PACKAGE_BUSYBOX=y
+BR2_PACKAGE_DBUS=y
+BR2_PACKAGE_BLUEZ5_UTILS=y
+BR2_PACKAGE_BLUEZ5_UTILS_CLIENT=y
+BR2_PACKAGE_HOSTAPD=y
+BR2_PACKAGE_HOSTAPD_DRIVER_NL80211=y
+BR2_PACKAGE_DNSMASQ=y
+BR2_PACKAGE_IW=y
+# The regulatory database. Without it cfg80211 stays in the world domain and the
+# `country_code` hostapd asks for is a request nothing can answer; it is 8 KB and
+# it is what makes channel 11 legal rather than merely tolerated.
+BR2_PACKAGE_WIRELESS_REGDB=y
+# No kmod. The one module this image has is brcmfmac, loaded by name and path
+# from /etc/init.d/S10wifi, so busybox's insmod is enough and there is no depmod
+# to run: the two modules are listed in the order they have to be loaded.
+
+# dropbear rather than openssh: openssh is 7 MB of binaries and 4.7 MB of
+# libcrypto and libssl, and it is the only thing here that selects OpenSSL at
+# all. sftp does not come along, and nothing here uses it.
+#
+# The client stays: dropbear's scp is always built but shells out to dbclient for
+# the connection, so turning the client off would leave a broken scp.
+BR2_PACKAGE_DROPBEAR=y
+BR2_PACKAGE_DROPBEAR_CLIENT=y
+# The board is the access point and there is no resolver behind it. A reverse
+# lookup on connect would stall until it timed out, on every connection.
+BR2_PACKAGE_DROPBEAR_DISABLE_REVERSEDNS=y
+BR2_PACKAGE_DROPBEAR_SMALL=y
+BR2_PACKAGE_CP2CL=y
+BR2_PACKAGE_HOST_GENIMAGE=y
+
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_CP2CL_PATH)/board/common/rootfs-overlay $(BR2_EXTERNAL_CP2CL_PATH)/board/nanopi-duo2/rootfs-overlay"
+BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_CP2CL_PATH)/board/nanopi-duo2/post-build.sh"
+BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_CP2CL_PATH)/board/nanopi-duo2/post-image.sh"

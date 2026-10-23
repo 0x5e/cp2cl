@@ -1,0 +1,70 @@
+# What every board in this tree needs, and nothing else.
+#
+# A defconfig is a distribution's idea of a kernel: HDMI, sound, USB host,
+# storage, netfilter, every filesystem. What this program uses is a USB device
+# controller, a radio, and the filesystem its root lives on. The rest is boot
+# time and image size, so it is off — and it is off with the `is not set` form,
+# because a fragment that says `CONFIG_X=n` is a line olddefconfig drops.
+
+CONFIG_MODULES=y
+
+# The gadget: configfs composes it, FunctionFS carries it, musb is the
+# controller the board exposes on its OTG port.
+CONFIG_CONFIGFS_FS=y
+CONFIG_USB_GADGET=y
+CONFIG_USB_LIBCOMPOSITE=y
+CONFIG_USB_CONFIGFS=y
+CONFIG_USB_CONFIGFS_F_FS=y
+CONFIG_USB_MUSB_HDRC=y
+CONFIG_NOP_USB_XCEIV=y
+
+CONFIG_MMC=y
+
+# Wi-Fi and Bluetooth. Both chips sit on a bus the device tree describes, so
+# these bind at probe; the Bluetooth firmware is downloaded by btbcm rather than
+# by a patcher script. The Wi-Fi driver is the one thing loaded from userspace
+# (see the board fragment: its firmware has to exist before it probes).
+#
+# The first two are menuconfigs, and sunxi_defconfig — like most minimal vendor
+# defconfigs — turns both off. With them off nothing underneath exists, and the
+# lines below are not overridden but dropped: olddefconfig removes CFG80211,
+# MAC80211 and BRCMFMAC without a word, the build succeeds, and the board comes
+# up with no radio at all.
+CONFIG_WIRELESS=y
+CONFIG_WLAN=y
+CONFIG_CFG80211=y
+CONFIG_MAC80211=y
+CONFIG_RFKILL=y
+CONFIG_BT=y
+CONFIG_BT_BREDR=y
+CONFIG_BT_RFCOMM=y
+CONFIG_BT_HCIUART=y
+CONFIG_BT_HCIUART_BCM=y
+CONFIG_SERIAL_DEV_BUS=y
+
+CONFIG_EXT4_FS=y
+CONFIG_TMPFS=y
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+CONFIG_PROC_FS=y
+CONFIG_SYSFS=y
+CONFIG_INET=y
+# AirPlay is an IPv6 protocol: the receiver's listener is an AF_INET6 socket, and
+# with IPv6 out of the kernel that bind fails with EAFNOSUPPORT and the program
+# exits before it ever serves a page. sunxi_defconfig turns it off.
+CONFIG_IPV6=y
+
+# FAT, for the boot partition and for a USB stick: the one way to carry a file
+# off a board whose network did not come up. sunxi_defconfig carries FAT_FS but
+# not VFAT_FS, and the two are not the same thing.
+CONFIG_VFAT_FS=y
+CONFIG_NLS_CODEPAGE_437=y
+CONFIG_NLS_ISO8859_1=y
+CONFIG_NLS_UTF8=y
+
+# CONFIG_DRM is not set
+# CONFIG_FB is not set
+# CONFIG_SOUND is not set
+# CONFIG_USB_STORAGE is not set
+# CONFIG_DEBUG_INFO is not set
+# CONFIG_MODULE_SIG is not set

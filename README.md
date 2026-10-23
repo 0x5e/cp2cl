@@ -74,9 +74,9 @@ Then plug the phone in and unlock it. You should see:
 
 ### Cross-compiling for the board
 
-The board is a **NanoPi Duo2** — armv7 hard-float, Ubuntu 24.04, glibc 2.39. It
-cannot build this crate itself, so the build runs in the container defined by
-`docker/`. Build the image once:
+The board is a **NanoPi Duo2** — armv7 hard-float. It cannot build this crate
+itself, so the build runs in the container defined by `docker/`. Build the image
+once:
 
 ```bash
 make image
@@ -94,10 +94,11 @@ products come out owned by you rather than by root: **this crate only builds for
 Linux**, and the container is the shortest way to a Linux compiler from here.
 
 **The binary is statically linked, and that is the point.** The target is musl
-rather than the board's glibc, and `.cargo/config.toml` asks for `+crt-static` on
-it, so the C library is part of the file: it runs on any armv7 Linux, whichever C
-library that system uses, without a `libc6` of its own. What a binary cannot carry
-is the architecture, named under [Hardware requirements](#hardware-requirements),
+rather than the system's C library, and `.cargo/config.toml` asks for
+`+crt-static` on it, so the C library is part of the file: it runs on any armv7
+Linux, whichever C library that system uses, without a `libc6` of its own. What a
+binary cannot carry is the architecture, named under
+[Hardware requirements](#hardware-requirements),
 and the kernel's USB gadget support — configfs, FunctionFS and a device controller
 — named under [The accessory interface](#the-accessory-interface). The one visible
 cost is name resolution — musl reads
@@ -444,69 +445,121 @@ its access point alone. See [Setting the board up](#setting-the-board-up).
 
 ### Setting the board up
 
-`board/` is the firmware half, and the only thing in it is the access point: the
-board's radio, up at boot, which is what there is to log into. What is here is laid
-out as the filesystem it lands on — `board/etc/hostapd/hostapd.conf` is
-`/etc/hostapd/hostapd.conf`, and `board/etc/systemd/system/cp2cl-ap.service` is
-`/etc/systemd/system/cp2cl-ap.service`. Installing it is one command, run on the
-board as root, from the checkout:
+The board runs an image this repository builds, not a distribution with things
+installed onto it. One command, from the checkout:
 
 ```bash
-board/install.sh
+make firmware
+# buildroot/output/sdcard.img
 ```
 
-**The units.**
+Write that to a card and put the card in the board. Everything the board runs is
+in it: the access point, the program, and the init scripts that start them in the
+order they have to happen. It comes out at 73 MB — an 8 MB boot partition with a
+6.8 MB kernel, and a 64 MB ext4 root of which 17 MB is used. The size that
+matters is the root's: it is a filesystem to be worked in, and the 36 MB left
+over is what a binary, a key or a log has to fit in. The build runs in a container —
+there is no Linux machine here and Buildroot does not run on macOS — and the
+first one takes a while, since it compiles a toolchain and a kernel.
 
-| Unit | What it is |
+**`buildroot/` is an external tree, not Buildroot.** Buildroot itself is not in
+this repository: the build image clones a pinned release into `/opt/buildroot`, and
+what is here is the boards, the kernel fragments, and the one package, which is
+this crate. What is specific to a board lives under `buildroot/board/<board>/`,
+laid out as the filesystem it lands on — the Duo2's access point configuration is
+`buildroot/board/nanopi-duo2/rootfs-overlay/etc/hostapd/hostapd.conf`, which is
+`/etc/hostapd/hostapd.conf` on the board.
+
+What the program needs from the machine under it — kernel symbols, firmware,
+mounts, paths, ports — is `buildroot/README.md`, as a list of values. It is what
+a rootfs other than this one has to satisfy.
+
+`hostapd.conf` is the one file the operator tunes: the interface, the SSID and
+the passphrase are this board's. Changing it is also how the network the phone is
+told to join is changed, and where on it we are — wireless CarPlay reads its own
+configuration out of `/etc/hostapd`, taking the file that names the interface
+`CP2CL_WIFI_IFACE` defaults to, so the two cannot drift apart. See
+[Wireless CarPlay](#wireless-carplay).
+
+**The boot is five scripts and no service manager.**
+
+| Script | What it is |
 |---|---|
-| `cp2cl-ap.service` | hostapd on `wlan0`, and the address that interface carries: `192.168.4.1/24` |
-| `cp2cl-ap-dhcp.service` | dnsmasq for the access point: leases in `192.168.4.2`–`100`, the lowest free address first, and no router or DNS server advertised |
+| `S00diag` | writes what the boot had to say to `/var/log`, then samples the radio for two minutes |
+| `S10wifi` | loads `brcmutil` and `brcmfmac`, and waits for `wlan0` |
+| `S20ap` | hostapd on `wlan0` at `192.168.4.1/24`, then dnsmasq for the leases |
+| `S50cp2cl` | the program, with the environment the README documents |
+| `S50dropbear` | dropbear, for the console the image does not otherwise have |
 
-`hostapd.conf` is the one file the operator tunes — the interface, the SSID and
-the passphrase are this board's — and `install.sh` writes it only when it is not
-there yet, so a second run does not undo an edit. Changing it is also how the
-network the phone is told to join is changed, and where on it we are: wireless
-CarPlay reads its own configuration out of `/etc/hostapd`, taking the file that
-names the interface `CP2CL_WIFI_IFACE` defaults to, so the two cannot drift apart
-— see [Wireless CarPlay](#wireless-carplay). Everything else in `board/` is ours
-and is replaced on every run. There are no unit files for the program here: it is
-started by hand, and its settings are the environment it is started with — see
-[Running it on the board](#running-it-on-the-board).
+The dnsmasq package brings a start script of its own, and it is deleted in
+`post-build.sh`: it runs at `S80` from `/etc/dnsmasq.conf`, which sets no
+`dhcp-range`, so it is a second daemon behind the one `S20ap` started with
+the range the phone is handed. The binary stays, the script goes.
+
+`brcmfmac` is the one module in the image, and it is a module for the ordering,
+not the size: a built-in driver probes before the root is mounted, when
+`/lib/firmware` does not exist yet, and a firmware request that fails at that
+point is not retried — the board comes up with no `wlan0` and nothing said
+anywhere. Loaded from `S10wifi` it runs after the root is there, and `S20ap`
+retries hostapd five times because the interface it beacons on belongs to a
+module loaded a second earlier.
+
+There is no third script for the Bluetooth firmware, and that is the point of
+running mainline: the device tree puts the chip on UART2 as a serdev child, so
+the kernel's own `btbcm` downloads the patchram and BlueZ finds `hci0` when it
+appears. The vendor's 4.14 image had to push it from userspace, as a systemd
+oneshot that `multi-user.target` waited on — which was 34 of that image's 45
+seconds of boot.
+
+**The root is a writable ext4, and that is the point of it.** It was a read-only
+squashfs, on the argument that a card which loses power with the ignition should
+have nothing to fsck — and the argument cost more than it saved: a binary could
+not be replaced, a key could not be added, a setting could not be edited, and the
+program had nowhere to write the identity it presents to the phone. The journal
+is what a card pulled mid-write costs, and that is a replay of milliseconds.
+
+**The log is `/var/log`, on the disk.** `S00diag` writes the kernel ring buffer,
+the command line and the interfaces that exist before anything else runs, then
+samples the radio every five seconds for two minutes — enough to tell "appeared
+late" from "never appeared", which a single snapshot cannot. `S10wifi`,
+`S20ap` and the program write beside it:
+
+```bash
+ssh root@192.168.4.1 'tail -50 /var/log/cp2cl.log'
+ssh root@192.168.4.1 'cat /var/log/wifi.log /var/log/ap.log /var/log/hostapd.log'
+ssh root@192.168.4.1 'cat /var/log/boot.log; grep -i brcmf /var/log/dmesg.log'
+```
+
+When the network did not come up at all, pull the card and read the same files
+from the root partition — it is ext4, so that takes a Linux machine, or a reader
+on anything with `ext4fuse`. That is the one thing the read-only image's FAT log
+partition did better, and it was not worth a root nothing could be changed on.
+
+The program's own copy is `/var/log/cp2cl.log`, and it is the same lines the
+status page shows.
+
 
 **The board is reached on its access point.** `192.168.4.1`, and nothing else: the
-program has no port of its own to log into, and everything it has to say goes to
-the terminal it was started from. Nothing about the board needs the USB port: it
-composes the device itself, so a board with nothing running on the port at all
-still boots, brings up its access point, and can be logged into.
-
-**What is not here.** The gadget, the FunctionFS mount, the bind, the DHCP server
-for the link that gadget carried and the socket that opened its control endpoint
-were all here at one point; none of them are now, because the program does all of
-it. This script installs what is in this tree and takes nothing down, so a board
-that still has a unit from that arrangement enabled is the operator's to clear.
-
-**A reboot is what puts the board into the new arrangement**, and the controller is
-why. A controller takes one gadget; a gadget from the old arrangement is still bound
-to it until the board restarts; and the program cannot put its own on until then. It
-says so if it is started anyway — `musb-hdrc.4.auto is already held by g1: a gadget
-from an earlier arrangement is the usual reason, and a reboot clears it`.
-
-**Upgrading a board that is already running** is `board/install.sh` and a reboot;
-the script's last lines say the same. One thing changes for whoever is logged in:
-where they are logged in from. The old arrangement put the board at `172.16.0.1` on
-the cable, and that interface is what goes away, so the access point — or a serial
-console — is the way back onto it.
-
-After the reboot, the board's own half is two units and one address:
+program has no port of its own to log into. Join `nanopi-duo2` and log in:
 
 ```bash
-systemctl status cp2cl-ap.service cp2cl-ap-dhcp.service
-ip -brief addr show wlan0               # 192.168.4.1/24
+ssh root@192.168.4.1        # password: cp2cl
 ```
 
-The program is not one of them: it is started by hand, on the port, and it is the
-one that puts something on the USB port — see [Running it on the
-board](#running-it-on-the-board).
+That password is `BR2_TARGET_GENERIC_ROOT_PASSWD` in the board's defconfig, and it
+is the one line to change before a board leaves the bench. There is no serial
+console — the image starts no getty — so dropbear is the way in. Its host key is
+baked into the image rather than generated at first boot, so the fingerprint a
+client has already accepted survives a reflash. `ssh-copy-id root@192.168.4.1`
+works now that the root is writable, and the key stays.
+
+`scp` works; `sftp` does not, because dropbear does not carry an sftp server. That
+is the whole of what dropbear costs: openssh is 7 MB of binaries and pulls in
+4.7 MB of libcrypto and libssl that nothing else here uses.
+
+Nothing about the board needs the USB port: it composes the device itself, so a
+board with nothing running on the port at all still boots, brings up its access
+point, and can be logged into.
 
 **If the port stays empty, the reason is on the program's own output.** It says
 what it could not do: no configfs, a controller already held, a mount that did not
@@ -521,21 +574,23 @@ give it. Both options are written with no value, which is what suppresses them �
 removing the line would restore dnsmasq's default of advertising itself. The DNS
 option is suppressed for a second reason: `--port=0` means nothing answers DNS here.
 
-**A DHCP range on the wrong subnet is silent.** `cp2cl-ap-dhcp.service` serves
-`192.168.4.2`–`100`; the address on the interface comes from the `ExecStartPre` of
-`cp2cl-ap.service`. dnsmasq accepts a range that does not sit on that interface's
-subnet and then serves nothing, saying so only in the journal. The two are one line
-apart in different files, so change them together.
+**A DHCP range on the wrong subnet is silent.** `S20ap` serves
+`192.168.4.2`–`100`, and the line above it is what puts `192.168.4.1/24` on the
+interface. dnsmasq accepts a range that does not sit on that interface's subnet
+and then serves nothing, saying so only on its own output. The two are one line
+apart, so change them together.
 
 **On a board that is not the Duo2.** `hostapd.conf` names this board's interface,
-SSID and passphrase; nothing else here is board-specific. The interface it names
-is the one wireless CarPlay looks for, so `CP2CL_WIFI_IFACE` has to name it too
-when it is not `wlan0`. The controller is the first one
-under `/sys/class/udc`, so `musb-hdrc.4.auto` is not assumed, and neither is `usb0`
-or any other interface name. What is assumed is the kernel, named under [The
-accessory interface](#the-accessory-interface), and hostapd and dnsmasq for the
-access point. The one step that belongs to the vendor image rather than to us —
-unloading the `g_mass_storage` that image loads onto this port, which would hold
+SSID and passphrase; nothing else here is board-specific. A second board is a
+`buildroot/configs/<board>_defconfig` and a `buildroot/board/<board>/` directory,
+and `make firmware BOARD=<board>` builds it. The interface the file names is the
+one wireless CarPlay looks for, so `CP2CL_WIFI_IFACE` has to name it too when it
+is not `wlan0`. The controller is the first one under `/sys/class/udc`, so
+`musb-hdrc.4.auto` is not assumed, and neither is `usb0` or any other interface
+name. What is assumed is the kernel, named under
+[The accessory interface](#the-accessory-interface), and hostapd and dnsmasq for
+the access point. The one step that belongs to the vendor image rather than to us
+— unloading the `g_mass_storage` that image loads onto this port, which would hold
 the controller — is done by the program, and is a no-op where it is not loaded.
 
 ### Running it on the board
@@ -869,7 +924,7 @@ this a derivative work, so cp2cl inherits that.
 | `assets/web/vendor/weui.min.css` | its stylesheet, vendored so the page needs no network |
 | `Makefile` | the two commands there are: build for the board, and the tests, both in the container |
 | `docker/` | the image that cross-compiles for the board, and the CMake toolchain it needs |
-| `board/` | the firmware half: the access point and its unit, laid out as the filesystem they land on |
+| `buildroot/` | the external tree the image is built from: one package, one board, the kernel fragments and the init scripts |
 
 ## Expected behaviour, not bugs
 

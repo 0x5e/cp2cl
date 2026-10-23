@@ -1,0 +1,7 @@
+config BR2_PACKAGE_CP2CL
+	bool "cp2cl"
+	help
+	  CarPlay to CarLife bridge: the binary this repository builds, installed
+	  as-is. It is statically linked against musl, so nothing here links
+	  against it, and it reads nothing from the rootfs but the kernel's
+	  configfs, FunctionFS and the access point's own hostapd.conf.

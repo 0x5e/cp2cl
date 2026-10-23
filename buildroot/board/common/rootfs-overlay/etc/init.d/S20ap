@@ -1,0 +1,87 @@
+#!/bin/sh
+#
+# The access point: the only way to reach the board, and the network the phone
+# comes back on.
+#
+# hostapd has to be beaconing before a client can ask dnsmasq for an address,
+# and that is a line order, so the two are one script.
+#
+# hostapd exits immediately when wlan0 is not there, and on this image wlan0
+# belongs to a module loaded a moment earlier: a start that runs once loses that
+# race once and never beacons again. The loop below retries it.
+#
+# Both daemons log to /var/log: the board has no console, and hostapd's reason
+# for refusing a channel is not something to guess at.
+LOG=/var/log
+
+log() {
+	echo "$*"
+	[ -w "$LOG" ] && echo "$*" >> "$LOG/ap.log"
+}
+
+start() {
+	printf 'Starting access point: '
+
+	ERR=/dev/null
+	HLOG=/dev/null
+	if [ -w "$LOG" ]; then
+		: > "$LOG/ap.log"
+		ERR=$LOG/ap.log
+		HLOG=$LOG/hostapd.log
+	fi
+
+	i=0
+	up=no
+	while [ "$i" -lt 5 ]; do
+		i=$((i + 1))
+
+		if [ ! -e /sys/class/net/wlan0 ]; then
+			log "no wlan0, attempt $i"
+			sleep 2
+			continue
+		fi
+
+		iw dev wlan0 set power_save off 2>>"$ERR"
+		ip addr replace 192.168.4.1/24 dev wlan0 2>>"$ERR"
+
+		# -B forks, but the parent stays until the child has set the
+		# interface up and reports back, so the exit status is the
+		# answer: a hostapd that could not take the channel exits 1 here.
+		if hostapd -B -P /run/hostapd.pid -f "$HLOG" \
+			/etc/hostapd/hostapd.conf 2>>"$ERR"; then
+			log "hostapd up on attempt $i, pid $(cat /run/hostapd.pid)"
+			up=yes
+			break
+		fi
+
+		log "hostapd failed on attempt $i"
+		sleep 2
+	done
+
+	if [ "$up" != yes ]; then
+		echo "no beacon"
+		return 1
+	fi
+
+	dnsmasq --interface=wlan0 --bind-interfaces \
+		--dhcp-range=192.168.4.2,192.168.4.100,255.255.255.0,12h \
+		--dhcp-sequential-ip \
+		--dhcp-option=3 \
+		--dhcp-option=6 \
+		--port=0 2>>"$ERR"
+	echo "ok"
+}
+
+case "$1" in
+	start)
+		start
+		;;
+	stop)
+		[ -r /run/hostapd.pid ] && kill "$(cat /run/hostapd.pid)" 2>/dev/null
+		killall dnsmasq 2>/dev/null
+		;;
+	*)
+		echo "Usage: $0 {start|stop}"
+		exit 1
+		;;
+esac

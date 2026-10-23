@@ -1,0 +1,1 @@
+source "$BR2_EXTERNAL_CP2CL_PATH/package/cp2cl/Config.in"

@@ -317,9 +317,10 @@ pub(crate) fn ready(cfg: &Config) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// The file `board/install.sh` installs. What it says is the operator's to
-    /// change, so only that we can read it is asserted here.
-    const SHIPPED: &str = include_str!("../../board/etc/hostapd/hostapd.conf");
+    /// The file the image installs. What it says is the operator's to change,
+    /// so only that we can read it is asserted here.
+    const SHIPPED: &str =
+        include_str!("../../buildroot/board/nanopi-duo2/rootfs-overlay/etc/hostapd/hostapd.conf");
 
     /// A directory to put configurations in, removed when the test ends.
     struct TempDir(PathBuf);

@@ -11,3 +11,9 @@ assets/authentication/
 .DS_Store
 .workbuddy/
 .workbuddy-ai/
+
+# The firmware image's inputs and outputs. The external tree under buildroot/ is
+# source and is tracked; what Buildroot downloads and builds is not.
+buildroot/output/
+buildroot/dl/
+dist/
