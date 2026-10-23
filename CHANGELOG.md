@@ -9,6 +9,7 @@
 ### 新增
 
 - 固件改由本仓库构建：mainline 内核与 U-Boot、板载 Wi-Fi 与蓝牙、可写的 ext4 根，`make firmware` 出卡镜像（`1b42a36`）。
+- 状态页「设备端」新增固件版本与内核版本，位于内存占用率与软件版本之间；前者取 `os-release` 的 `NAME` 与 `VERSION_ID`（`Ubuntu 24.04`、`Buildroot 2024.02.1`、`ImmortalWrt 23.05.3`），后者取内核自己的发布串（`da0f8ba`）。
 
 ### 变更
 

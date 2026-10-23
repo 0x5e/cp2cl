@@ -638,6 +638,11 @@ mod tests {
             page_text().contains("d.software"),
             "and writes the version the binary was built as"
         );
+        assert!(
+            page_text().contains("d.firmware"),
+            "and names the distribution the board is running on"
+        );
+        assert!(page_text().contains("d.kernel"), "and the kernel under it");
         let status = Status::new();
         assert!(
             status.json()["device"]["memory_total"].is_null(),
