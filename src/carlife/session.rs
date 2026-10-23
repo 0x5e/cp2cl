@@ -26,7 +26,7 @@ use anyhow::{Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use livi_runtime::vehicle::Vehicle;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::Instant;
 
@@ -370,7 +370,11 @@ where
     // video tick fires while one is arriving, so the read cannot live inside a
     // `select!` that would drop it half way and lose the bytes it had taken.
     // The channel in between is what makes the tick safe to wait on.
-    let (mut reader, writer) = tokio::io::split(stream);
+    //
+    // Buffered so that a read for a header still asks for a whole packet.
+    // `frame::READ_CHUNK` has the reason.
+    let (reader, writer) = tokio::io::split(stream);
+    let mut reader = BufReader::with_capacity(frame::READ_CHUNK, reader);
     let (tx, mut rx) = mpsc::channel::<ChunkOrEnd>(4);
     let reading = tokio::spawn(async move {
         loop {
