@@ -88,6 +88,10 @@ impl Usb {
             controller: controller()?,
         };
 
+        // Before the gadget is composed: the port has to be a device by the time
+        // one is put on it.
+        usb.force_peripheral()?;
+
         fs::create_dir_all(&usb.root)
             .with_context(|| format!("creating {}", usb.root.display()))?;
         usb.write_identity(identity)?;
@@ -259,6 +263,41 @@ impl Usb {
                 .unwrap_or_else(|_| "unknown".to_string())
         };
         format!("speed={} state={}", field("current_speed"), field("state"))
+    }
+
+    /// Makes the controller a device, rather than a port that decides for itself.
+    ///
+    /// The board's device tree says `dr_mode = "otg"`, which leaves the choice to
+    /// the ID pin on PG12 — and nothing drives that pin, so musb sits in
+    /// `OTG_STATE_UNDEFINED` (its `mode` reads `(null)`), no pull-up is raised,
+    /// and a host looking at the port sees nothing plugged in.
+    ///
+    /// `mode` is musb's own attribute for this, and `peripheral` is the runtime
+    /// form of the device tree's other answer: the sunxi glue hands it to the
+    /// PHY, which then stops consulting the pin and reports a device because it
+    /// was told to. A board whose tree already says `peripheral` takes the write
+    /// and changes nothing, which is why it is done unconditionally.
+    fn force_peripheral(&self) -> Result<()> {
+        let link = Path::new(CONTROLLER_DIR).join(&self.controller);
+        // The attribute belongs to the controller rather than to the gadget: the
+        // class link points into the controller's directory, a level or two below.
+        let mode = fs::canonicalize(link).ok().and_then(|dir| {
+            dir.ancestors()
+                .take(4)
+                .map(|dir| dir.join("mode"))
+                .find(|path| path.is_file())
+        });
+        let Some(mode) = mode else {
+            // Not a musb controller, or a kernel that offers no choice. There is
+            // nothing here to undo, and a board that needs none is the usual
+            // reason to find nothing.
+            tracing::debug!("usb.mode_forced result=no_attribute");
+            return Ok(());
+        };
+        fs::write(&mode, "peripheral\n")
+            .with_context(|| format!("writing peripheral into {}", mode.display()))?;
+        tracing::info!("usb.mode_forced mode=peripheral path={}", mode.display());
+        Ok(())
     }
 
     /// Takes down whatever is at this gadget's name, and any mount of the
