@@ -922,7 +922,7 @@ this a derivative work, so cp2cl inherits that.
 | `assets/carlife_channel_map.json` | the head unit's channel number, and the label worth showing for it |
 | `assets/web/index.html` | the page itself — one file, four sections, polling |
 | `assets/web/vendor/weui.min.css` | its stylesheet, vendored so the page needs no network |
-| `Makefile` | the two commands there are: build for the board, and the tests, both in the container |
+| `Makefile` | the binary for the board, the tests, and the card image — each in its own container |
 | `docker/` | the image that cross-compiles for the board, and the CMake toolchain it needs |
 | `buildroot/` | the external tree the image is built from: one package, one board, the kernel fragments and the init scripts |
 
