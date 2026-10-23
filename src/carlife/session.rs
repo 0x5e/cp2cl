@@ -793,12 +793,11 @@ struct Session<'a, W> {
 impl<W: AsyncWrite + Unpin> Session<'_, W> {
     /// Reports the first few frames the car sends, whatever they are.
     ///
-    /// Everything `handle` does with a frame is either at `debug` or only for the
-    /// messages it knows, so a car that says something unexpected and a car that
-    /// says nothing at all produce the same log — and which of the two a silent
-    /// session is turns on exactly that. The first few are reported raw, then the
-    /// log goes quiet again: after a handful the shape is known, and a session
-    /// that is running sends frames sixty times a second.
+    /// A type this code has no arm for is named at `debug`, and so is a channel
+    /// it does not read, but neither says what was in the body. The first few
+    /// frames are therefore reported as bytes, and then the log goes quiet
+    /// again: after a handful the shape is known, and a session that is running
+    /// sends frames sixty times a second.
     fn note_frames(&mut self, chunk: &frame::Chunk) {
         const REPORTED: u32 = 8;
         if self.frames_seen >= REPORTED {
@@ -809,7 +808,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         // Eight bytes was enough to tell a frame from a frame and not enough to
         // tell a head from the bytes around it.
         let body = &chunk.body[..chunk.body.len().min(64)];
-        tracing::info!(
+        tracing::debug!(
             "cl.frame channel={} bytes={} body={:02x?}",
             chunk.channel,
             chunk.body.len(),
