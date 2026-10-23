@@ -47,6 +47,11 @@ const CONTROLLER_DIR: &str = "/sys/class/udc";
 /// it is the disconnect the host is waiting for. The host's own side of an AOA
 /// switch allows for seconds.
 const REATTACH: Duration = Duration::from_millis(500);
+/// How long a gadget directory is given to become removable, and how many times
+/// it is asked. A lazy unmount finishes on its own schedule; this is long enough
+/// for one to, and short enough that a real refusal is still reported promptly.
+const CLEAR_ATTEMPTS: usize = 4;
+const CLEAR_RETRY: Duration = Duration::from_millis(100);
 
 /// The gadget this program composed, by path and by controller. Cheap to copy:
 /// it holds a path and a name.
@@ -88,29 +93,53 @@ impl Usb {
             controller: controller()?,
         };
 
+        let endpoints = match usb.compose(identity) {
+            Ok(endpoints) => endpoints,
+            Err(e) => {
+                // A gadget half composed is one the next run cannot take down:
+                // its function stays registered and its directory will not go.
+                // Leaving nothing behind is what makes a start that failed a
+                // start that can be tried again.
+                let _ = Self::clear();
+                return Err(e);
+            }
+        };
+        tracing::info!(
+            "usb.device controller={} identity={:?}",
+            usb.controller,
+            identity.describe()
+        );
+        Ok((usb, endpoints))
+    }
+
+    /// Everything between an empty configfs tree and a device on the controller.
+    ///
+    /// Split out of `open` so that a failure part-way through has one place to be
+    /// cleaned up from.
+    fn compose(&self, identity: &Identity) -> Result<Endpoints> {
         // Before the gadget is composed: the port has to be a device by the time
         // one is put on it.
-        usb.force_peripheral()?;
+        self.force_peripheral()?;
 
-        fs::create_dir_all(&usb.root)
-            .with_context(|| format!("creating {}", usb.root.display()))?;
-        usb.write_identity(identity)?;
+        fs::create_dir_all(&self.root)
+            .with_context(|| format!("creating {}", self.root.display()))?;
+        self.write_identity(identity)?;
         // One configuration, and one function in it. The name `c.1` is not
         // written down anywhere else.
-        let strings = usb.root.join("configs/c.1/strings/0x409");
+        let strings = self.root.join("configs/c.1/strings/0x409");
         fs::create_dir_all(&strings)
             .with_context(|| format!("creating {}", strings.display()))?;
-        usb.attribute(&strings.join("configuration"), &identity.serial)?;
-        usb.attribute(&usb.root.join("configs/c.1/MaxPower"), &MAX_POWER_MA.to_string())?;
+        self.attribute(&strings.join("configuration"), &identity.serial)?;
+        self.attribute(&self.root.join("configs/c.1/MaxPower"), &MAX_POWER_MA.to_string())?;
 
         // The FunctionFS function, linked into the configuration. Left empty on
         // purpose: what goes into it is written below, and the instance is not
         // registered — and the controller will not take the gadget — until both
         // of those writes have landed.
-        let function = usb.function_dir();
+        let function = self.function_dir();
         fs::create_dir_all(&function)
             .with_context(|| format!("creating {}", function.display()))?;
-        let link = usb.root.join("configs/c.1").join(function_name());
+        let link = self.root.join("configs/c.1").join(function_name());
         symlink(&function, &link)
             .with_context(|| format!("linking {} to {}", link.display(), function.display()))?;
 
@@ -132,21 +161,12 @@ impl Usb {
         let to_car = endpoint("ep1")?;
         let from_car = endpoint("ep2")?;
 
-        usb.bind()?;
-        tracing::info!(
-            "usb.device controller={} identity={:?}",
-            usb.controller,
-            identity.describe()
-        );
-
-        Ok((
-            usb,
-            Endpoints {
-                control,
-                from_car,
-                to_car,
-            },
-        ))
+        self.bind()?;
+        Ok(Endpoints {
+            control,
+            from_car,
+            to_car,
+        })
     }
 
     /// Takes the device off the bus, changes what it calls itself, and puts it
@@ -315,17 +335,40 @@ impl Usb {
         // being used, and so the tree below can be removed at all.
         let _ = fs::write(root.join("UDC"), b"\n");
         unmount_functionfs();
-        empty(&root)?;
         // What has to work: a gadget takes the groups configfs made for it with
         // it, so this is the one removal whose failure means something is still
         // in the way, and the one that has to be reported where it happens.
-        fs::remove_dir(&root).with_context(|| {
-            format!(
-                "removing {}: a gadget goes only once everything in it is gone, and \
-                 something this program left behind is not",
-                root.display()
-            )
-        })?;
+        //
+        // Retried, because a lazy unmount finishes in its own time and the
+        // FunctionFS instance goes with it: the function directory under
+        // `functions` cannot be removed until it has, and a restart after a run
+        // that was killed is the usual way to arrive here while it is still on
+        // its way out.
+        let mut refused = None;
+        for attempt in 0..CLEAR_ATTEMPTS {
+            empty(&root)?;
+            match fs::remove_dir(&root) {
+                Ok(()) => {
+                    refused = None;
+                    break;
+                }
+                Err(e) => {
+                    refused = Some(e);
+                    if attempt + 1 < CLEAR_ATTEMPTS {
+                        std::thread::sleep(CLEAR_RETRY);
+                    }
+                }
+            }
+        }
+        if let Some(e) = refused {
+            return Err(e).with_context(|| {
+                format!(
+                    "removing {}: a gadget goes only once everything in it is gone, and \
+                     something this program left behind is not",
+                    root.display()
+                )
+            });
+        }
         tracing::debug!("usb.cleanup result=ok source=previous_run");
         Ok(())
     }
