@@ -43,6 +43,12 @@ ln -s ../run "$TARGET_DIR/var/run"
 # dropbear refuses a host key anyone but its owner can read.
 chmod 600 "$TARGET_DIR/etc/dropbear/dropbear_ed25519_host_key"
 
+# The same for the key that is let in, and for the directory above it: ssh is
+# not the only client that reads these, and both of them refuse a key that is
+# readable by anyone but root.
+chmod 700 "$TARGET_DIR/root/.ssh"
+chmod 600 "$TARGET_DIR/root/.ssh/authorized_keys"
+
 # bluez5-utils selects libglib2 unconditionally, and glib2 installs command line
 # tools and a GIO that nothing here links: 3.3 MB of the rootfs. Listed by name
 # rather than globbed by directory so that a package which later needs one of
