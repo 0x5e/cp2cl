@@ -207,18 +207,16 @@ impl Usb {
     pub fn bind(&self) -> Result<()> {
         match fs::write(self.root.join("UDC"), format!("{}\n", self.controller)) {
             Ok(()) => Ok(()),
-            // A controller takes one gadget. The usual reason there is another
-            // is a gadget left by an arrangement that came before this one.
+            // A controller takes one gadget, and something else has this one.
+            // Naming it when configfs can is worth the line; a holder configfs
+            // does not know about is a different problem, and one that saying so
+            // is the only help there is.
             Err(e) if e.raw_os_error() == Some(libc::EBUSY) => {
                 let who = match holder() {
                     Some(name) => format!(" by {name}"),
-                    None => String::new(),
+                    None => ", and no gadget in configfs claims it".to_string(),
                 };
-                Err(anyhow!(
-                    "{} is already held{who}: a gadget from an earlier arrangement is the usual \
-                     reason, and a reboot clears it",
-                    self.controller
-                ))
+                Err(anyhow!("{} is already held{who}", self.controller))
             }
             Err(e) => Err(e).with_context(|| {
                 format!(
