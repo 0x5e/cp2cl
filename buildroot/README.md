@@ -39,7 +39,13 @@ No `console=`.
     CONFIG_USB_CONFIGFS=y
     CONFIG_USB_CONFIGFS_F_FS=y
     CONFIG_USB_MUSB_HDRC=y
+    CONFIG_USB_MUSB_DUAL_ROLE=y
     CONFIG_NOP_USB_XCEIV=y
+
+Dual role is the mode selection's default with both `USB` and `USB_GADGET` on,
+so `kernel.fragment` does not set it. It is the mode the port has to be in: the
+program writes `peripheral` to the controller's `mode` file before it composes
+the gadget.
 
 ### 1.4 Wi-Fi — CarPlay
 
@@ -156,6 +162,7 @@ the core; none is loaded on this chip.
 
     /var/lib/cp2cl/pairings.json
     /dev/usb-ffs/carlife
+    /sys/devices/platform/soc/1c19000.usb/musb-hdrc.2.auto/mode    peripheral
     /run/cp2cl.pid
     /var/log/boot.log
     /var/log/dmesg.log
@@ -214,3 +221,7 @@ by `post-build.sh`: it would start a second dnsmasq after the one in
                                     wlan0 is invisible to every check
     XDG_DATA_HOME                   unset with HOME=/ resolves to
                                     /.local/share/cp2cl and fails with EROFS
+    dr_mode = "otg"                 leaves the port to the ID pin on PG12, which
+                                    nothing drives; musb sits in OTG_STATE_UNDEFINED
+                                    and never pulls up. cp2cl writes `peripheral`
+                                    to the controller's `mode` to settle it
