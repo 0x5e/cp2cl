@@ -31,11 +31,12 @@ BR2_INIT_BUSYBOX=y
 BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_DEVTMPFS=y
 BR2_TARGET_ROOTFS_EXT2=y
 BR2_TARGET_ROOTFS_EXT2_4=y
-# 24 MB for a tree that is 17: the rest is room for a binary to replace, a key to
-# add, and the identity the program writes. With the 8 MB boot partition in
-# genimage.cfg, the two come to 32 MB of card in all.
-BR2_TARGET_ROOTFS_EXT2_SIZE="24M"
-# ext4 keeps 5% back for root by default, which is 1 MB of a 24 MB partition on a
+# 64 MB for a tree that is 17: the rest is room for a binary to replace, a key to
+# add, and the identity the program writes — and for the next thing to fit on the
+# card without re-partitioning it. With the 8 MB boot partition in genimage.cfg,
+# the two come to 72 MB of card in all.
+BR2_TARGET_ROOTFS_EXT2_SIZE="64M"
+# ext4 keeps 5% back for root by default, which is 3 MB of a 64 MB partition on a
 # filesystem where root is the only user.
 BR2_TARGET_ROOTFS_EXT2_RESBLKS=1
 BR2_TARGET_ROOTFS_EXT2_LABEL="rootfs"

@@ -469,13 +469,15 @@ installed onto it. One command, from the checkout:
 
 ```bash
 make firmware
-# dist/buildroot-2026.02.3-cp2cl-v0.10.0-9063c18.img
+# dist/buildroot-2026.02.3-cp2cl-v0.11.0-<sha>.img.gz
 ```
 
-Write that to a card and put the card in the board. The name is the version the
-page shows, spelled as a file name has to: the Buildroot release, the tag on the
-commit (`dev` when it carries none), the short commit, and `-dirty` when the
-tree does not match it. Everything the board runs is
+Unpack it and write the `.img` to a card, then put the card in the board. The
+file is gzipped because it is what is handed out: the card is 73 MB and the
+copy that travels is 15 MB. The name is the version the page shows, spelled as a
+file name has to: the Buildroot release, the tag on the commit (`dev` when it
+carries none), the short commit, and `-dirty` when the tree does not match it.
+Everything the board runs is
 in it: the access point, the program, and the init scripts that start them in the
 order they have to happen. It comes out at 73 MB — an 8 MB boot partition with a
 6.8 MB kernel, and a 64 MB ext4 root of which 17 MB is used. The size that

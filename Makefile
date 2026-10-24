@@ -23,7 +23,9 @@ BR_UID   := 1000
 # Both products land in dist/, and the card is named for what produced it: the
 # same three facts the page shows as `v0.10.0 (9063c18-dirty)`, spelled as a file
 # name has to — the tag on the commit, `dev` when it carries none, the short
-# commit, and `-dirty` when the tree does not match it.
+# commit, and `-dirty` when the tree does not match it. `.img.gz` because that is
+# what is handed out: what is written to a card is the `.img` inside, and the copy
+# that travels is 15 MB of the 73.
 #
 # The Buildroot release is read back out of the Dockerfile that pins it rather
 # than written here a second time: a second copy is a copy that goes stale.
@@ -32,7 +34,7 @@ BR_VERSION    := $(shell sed -n 's/^ARG BUILDROOT_VERSION=//p' docker/buildroot.
 CP2CL_VERSION := $(shell git describe --tags --exact-match 2>/dev/null || echo dev)
 CP2CL_COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DIRTY         := $(shell git status --porcelain 2>/dev/null)
-FW := $(DIST)/buildroot-$(BR_VERSION)-cp2cl-$(CP2CL_VERSION)-$(CP2CL_COMMIT)$(if $(DIRTY),-dirty).img
+FW := $(DIST)/buildroot-$(BR_VERSION)-cp2cl-$(CP2CL_VERSION)-$(CP2CL_COMMIT)$(if $(DIRTY),-dirty).img.gz
 
 # What a firmware build starts from: no target tree, and no stamp claiming a
 # package was installed into it. The tree is what the card is, and Buildroot
@@ -84,9 +86,12 @@ image:
 # The build runs as uid 1000, not as root: host-tar's configure refuses to run as
 # root. The volume is root-owned when it is created, so the container starts as
 # root, hands it over, and drops to the builder. Only the image crosses back, in
-# a second container running as you. `dd` rather than `cp`: on this bind mount cp
-# finishes the write and then fails to deallocate the tail, which leaves a copy of
-# the right length and an exit status that stops the build.
+# a second container running as you — compressed on the way out, so what lands in
+# dist/ is the file that is handed out rather than one more copy to make. `dd`
+# rather than `cp` was how the raw card crossed back: on this bind mount cp
+# finishes the write and then fails to deallocate the tail, which leaves a copy
+# of the right length and an exit status that stops the build. `gzip -c` writes
+# the bytes it compresses and nothing more, so there is no tail to give back.
 #
 # `cp2cl-rebuild` between the two makes is what makes a new binary reach the card.
 # A `local` site is rsynced once, when `.stamp_rsynced` is written, so a second
@@ -111,7 +116,7 @@ firmware: app buildroot-image
 				&& make -C /opt/buildroot O=/build cp2cl-rebuild \
 				&& make -C /opt/buildroot O=/build -j$$(nproc)"'
 	docker run --rm -u $(UID_GID) -v $(BR_VOL):/build -v "$(CURDIR)/$(DIST)":/out \
-		$(BR_IMAGE) dd if=/build/images/sdcard.img of=/out/$(notdir $(FW)) bs=1M status=none
+		$(BR_IMAGE) sh -c 'gzip -9 -c /build/images/sdcard.img > /out/$(notdir $(FW))'
 	@echo "image: $(FW)"
 
 # Once per machine, and again only when the Dockerfile changes.
