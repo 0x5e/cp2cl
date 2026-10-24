@@ -25,7 +25,7 @@
 //! asked for.
 //!
 //! `/api/log` is the other one: the copy of the log the program keeps under
-//! `/tmp`, asked for by how far the page has already read rather than in full.
+//! `/var/log`, asked for by how far the page has already read rather than in full.
 //! It is a file that is always being added to, so a page that wants to keep up
 //! with it has to say where it got to — see `log`. `/api/log/download` is the
 //! same copy as one file, for taking off the board.

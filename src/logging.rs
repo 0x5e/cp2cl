@@ -11,8 +11,8 @@
 //! Two layers write them, and it is the same formatter in both: one to the
 //! terminal, coloured, and one to a copy on disk that is not, because the copy
 //! is read by a page and by a shell rather than by an eye at a terminal. The
-//! copy is capped and rolled — see `Journal` — since `/tmp` on the board is
-//! memory, and it is what the status page reads.
+//! copy is capped and rolled — see `Journal` — and it is what the status page
+//! reads.
 
 use std::fmt::{self, Write as _};
 use std::fs::{self, File, OpenOptions};
@@ -173,10 +173,12 @@ impl Visit for Said {
 // --------------------------------------------------------------- the copy ---
 
 /// Where the plain copy of the log is written, and where the chunk before it is
-/// kept. Both are in `/tmp`, which is memory on the board, which is why neither
-/// is left to grow: see `CAP`.
-pub const PATH: &str = "/tmp/cp2cl.log";
-pub const PREVIOUS: &str = "/tmp/cp2cl.log.1";
+/// kept. Both are in `/var/log`, on the root filesystem, beside the logs the boot
+/// scripts write: `/tmp` is memory on the board, so a copy there is gone at the
+/// next boot, and the boot that ended badly is the one there is a question about.
+/// Neither is left to grow: see `CAP`.
+pub const PATH: &str = "/var/log/cp2cl.log";
+pub const PREVIOUS: &str = "/var/log/cp2cl.log.1";
 
 /// How big a chunk is allowed to get before it is rolled over, in bytes.
 ///

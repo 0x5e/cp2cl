@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
     // to go.
     //
     // It goes to two places, and it is the same lines in both: the terminal,
-    // coloured, and a copy under `/tmp` that is not, which is what the status
+    // coloured, and a copy under `/var/log` that is not, which is what the status
     // page reads and what is still there of a run that has ended. See
     // `logging::Journal` for how the copy is kept to size.
     //
