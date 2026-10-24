@@ -4,6 +4,12 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## 未发布
+
+### 修复
+
+- 刷出来的卡不再带上已经删掉的文件，构建前清空 `target` 树并让各包重做安装，此前留在树里的 `S20cp2cl-ap` 让每次开机多等 10 秒（`4a21ad2`）。
+
 ## v0.10.0 alpha — 2026-10-24
 
 ### 新增
