@@ -232,6 +232,8 @@ const CARLIFE_ROWS = [
   ["CarLife 协议版本", d => d.protocol ? d.protocol.major + "." + d.protocol.minor : null],
   ["CUID", d => d.statistic && d.statistic.cuid],
   ["渠道号", d => d.statistic && channelLabel(d.statistic.channel)],
+  // The agreed size is the size in force: a number the channel table
+  // preconfigures is stored where the car's numbers would be.
   ["分辨率", d => size(d.agreed)],
   ["视频编码", d => video(d.video)],
   ["音频编码", d => d.media

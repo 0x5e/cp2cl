@@ -394,7 +394,8 @@ where
         events,
         source,
         channel_touched: None,
-        agreed: None,
+        screen_in_force: None,
+        panel: info::Panel::default(),
         started_at: None,
         media_format: None,
         navi_format: None,
@@ -604,6 +605,14 @@ enum Source {
     Live,
 }
 
+/// A point on a picture `(width, height)`, clamped: a point outside it is not on
+/// it, and a phone given one outside the canvas has nowhere to put it.
+fn clamped(x: i32, y: i32, (width, height): (u32, u32)) -> (u16, u16) {
+    let width = width.max(1) as i32;
+    let height = height.max(1) as i32;
+    (x.clamp(0, width - 1) as u16, y.clamp(0, height - 1) as u16)
+}
+
 /// A panel key as one of the commands the CarPlay side sends, or nothing when the
 /// key is the car's own business.
 ///
@@ -700,8 +709,17 @@ struct Session<'a, W> {
     /// arriving on their own clock, this is what decides whether the heartbeat
     /// still has a job to do.
     channel_touched: Option<Instant>,
-    /// What the car asked for and what we agreed to, once it has asked.
-    agreed: Option<proto::VideoEncoderInfo>,
+    /// The screen the channel carries, once the car has named one: what it named
+    /// with its rate clamped into range, or the table's size stored in its place
+    /// where the table preconfigures this number. A preset is written here as it
+    /// arrives rather than kept beside the car's, so everything that reads the
+    /// screen reads one field and nothing downstream asks which it was.
+    screen_in_force: Option<proto::VideoEncoderInfo>,
+    /// What the channel table says about the panel behind this car's number, once
+    /// that number has arrived: the size the phone is asked for, when the table
+    /// preconfigures one, and the density the panel's millimetres are worked out
+    /// at. Nothing has been said yet, so nothing is assumed but the default.
+    panel: info::Panel,
     /// When the encoder started, which is what the video channel's timestamps
     /// are measured from.
     started_at: Option<Instant>,
@@ -888,6 +906,22 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 if let Ok(mut reported) = self.channel.lock() {
                     *reported = Some(info.channel.to_string());
                 }
+                // What the table says about this car's panel. The number arrives
+                // here and nowhere else, so it is read here: the size is what
+                // stands in for the one the car will name, and the density is
+                // what the millimetres are worked out at. Nothing is reported
+                // from it — `INIT_DONE` is where the screen is settled, and it is
+                // settled in one place.
+                self.panel = info::panel(Some(info.channel));
+                if let Some(preset) = self.panel.preset {
+                    tracing::info!(
+                        "cl.panel_preset width={} height={} fps={} ppi={} source=channel_map",
+                        preset.width,
+                        preset.height,
+                        preset.fps,
+                        self.panel.ppi
+                    );
+                }
                 // The other half of the authentication: the car's channel number
                 // is what the phone judges it by, and the judgement is what this
                 // message answers with. A verdict either way is sent — the car is
@@ -1002,11 +1036,9 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             }
             HU_VIDEO_ENCODER_INIT => {
                 let asked = proto::decode_video_encoder_info(&message.body);
-                // What we can actually produce, which is what `INIT_DONE` is
-                // for: the reference says both ends work from the device's
-                // answer, and the car scales if the two disagree.
+                // What the car names, clamped into what this side can produce.
                 let fallback = ScreenParams::default();
-                let agreed = proto::VideoEncoderInfo {
+                let named = proto::VideoEncoderInfo {
                     width: if asked.width > 0 {
                         asked.width
                     } else {
@@ -1022,24 +1054,36 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                         _ => fallback.fps as i32,
                     },
                 };
+                // And what the channel carries, which is `INIT_DONE`'s answer:
+                // the table's size where it preconfigures this number, because a
+                // make that got its own screen wrong asked for the wrong
+                // numbers. That is what is stored, in place of what the car
+                // said, so nothing past this point has to ask which it was.
+                let in_force = self.preset_in_place_of(named);
                 tracing::info!(
-                    "cl.geometry_asked width={} height={} fps={} agreed_width={} \
-                     agreed_height={} agreed_fps={}",
+                    "cl.geometry_asked width={} height={} fps={} served_width={} \
+                     served_height={} served_fps={} source={}",
                     asked.width,
                     asked.height,
                     asked.frame_rate,
-                    agreed.width,
-                    agreed.height,
-                    agreed.frame_rate
+                    in_force.width,
+                    in_force.height,
+                    in_force.frame_rate,
+                    if self.panel.preset.is_some() {
+                        "channel_map"
+                    } else {
+                        "car"
+                    }
                 );
-                self.agreed = Some(agreed);
+                self.screen_in_force = Some(in_force);
                 // The panel is the car's, so its physical size is worked out
-                // here, from the size it just named and the one density there
-                // is: `CP2CL_PPI`. Nothing in the protocol carries a size.
-                let ppi = self.cfg.ppi;
+                // here, from the size the phone is actually asked for and the
+                // density the table gives this car — 120 dpi where it says
+                // nothing. Nothing in the protocol carries a size.
+                let ppi = self.panel.ppi;
                 let physical = (
-                    info::millimetres(agreed.width as u32, ppi),
-                    info::millimetres(agreed.height as u32, ppi),
+                    info::millimetres(in_force.width as u32, ppi),
+                    info::millimetres(in_force.height as u32, ppi),
                 );
                 self.status.with(|s| {
                     s.carlife.requested = Some(Size {
@@ -1048,21 +1092,22 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                         fps: asked.frame_rate,
                     });
                     s.carlife.agreed = Some(Size {
-                        width: agreed.width,
-                        height: agreed.height,
-                        fps: agreed.frame_rate,
+                        width: in_force.width,
+                        height: in_force.height,
+                        fps: in_force.frame_rate,
                     });
                     s.carlife.physical = Some(physical);
-                    s.carlife.frame_rate = Some(agreed.frame_rate);
+                    s.carlife.frame_rate = Some(in_force.frame_rate);
                 });
-                let body = proto::video_encoder_info(agreed);
+                let body = proto::video_encoder_info(in_force);
                 self.send(VIDEO_ENCODER_INIT_DONE, &body).await?;
-                // The car has just said what its screen is, and that is what the
-                // phone is asked to render at: the two halves meet here.
+                // The channel is what the car decodes and what the phone draws,
+                // so this is the size the other half is told: the two halves
+                // meet here.
                 (self.screen)(
-                    agreed.width as u32,
-                    agreed.height as u32,
-                    agreed.frame_rate as u32,
+                    in_force.width as u32,
+                    in_force.height as u32,
+                    in_force.frame_rate as u32,
                 );
             }
             HU_VIDEO_ENCODER_START => {
@@ -1082,13 +1127,18 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             }
             HU_VIDEO_ENCODER_FRAME_RATE_CHANGE => {
                 let asked = proto::decode_frame_rate(&message.body).unwrap_or(0);
+                // Only a car the table says nothing about changes its own rate. A
+                // preset's rate came with its size, and the phone is rendering at
+                // that one: agreeing to another would leave the car pacing a
+                // picture the phone never sends.
+                let current = self.screen_in_force.map_or(30, |screen| screen.frame_rate);
                 let accepted = match asked {
-                    MIN_FPS..=MAX_FPS => asked,
-                    _ => self.agreed.map(|agreed| agreed.frame_rate).unwrap_or(30),
+                    MIN_FPS..=MAX_FPS if self.panel.preset.is_none() => asked,
+                    _ => current,
                 };
                 tracing::info!("cl.frame_rate asked={asked} agreed={accepted}");
-                if let Some(agreed) = self.agreed.as_mut() {
-                    agreed.frame_rate = accepted;
+                if let Some(screen) = self.screen_in_force.as_mut() {
+                    screen.frame_rate = accepted;
                 }
                 self.status.with(|s| {
                     if let Some(agreed) = s.carlife.agreed.as_mut() {
@@ -1337,18 +1387,38 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         ])
     }
 
-    /// The car's own pixels as the phone's. They are the same numbers: the canvas
-    /// the car asked to be rendered at is what the phone was asked for, so a
-    /// touch is only clamped, because a point outside the picture is not on it.
-    fn on_canvas(&self, x: i32, y: i32) -> (u16, u16) {
-        let (width, height) = match self.agreed {
-            Some(agreed) => (agreed.width, agreed.height),
-            None => (i32::from(u16::MAX), i32::from(u16::MAX)),
-        };
-        (
-            x.clamp(0, width.max(1) - 1) as u16,
-            y.clamp(0, height.max(1) - 1) as u16,
+    /// What the video channel carries where the channel table preconfigures this
+    /// car's number: the table's size stands in for the one the car named. This
+    /// is the only place the table and the car are compared — the value it
+    /// returns is stored, and everything else reads the store.
+    fn preset_in_place_of(&self, named: proto::VideoEncoderInfo) -> proto::VideoEncoderInfo {
+        match self.panel.preset {
+            Some(preset) => proto::VideoEncoderInfo {
+                width: preset.width as i32,
+                height: preset.height as i32,
+                frame_rate: preset.fps as i32,
+            },
+            None => named,
+        }
+    }
+
+    /// The size the picture is drawn at, which is the size the car was answered
+    /// with. A preset was stored in place of what the car named, so this is one
+    /// field and there is nothing to choose between.
+    fn canvas(&self) -> (u32, u32) {
+        self.screen_in_force.map_or(
+            (u32::from(u16::MAX), u32::from(u16::MAX)),
+            |screen| (screen.width.max(1) as u32, screen.height.max(1) as u32),
         )
+    }
+
+    /// The car's own pixels are the phone's. `INIT_DONE` is what told the car
+    /// which picture to measure its touches in, and a preset was stored there in
+    /// place of what it named, so a touch arrives in those numbers already: it is
+    /// clamped and nothing else, because a point outside the picture is not on
+    /// it.
+    fn on_canvas(&self, x: i32, y: i32) -> (u16, u16) {
+        clamped(x, y, self.canvas())
     }
 
     /// Sends whatever the video channel owes right now.
@@ -1776,9 +1846,10 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     /// picture to send on a schedule and one has been agreed, otherwise the
     /// heartbeat's.
     fn period(&self) -> Duration {
-        match (&self.source, self.started_at, self.agreed) {
-            (Source::Cycle { .. }, Some(_), Some(agreed)) if agreed.frame_rate > 0 => {
-                Duration::from_millis(1000 / agreed.frame_rate as u64)
+        let rate = self.screen_in_force.map(|screen| screen.frame_rate);
+        match (&self.source, self.started_at, rate) {
+            (Source::Cycle { .. }, Some(_), Some(fps)) if fps > 0 => {
+                Duration::from_millis(1000 / fps as u64)
             }
             _ => HEARTBEAT,
         }
@@ -1878,8 +1949,15 @@ mod tests {
             message
         }
 
-        /// Everything the car asks before it will start the encoder.
-        async fn handshake(&mut self, asked: proto::VideoEncoderInfo) {
+        /// Everything the car asks before it will start the encoder, answering
+        /// on `channel`, with `served` expected back — which is what it asked
+        /// for unless the channel table preconfigures the screen.
+        async fn handshake_on(
+            &mut self,
+            channel: &str,
+            asked: proto::VideoEncoderInfo,
+            served: proto::VideoEncoderInfo,
+        ) {
             let mut version = Vec::new();
             proto::put_int(&mut version, 1, 1);
             proto::put_int(&mut version, 2, 0);
@@ -1889,18 +1967,19 @@ mod tests {
             self.send(HU_INFO, &[]).await;
             self.expect(MD_INFO).await;
 
-            self.send(HU_STATISTIC_INFO, &statistics("20062100")).await;
+            self.send(HU_STATISTIC_INFO, &statistics(channel)).await;
             self.expect(MD_AUTHEN_RESULT).await;
             self.expect(FEATURE_CONFIG_REQUEST).await;
             self.expect(CAR_DATA_SUBSCRIBE).await;
 
             self.send(HU_VIDEO_ENCODER_INIT, &proto::video_encoder_info(asked))
                 .await;
-            let agreed = self.expect(VIDEO_ENCODER_INIT_DONE).await;
-            assert_eq!(
-                proto::decode_video_encoder_info(&agreed.body),
-                proto::decode_video_encoder_info(&proto::video_encoder_info(asked))
-            );
+            let answer = self.expect(VIDEO_ENCODER_INIT_DONE).await;
+            assert_eq!(proto::decode_video_encoder_info(&answer.body), served);
+        }
+
+        async fn handshake(&mut self, asked: proto::VideoEncoderInfo) {
+            self.handshake_on("20062100", asked, asked).await;
         }
 
         async fn start_the_encoder(&mut self) {
@@ -1944,6 +2023,16 @@ mod tests {
     fn asked() -> proto::VideoEncoderInfo {
         proto::VideoEncoderInfo {
             width: 1280,
+            height: 720,
+            frame_rate: 30,
+        }
+    }
+
+    /// The size the channel table preconfigures for `20062104`, which is what
+    /// that number is served instead of what it asks for.
+    fn preset() -> proto::VideoEncoderInfo {
+        proto::VideoEncoderInfo {
+            width: 1920,
             height: 720,
             frame_rate: 30,
         }
@@ -2243,6 +2332,75 @@ mod tests {
         car.await.unwrap();
 
         assert_eq!(*screens.lock().unwrap(), vec![(1920, 480, 24)]);
+    }
+
+    /// A number the channel table preconfigures is answered with the table's
+    /// size, not with the one the car asked for: the car's own application is
+    /// what got its screen wrong, so its idea of the screen is what loses. The
+    /// table's numbers are stored in place of the car's, which is why the size the
+    /// other half is told — and the size a touch is measured in — needs no rule of
+    /// its own.
+    #[tokio::test]
+    async fn a_preconfigured_number_is_served_the_size_the_table_names() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.handshake_on("20062104", asked(), preset()).await;
+        });
+
+        let screens = Arc::new(Mutex::new(Vec::new()));
+        let seen = screens.clone();
+        let mut screen = move |width: u32, height: u32, fps: u32| {
+            seen.lock().unwrap().push((width, height, fps));
+        };
+        let status = Arc::new(Status::new());
+        run(
+            device,
+            &Frames::None,
+            &cfg,
+            None,
+            &mut screen,
+            no_icon(),
+            EventSink::new(),
+            &mut carplay,
+            &no_tap(),
+            status.clone(),
+            Arc::new(Vehicle::default()),
+        )
+        .await
+            .expect("the session ends cleanly");
+        car.await.expect("the car saw its answer");
+
+        // The phone draws the table's size, so that is the size it is told — and
+        // this callback is what `/info` reads, so it is also the size the phone
+        // is asked for.
+        assert_eq!(*screens.lock().unwrap(), vec![(1920, 720, 30)]);
+        status.with(|s| {
+            // One size, and it is the table's: the car's own numbers were
+            // overwritten where they were stored, so this is all there is to read.
+            let agreed = s.carlife.agreed.expect("the answer is on the page");
+            assert_eq!((agreed.width, agreed.height, agreed.fps), (1920, 720, 30));
+            let asked = s.carlife.requested.expect("what the car asked for is kept");
+            assert_eq!((asked.width, asked.height), (1280, 720));
+        });
+    }
+
+    /// A preset says what the screen is, and the car is answered with it, so its
+    /// touches are in that size already: a point near the right edge stays there
+    /// rather than being scaled up from the size the car claimed.
+    #[test]
+    fn a_touch_is_taken_as_it_arrives_on_the_size_in_force() {
+        assert_eq!(clamped(1900, 700, (1920, 720)), (1900, 700));
+        assert_eq!(clamped(1920, 720, (1920, 720)), (1919, 719));
+        assert_eq!(clamped(-5, -5, (1920, 720)), (0, 0));
+        assert_eq!(
+            clamped(640, 360, (1280, 720)),
+            (640, 360),
+            "a car the table says nothing about is untouched"
+        );
     }
 
     /// A rate above 30 is the car's to ask for. Nothing here scales or re-times

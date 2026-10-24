@@ -119,8 +119,26 @@ The head unit is asked what its screen is, at the start of every CarLife session
 — `VIDEO_ENCODER_INIT` carries a width, a height and a frame rate, and the answer
 that goes back is what both ends work from. That answer is what the phone is
 asked to render at, and `GET /info` is where it is said: one display, named
-`cp2cl`, sized to the car's own pixels. A car that names nothing gets 1280x720 at
-30.
+`cp2cl`, sized to the car's own pixels — or to the size the channel table names
+for it. A car that names nothing gets 1280x720 at 30.
+
+A number the channel table says something about is served that way instead of what
+it asked for. There are two fields, both per number:
+
+```json
+{ "id": "20062104", "video": "1920x720@30", "ppi": 120 }
+```
+
+`video` is `WIDTHxHEIGHT@FPS`, and it is there for a head unit whose own CarLife
+application asks for a screen that is not the one it drives — the wrong size, or
+the wrong shape. It stands in for what the car named, at the moment that answer is
+stored: there is one screen in the session, not the car's and the table's side by
+side, so the `VIDEO_ENCODER_INIT` answer, the size the phone is asked for at
+`/info`, the size a touch is measured in and the rate the next
+`FRAME_RATE_CHANGE` is answered with are all the same number. `ppi` is the panel's
+density, which the millimetres the phone is told are worked out at — 120 wherever
+an entry names none. Both belong to the number rather than to the make, so a make
+that answers on several is only overridden on the one that needs it.
 
 Changing it costs a session, and that is not a shortcut: the phone reads `/info`
 exactly once, at the start of a session, and never asks again, so a new size only
@@ -128,8 +146,8 @@ reaches it on the next one. A car whose screen is not the default has its CarPla
 session rebuilt once, early on, for exactly this reason — the log says so:
 
 ```
-[cl]      	cl.geometry_asked width=1920 height=480 fps=24 agreed_width=1920 agreed_height=480 agreed_fps=24
-[screen]  	screen.named width=1920 height=480 fps=24
+[cl]      	cl.geometry_asked width=1280 height=720 fps=30 served_width=1920 served_height=720 served_fps=30 source=channel_map
+[screen]  	screen.named width=1920 height=720 fps=30
 ```
 
 Two things have to happen, and closing the connection is only the first:
@@ -205,7 +223,6 @@ them.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CP2CL_PPI` | `120` | the panel's density, in pixels per inch |
 | `CP2CL_LOG_LEVEL` | `info` | log level: `error`, `warn`, `info`, `debug` |
 | `CP2CL_WIRELESS` | off | take CarPlay over Wi-Fi instead of USB |
 | `CP2CL_WIFI_IFACE` | `wlan0` | the interface the access point runs on |
@@ -929,7 +946,7 @@ this a derivative work, so cp2cl inherits that.
 | `src/assets.rs` | the lookup over `assets/`: what the binary carries besides code |
 | `assets/` | the icons, the channel table and the status page — `build.rs` includes every file here, so adding one is enough to be able to ask for it by name |
 | `assets/icons/` | the icon `GET /info` puts on the phone's screen, two sizes per make, `Default-*` for the rest |
-| `assets/carlife_channel_map.json` | one entry per make: its code, the channel numbers it answers on, and the label worth showing for it |
+| `assets/carlife_channel_map.json` | one entry per make: its code, the channel numbers it answers on, the label worth showing for it, and what the panel behind a number takes — the size to serve and its density |
 | `assets/web/index.html` | the page itself — one file, four sections, polling |
 | `assets/web/vendor/weui.min.css` | its stylesheet, vendored so the page needs no network |
 | `Makefile` | the binary for the board, the tests, and the card image — each in its own container |

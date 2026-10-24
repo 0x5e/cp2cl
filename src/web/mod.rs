@@ -545,6 +545,40 @@ mod tests {
         assert_eq!(body["carlife"]["physical"]["height_mm"], 229);
     }
 
+    /// The size in force is the `agreed` one, whoever named it: a number the
+    /// channel table preconfigures has the table's size stored where the car's
+    /// would be, so the page reads one field and the table is where the number
+    /// comes from.
+    #[test]
+    fn the_page_shows_the_size_in_force() {
+        assert!(
+            page_text().contains("size(d.agreed)"),
+            "the page reads the one field"
+        );
+        assert!(
+            embedded(CHANNELS_NAME).contains("\"video\""),
+            "and the table is where the number comes from"
+        );
+
+        let status = Status::new();
+        assert!(
+            status.json()["carlife"]["agreed"].is_null(),
+            "no screen has been named yet"
+        );
+
+        status.with(|s| {
+            s.carlife.agreed = Some(Size {
+                width: 1920,
+                height: 720,
+                fps: 30,
+            });
+        });
+        let body = status.json();
+        assert_eq!(body["carlife"]["agreed"]["width"], 1920);
+        assert_eq!(body["carlife"]["agreed"]["height"], 720);
+        assert_eq!(body["carlife"]["agreed"]["fps"], 30);
+    }
+
     /// The car's position is a section of its own, and it is the car's: the page
     /// shows it while the car reports one and reads it from the car's half.
     #[test]

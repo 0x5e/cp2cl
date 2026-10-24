@@ -34,17 +34,12 @@ fn env_or(key: &str, default: &str) -> String {
 /// A level and nothing else. `tracing-subscriber`'s environment filter also
 /// takes directives — `crate=debug`, `crate[span]=trace` — and parsing them is
 /// what a regex engine was built into the binary for; there is one knob here and
-/// it names one of four levels. A value that is not one of them is `info`, the
-/// way a number that cannot be read falls back on its default.
+/// it names one of four levels. A value that is not one of them is `info`.
 pub fn log_filter() -> LevelFilter {
     match env("CP2CL_LOG_LEVEL") {
         Some(level) => level.parse().unwrap_or(LevelFilter::INFO),
         None => LevelFilter::INFO,
     }
-}
-
-fn env_num<T: std::str::FromStr>(key: &str, default: T) -> T {
-    env(key).and_then(|s| s.parse().ok()).unwrap_or(default)
 }
 
 /// What a machine with no controller to ask reports. Every caller wants
@@ -85,16 +80,6 @@ fn read_hostname(path: &Path) -> String {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// The panel's density, in pixels per inch, which is what decides how finely
-    /// the phone draws: it is told a physical size and turns that back into a
-    /// dpi. Inflating it is the whole difference between a sharp picture and a
-    /// blurry one — MacPlay reports the window's real share of the panel and gets
-    /// ~254 dpi, while inventing a large size drops it to ~162 and the phone
-    /// quietly renders at 1×.
-    ///
-    /// The size in millimetres is derived from this and the canvas the car asks
-    /// for, because no CarLife message carries one. See `info.rs`.
-    pub ppi: u32,
     /// This machine's own Bluetooth address, which is also the identifier
     /// `/info` reports — see `bt_address`.
     pub bt_mac: String,
@@ -127,7 +112,6 @@ impl Config {
     pub fn from_env() -> Self {
         let bt_adapter = env_or("CP2CL_BT_ADAPTER", "hci0");
         Self {
-            ppi: env_num("CP2CL_PPI", 120),
             bt_mac: bt_address(&bt_adapter),
             name: hostname(),
             // Wired stays the default: it needs nothing the operator has to

@@ -140,7 +140,6 @@ the core; none is loaded on this chip.
     CP2CL_WIFI_IFACE=wlan0
     CP2CL_BT_ADAPTER=hci0
     CP2CL_LOG_LEVEL=info
-    CP2CL_PPI=120
     CP2CL_INPUT_FILE=<unset>
 
 ## 3. Everything else

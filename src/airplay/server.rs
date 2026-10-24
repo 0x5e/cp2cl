@@ -969,17 +969,20 @@ impl Session {
     }
 
     fn info(&self) -> Result<Response, String> {
-        // Whatever the car named, or the default until it names one: it is the
-        // end that decodes the picture that knows what it can take, and asking
-        // the phone for anything else just makes it scale.
+        // Whatever the screen in force is, or the default until there is one. A
+        // number the channel table preconfigures is already in that value: the
+        // CarLife session stores it where the car's own numbers would be, so
+        // there is one answer here and nothing to choose between.
         let screen = self.negotiated().unwrap_or_default();
         let (width, height) = screen.canvas();
         let fps = screen.fps;
         // The physical size is the other half of what the phone draws at: it
         // turns millimetres back into a dpi, and a wrong one is a picture at the
-        // wrong scale. No CarLife message carries a size, so `CP2CL_PPI` says how
-        // dense the panel is and the size follows from it and the canvas above.
-        let ppi = self.cfg.ppi;
+        // wrong scale. No CarLife message carries a size, so the table says how
+        // dense the panel is — 120 dpi where it says nothing — and the size
+        // follows from that and the canvas above.
+        let channel = self.channel.lock().ok().and_then(|c| c.clone());
+        let ppi = info::panel(channel.as_deref()).ppi;
         // Reported before the answer goes out: this is the only place the two
         // halves meet — what the car said its screen is, and what the phone is
         // therefore asked to draw — and the page is where that is worth seeing.
@@ -1002,7 +1005,7 @@ impl Session {
             height,
             fps,
             ppi,
-            channel: self.channel.lock().ok().and_then(|c| c.clone()),
+            channel,
         })
         .map_err(|e| e.to_string())?;
         // H.264 is the only family on offer: CarLife carries an elementary

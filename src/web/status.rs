@@ -233,13 +233,17 @@ pub struct Carlife {
     /// The head unit's own verdict on us, from `HU_AUTHEN_RESULT`.
     pub accepted: Option<bool>,
     /// What the head unit asked to be rendered at, and what we agreed to. The
-    /// two differ when the car names a rate outside the range we serve.
+    /// two differ when the car names a rate outside the range we serve, and when
+    /// the channel table preconfigures a size for its number: `agreed` is the
+    /// size in force either way, because a preset is stored where the car's
+    /// numbers would be.
     pub requested: Option<Size>,
     pub agreed: Option<Size>,
-    /// What `agreed` works out to on the car's panel, in millimetres. Derived
-    /// from `CP2CL_PPI`, because no CarLife message carries a physical size: the
-    /// density is a property of the screen this device is wired to, so the size
-    /// is reported on the car's side of the page rather than the phone's.
+    /// What the agreed size works out to on the car's panel, in millimetres.
+    /// Derived from the density the channel table gives this car, because no
+    /// CarLife message carries a physical size: the density belongs to the screen
+    /// this device is wired to, so the size is reported on the car's side of the
+    /// page rather than the phone's.
     pub physical: Option<(u32, u32)>,
     /// Whether the head unit has the encoder running.
     pub encoding: bool,
@@ -406,7 +410,8 @@ pub struct Screen {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
-    /// The density the physical size was derived from. See `CP2CL_PPI`.
+    /// The density the physical size was derived from: the channel table's `ppi`
+    /// for this car, or its 120 dpi default.
     pub ppi: u32,
     /// The canvas the phone actually draws on, which is larger than the panel
     /// when a UI scale is set. Equal to the panel at the default scale.

@@ -98,11 +98,10 @@ async fn main() -> Result<()> {
     // the car before it says anything at all — so a log that does not name its
     // own mode is one that cannot be read.
     tracing::info!(
-        "process.config wireless={} wifi_iface={} bt_adapter={} ppi={}",
+        "process.config wireless={} wifi_iface={} bt_adapter={}",
         cfg.wireless,
         cfg.wifi_iface,
-        cfg.bt_adapter,
-        cfg.ppi
+        cfg.bt_adapter
     );
 
     // Everything the page shows is reported from wherever it is learned, and
