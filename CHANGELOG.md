@@ -6,6 +6,11 @@
 
 ## 未发布
 
+### 新增
+
+- 无线 CarPlay 起来后手机把 iAP2 控制通道从蓝牙搬到 AirPlay 的数据流上：`SETUP` 里 type 130、`clientTypeUUID` 为 iAP DataStream 的那条流现在会得到一个端口，`RECORD` 之后 iAP2 会话就跑在这条连接上，回程消息走事件通道的 `iAPSendMessage`（`b8f4552`）。
+- 隧道在跑期间不再 page 手机，AirPlay 会话结束才恢复；手机发来 `disableBluetooth` 时主动断蓝牙链路（`b8f4552`）。
+
 ### 变更
 
 - 构建拆成 `make app` 与 `make firmware`，`make all` 出程序与卡镜像两样，产物都落在 `dist/`（`1797119`）。
