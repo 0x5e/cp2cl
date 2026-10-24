@@ -8,7 +8,7 @@
 # already are. Buildroot's cargo infrastructure would have to reproduce all
 # three, and would still be the slowest thing in the build.
 #
-# `make dist` stages the binary under dist/, and that directory is the source.
+# `make app` stages the binary under dist/, and that directory is the source.
 # Nothing else from the repository is copied, so `target/` never enters the
 # rsync that a `local` site would otherwise run over the whole checkout.
 #

@@ -85,9 +85,10 @@ make image
 Then, from the repository root:
 
 ```bash
-make all
+make app
 ```
 
+`make all` builds this and the image below, and both products land in `dist/`.
 `make test` runs the unit tests in the same container. The `cp2cl-cargo` volume
 holds the cargo cache, so only the first build downloads anything, and the build
 products come out owned by you rather than by root: **this crate only builds for
@@ -106,7 +107,8 @@ cost is name resolution — musl reads
 nothing resolved through NSS or mDNS resolves here. Neither the CarPlay nor the
 CarLife path resolves a name.
 
-The result is `target/armv7-unknown-linux-musleabihf/release/cp2cl`. Copy it to
+The result is `dist/cp2cl`, staged from
+`target/armv7-unknown-linux-musleabihf/release/cp2cl`. Copy it to
 the board and run it there; it needs no files of its own, and everything it takes
 from outside comes from the environment — see
 [Running it on the board](#running-it-on-the-board).
@@ -450,10 +452,13 @@ installed onto it. One command, from the checkout:
 
 ```bash
 make firmware
-# buildroot/output/sdcard.img
+# dist/buildroot-2026.02.3-cp2cl-v0.10.0-9063c18.img
 ```
 
-Write that to a card and put the card in the board. Everything the board runs is
+Write that to a card and put the card in the board. The name is the version the
+page shows, spelled as a file name has to: the Buildroot release, the tag on the
+commit (`dev` when it carries none), the short commit, and `-dirty` when the
+tree does not match it. Everything the board runs is
 in it: the access point, the program, and the init scripts that start them in the
 order they have to happen. It comes out at 73 MB — an 8 MB boot partition with a
 6.8 MB kernel, and a 64 MB ext4 root of which 17 MB is used. The size that

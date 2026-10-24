@@ -15,11 +15,24 @@ RUN    := docker run --rm -u "$$(id -u):$$(id -g)" \
 # fragments, and the one package, which is this crate.
 BR_IMAGE := cp2cl-buildroot
 BR_VOL   := cp2cl-buildroot-out
-BR_OUT   := buildroot/output
 BOARD    ?= nanopi_duo2
 UID_GID  := $(shell id -u):$(shell id -g)
 # The uid of the build user in docker/buildroot.Dockerfile.
 BR_UID   := 1000
+
+# Both products land in dist/, and the card is named for what produced it: the
+# same three facts the page shows as `v0.10.0 (9063c18-dirty)`, spelled as a file
+# name has to — the tag on the commit, `dev` when it carries none, the short
+# commit, and `-dirty` when the tree does not match it.
+#
+# The Buildroot release is read back out of the Dockerfile that pins it rather
+# than written here a second time: a second copy is a copy that goes stale.
+DIST          := dist
+BR_VERSION    := $(shell sed -n 's/^ARG BUILDROOT_VERSION=//p' docker/buildroot.Dockerfile)
+CP2CL_VERSION := $(shell git describe --tags --exact-match 2>/dev/null || echo dev)
+CP2CL_COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+DIRTY         := $(shell git status --porcelain 2>/dev/null)
+FW := $(DIST)/buildroot-$(BR_VERSION)-cp2cl-$(CP2CL_VERSION)-$(CP2CL_COMMIT)$(if $(DIRTY),-dirty).img
 
 # What a firmware build starts from: no target tree, and no stamp claiming a
 # package was installed into it. The tree is what the card is, and Buildroot
@@ -40,12 +53,20 @@ BR_UID   := 1000
 # both partitions and the card, every run, out of a fixed list of files.
 BR_FRESH := rm -rf /build/target && rm -f /build/build/*/.stamp_target_installed
 
-.PHONY: all test image dist firmware buildroot-image
+.PHONY: all app test image firmware buildroot-image
 
-# What `make` on its own does: the binary the board runs, statically linked,
-# at target/$(TARGET)/release/cp2cl.
-all:
+# Both products: the program the board runs, and the image it runs from.
+# `make app` on its own is the program, which is what a change to the crate
+# needs; the image is a tree, a toolchain and a kernel on every build.
+all: app firmware
+
+# The program, statically linked, staged into dist/ where buildroot/package/
+# cp2cl points at it. Nothing else from the checkout is staged: a `local` site
+# over the repository root would drag target/ through rsync on every build.
+app:
 	$(RUN) cargo build --release --target $(TARGET)
+	mkdir -p $(DIST)
+	install -m 0755 target/$(TARGET)/release/cp2cl $(DIST)/cp2cl
 
 test:
 	$(RUN) cargo test
@@ -53,13 +74,6 @@ test:
 # Once per machine, and again only when `docker/Dockerfile` changes.
 image:
 	docker build -t $(IMAGE) docker/
-
-# The binary, staged where buildroot/package/cp2cl points at it. Nothing else
-# from the checkout is copied: a `local` site over the repository root would
-# drag target/ through rsync on every build.
-dist: all
-	mkdir -p dist
-	install -m 0755 target/$(TARGET)/release/cp2cl dist/cp2cl
 
 # BOARD=<name> builds any board that has a configs/<name>_defconfig.
 #
@@ -83,12 +97,12 @@ dist: all
 # The recipe opens with `BR_FRESH`: the target tree is emptied on every build, so
 # what the card carries is the configuration and the overlays and nothing else
 # that was ever on the volume.
-firmware: dist buildroot-image
-	mkdir -p $(BR_OUT)
+firmware: app buildroot-image
+	mkdir -p $(DIST)
 	docker volume create $(BR_VOL) >/dev/null
 	docker run --rm -u 0:0 -v $(BR_VOL):/build \
 		-v "$(CURDIR)/buildroot":/ext:ro \
-		-v "$(CURDIR)/dist":/dist:ro \
+		-v "$(CURDIR)/$(DIST)":/dist:ro \
 		-e BR2_DL_DIR=/build/dl \
 		$(BR_IMAGE) sh -c 'chown $(BR_UID):$(BR_UID) /build \
 			&& su -s /bin/sh builder -c "$(BR_FRESH) \
@@ -96,9 +110,9 @@ firmware: dist buildroot-image
 				&& make -C /opt/buildroot O=/build -j$$(nproc) \
 				&& make -C /opt/buildroot O=/build cp2cl-rebuild \
 				&& make -C /opt/buildroot O=/build -j$$(nproc)"'
-	docker run --rm -u $(UID_GID) -v $(BR_VOL):/build -v "$(CURDIR)/$(BR_OUT)":/out \
-		$(BR_IMAGE) dd if=/build/images/sdcard.img of=/out/sdcard.img bs=1M status=none
-	@echo "image: $(BR_OUT)/sdcard.img"
+	docker run --rm -u $(UID_GID) -v $(BR_VOL):/build -v "$(CURDIR)/$(DIST)":/out \
+		$(BR_IMAGE) dd if=/build/images/sdcard.img of=/out/$(notdir $(FW)) bs=1M status=none
+	@echo "image: $(FW)"
 
 # Once per machine, and again only when the Dockerfile changes.
 buildroot-image:
