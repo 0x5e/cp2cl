@@ -163,12 +163,6 @@ async fn cover(State(status): State<Arc<Status>>, RawQuery(query): RawQuery) -> 
         .into_response()
 }
 
-/// How much of the copy one fetch may carry, in bytes.
-///
-/// A page that has been closed for an hour catches up over the next few polls
-/// rather than being handed four megabytes the moment it is opened again.
-const LOG_CHUNK: u64 = 256 * 1024;
-
 /// The copy of the log, from the byte the page has read up to.
 ///
 /// Asked for by offset rather than in full: the copy is written continuously
@@ -178,8 +172,8 @@ const LOG_CHUNK: u64 = 256 * 1024;
 /// `reset` is the one way an offset can turn out to be nowhere: the copy was
 /// rolled over and is now shorter than where the page had got to, or the
 /// program has run again. Either way the page is told to drop what it had, and
-/// is given the last chunk of the copy — which is where a page that asks for
-/// nothing at all starts too.
+/// is given the copy from its beginning — which is what a page that asks for
+/// nothing at all is given too.
 async fn log(RawQuery(query): RawQuery) -> Response {
     let (reset, from, text) = copied(Path::new(logging::PATH), from(&query)).await;
     (
@@ -201,9 +195,10 @@ async fn log(RawQuery(query): RawQuery) -> Response {
 /// What has been written to the copy since `from`, which is `None` when the
 /// page has not asked for a place in it yet.
 ///
-/// No offset means the end of the copy, not the beginning of it: a page that
-/// has just been opened is asking what is happening now, and the copy it is
-/// looking at may be four megabytes of a run that started an hour ago.
+/// No offset means the whole of the copy, not the end of it. The copy is capped
+/// at four megabytes, so handing all of it over is bounded, and a page that
+/// opens at the tail would only ever be able to read forward from wherever it
+/// was opened.
 async fn copied(path: &Path, from: Option<u64>) -> (bool, u64, String) {
     // No copy yet, or one that cannot be read, is an empty one: the page shows
     // nothing and asks again.
@@ -214,14 +209,13 @@ async fn copied(path: &Path, from: Option<u64>) -> (bool, u64, String) {
     let (reset, from) = match from {
         Some(at) if at <= written => (false, at),
         // Nowhere in this copy: either it was rolled over and is shorter than
-        // where the page had got to, or the program has run again. The last
-        // chunk of it is what is shown, since that is where the story is.
-        _ => (true, written.saturating_sub(LOG_CHUNK)),
+        // where the page had got to, or the program has run again.
+        _ => (true, 0),
     };
 
     let mut bytes = Vec::new();
     if file.seek(std::io::SeekFrom::Start(from)).await.is_ok() {
-        let _ = file.take(LOG_CHUNK).read_to_end(&mut bytes).await;
+        let _ = file.read_to_end(&mut bytes).await;
     }
     (reset, from, String::from_utf8_lossy(&bytes).into_owned())
 }
@@ -585,18 +579,19 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
-    /// A page that has just been opened asks what is happening now: the answer
-    /// is the last chunk of the copy, not four megabytes from an hour ago.
+    /// A page that has just been opened is given the whole of the copy, not the
+    /// tail of it: the copy is capped at four megabytes, and a page that opened
+    /// at the tail could only ever read forward from there.
     #[tokio::test]
-    async fn the_log_opens_at_its_tail() {
+    async fn the_log_opens_at_its_beginning() {
         let path = std::env::temp_dir().join(format!("cp2cl-tail-{}", std::process::id()));
         let line = "x".repeat(99) + "\n";
         std::fs::write(&path, line.repeat(3000)).unwrap();
 
         let (reset, from, text) = copied(&path, None).await;
         assert!(reset, "a page with no offset starts over");
-        assert_eq!(from, 300_000 - LOG_CHUNK, "at the last chunk of the copy");
-        assert_eq!(text.len() as u64, LOG_CHUNK);
+        assert_eq!(from, 0, "at the beginning of the copy");
+        assert_eq!(text.len(), 300_000, "and carries all of it");
 
         std::fs::remove_file(&path).ok();
     }

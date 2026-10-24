@@ -55,7 +55,6 @@
   .log .lv.warn{color:var(--weui-ORANGE)}
   .log .lv.info{color:var(--weui-BRAND)}
   .log .lv.debug{color:var(--weui-BLUE)}
-  .log .lv.trace{color:var(--weui-PURPLE)}
   .weui-cell{padding-top:11px;padding-bottom:11px}
   .weui-cell__bd{flex:0 0 auto;padding-right:16px}
   .weui-cell__ft{flex:1 1 auto;min-width:0;overflow-wrap:anywhere;font-size:14px}
@@ -90,7 +89,6 @@
       <span class="log-pick">
         <label for="log-level">级别</label>
         <select id="log-level">
-          <option value="trace">全部</option>
           <option value="debug">DEBUG</option>
           <option value="info">INFO</option>
           <option value="warn">WARN</option>
@@ -452,25 +450,23 @@ async function statusTick() {
 // ended at. It is a file something else is writing to, so it is never fetched
 // whole: two seconds of a running bridge is a handful of lines, and asking for
 // a megabyte every two seconds is asking the board to hand over its own log
-// again and again.
-const LOG_LINES = 1000;
-
+// again and again. What the first answer carries is the whole of the copy, and
+// every line of it is kept on screen.
 const logBox = document.getElementById("log");
 const logStamp = document.getElementById("log-stamp");
 
-let logLines = [];   // 屏幕上已有的行，最多 LOG_LINES 条
 let logTail = "";    // 上一次没读完的半行
 let logAt = null;    // 已经读到的字节位置，null = 还没读过
 
 const LEVELS = {
-  TRACE: "trace", DEBUG: "debug", INFO: "info", WARN: "warn", ERROR: "error",
+  DEBUG: "debug", INFO: "info", WARN: "warn", ERROR: "error",
 };
 
 // The order the levels are printed in, quietest first: the selection is the
 // lowest one shown, and everything under it is kept but hidden — the lines are
 // already on screen, and going back to a lower level is not a reason to read
 // them off the copy again.
-const RANK = { trace: 0, debug: 1, info: 2, warn: 3, error: 4 };
+const RANK = { debug: 0, info: 1, warn: 2, error: 3 };
 
 const levelPick = document.getElementById("log-level");
 let floor = RANK[levelPick.value];
@@ -493,7 +489,7 @@ applyWrap();
 // whole — a line of an unexpected shape is still the line that was written.
 function logRow(text) {
   const row = document.createElement("div");
-  const found = /^(\d+\.\d+) +(TRACE|DEBUG|INFO|WARN|ERROR) +([\s\S]*)$/.exec(text);
+  const found = /^(\d+\.\d+) +(DEBUG|INFO|WARN|ERROR) +([\s\S]*)$/.exec(text);
   if (!found) {
     row.textContent = text;
     return row;
@@ -529,16 +525,7 @@ function appendLog(text) {
 
   const stick = atBottom();
   const top = logBox.scrollTop;
-  for (const line of parts) {
-    logLines.push(line);
-    logBox.appendChild(logRow(line));
-  }
-  // Only the newest lines are kept: what is being watched is what is happening,
-  // and the copy itself is what has the rest of it.
-  while (logLines.length > LOG_LINES) {
-    logLines.shift();
-    logBox.removeChild(logBox.firstChild);
-  }
+  for (const line of parts) logBox.appendChild(logRow(line));
   // Reading further back is not undone by a new line arriving: only a view
   // that was already at the end follows it.
   logBox.scrollTop = stick ? logBox.scrollHeight : top;
@@ -563,7 +550,8 @@ levelPick.addEventListener("change", () => {
 function counted() {
   let seen = 0;
   for (const row of logBox.children) if (!row.hidden) seen++;
-  return seen === logLines.length ? seen + " 行" : seen + " / " + logLines.length + " 行";
+  const all = logBox.children.length;
+  return seen === all ? seen + " 行" : seen + " / " + all + " 行";
 }
 
 async function logTick() {
@@ -575,7 +563,6 @@ async function logTick() {
     // The copy was rolled over, or the program started again: what is on
     // screen is another run's, or this run's before the roll.
     if (data.reset) {
-      logLines = [];
       logTail = "";
       logBox.textContent = "";
     }
