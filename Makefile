@@ -21,6 +21,25 @@ UID_GID  := $(shell id -u):$(shell id -g)
 # The uid of the build user in docker/buildroot.Dockerfile.
 BR_UID   := 1000
 
+# What a firmware build starts from: no target tree, and no stamp claiming a
+# package was installed into it. The tree is what the card is, and Buildroot
+# only ever adds to it — a file stays after the package that put it there leaves
+# the configuration, and after the overlay stops shipping it. There is no way
+# back to a tree that holds only what this run asked for. This volume was still
+# carrying the whole module tree of kernel 6.6.160 beside the 6.18.58 one the
+# card runs: 31 files, 350 KB, for a kernel nothing here runs.
+#
+# Upstream has nothing that empties the tree and keeps the cache that produced
+# it: `make clean` takes dl/ and every build directory with it, and the
+# `clean-target` target proposed on the mailing list in 2015 was never merged.
+# These are the two commands that are left, in that order — the tree goes, the
+# install stamps go, and the next make repeats those installs out of the build
+# directories, which is a copy and not a compile.
+#
+# `images/` is not touched: mkfs writes the root filesystem and genimage writes
+# both partitions and the card, every run, out of a fixed list of files.
+BR_FRESH := rm -rf /build/target && rm -f /build/build/*/.stamp_target_installed
+
 .PHONY: all test image dist firmware buildroot-image
 
 # What `make` on its own does: the binary the board runs, statically linked,
@@ -60,6 +79,10 @@ dist: all
 # `make firmware` would find every stamp in place and produce an image with the
 # previous binary on it. The rebuild has to come after the first make: on a fresh
 # volume there is no target directory to install into.
+#
+# The recipe opens with `BR_FRESH`: the target tree is emptied on every build, so
+# what the card carries is the configuration and the overlays and nothing else
+# that was ever on the volume.
 firmware: dist buildroot-image
 	mkdir -p $(BR_OUT)
 	docker volume create $(BR_VOL) >/dev/null
@@ -68,7 +91,8 @@ firmware: dist buildroot-image
 		-v "$(CURDIR)/dist":/dist:ro \
 		-e BR2_DL_DIR=/build/dl \
 		$(BR_IMAGE) sh -c 'chown $(BR_UID):$(BR_UID) /build \
-			&& su -s /bin/sh builder -c "make -C /opt/buildroot O=/build BR2_EXTERNAL=/ext $(BOARD)_defconfig \
+			&& su -s /bin/sh builder -c "$(BR_FRESH) \
+				&& make -C /opt/buildroot O=/build BR2_EXTERNAL=/ext $(BOARD)_defconfig \
 				&& make -C /opt/buildroot O=/build -j$$(nproc) \
 				&& make -C /opt/buildroot O=/build cp2cl-rebuild \
 				&& make -C /opt/buildroot O=/build -j$$(nproc)"'
