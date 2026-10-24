@@ -218,14 +218,14 @@ mod tests {
         // Under the step threshold, so it only slews — and records 1 ms.
         clock.sample(0.001, 0.001);
         clock.sample(0.001, 0.001);
-        let settled = clock.now_u64();
+        // The offset rather than two stamps: a stamp is read off a running
+        // clock, so two of them differ by however long the machine took to get
+        // from one read to the other — which is what a tolerance would have to
+        // hide. What this is about is the offset, and that does not drift.
+        let settled = clock.offset_ns;
         // Slower than everything in the window, so it is thrown away.
         clock.sample(5.0, 0.5);
         clock.sample(5.0, 0.5);
-        assert!(
-            ntp_diff(clock.now_u64(), settled).abs() < 0.001,
-            "moved by {}",
-            ntp_diff(clock.now_u64(), settled)
-        );
+        assert_eq!(clock.offset_ns, settled, "the delayed sample moved the clock");
     }
 }
