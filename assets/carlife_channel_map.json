@@ -49,6 +49,7 @@
   { "code": "WISTEON", "channels": [{ "id": "20171100" }] },
   { "code": "上汽通用_CADILLAC", "channels": [{ "id": "20181100" }] },
   { "code": "CADILLAC_DUAL_AUDIO", "channels": [{ "id": "20182100" }] },
+  { "code": "CADILLAC_XT6", "channels": [{ "id": "20182102" }] },
   { "code": "上汽通用_BUICK", "channels": [{ "id": "20191100" }] },
   { "code": "BUICK_DUAL_AUDIO", "channels": [{ "id": "20192100" }] },
   { "code": "上汽通用_CHEVROLET", "channels": [{ "id": "20201100" }] },
@@ -69,5 +70,21 @@
   { "code": "YUANFENG_ELH_PCBA", "channels": [{ "id": "20482100" }] },
   { "code": "YUANFENG_ONLINE", "channels": [{ "id": "20482101" }] },
   { "code": "YUANFENG_YILI", "channels": [{ "id": "20542100" }] },
+  {
+    "code": "LEXUS",
+    "channels": [
+      { "id": "20980001" },
+      { "id": "20980002" },
+      { "id": "20980003" }
+    ]
+  },
+  {
+    "code": "LEXUS_TOUCHPAD",
+    "channels": [
+      { "id": "21050001" },
+      { "id": "21050002" },
+      { "id": "21050003" }
+    ]
+  },
   { "code": "TOYOTA_RAV4", "channels": [{ "id": "21070001" }] }
 ]
