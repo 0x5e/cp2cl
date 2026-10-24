@@ -125,9 +125,6 @@ function num(v) {
 function size(s) {
   return s ? s.width + " × " + s.height + " @ " + s.fps + " fps" : null;
 }
-function pair(a, b) {
-  return a === null || a === undefined ? null : (b === null || b === undefined ? String(a) : a + " / " + b);
-}
 function clock(seconds) {
   if (seconds === null || seconds === undefined) return null;
   const total = Math.max(0, Math.round(Number(seconds)));
@@ -232,9 +229,6 @@ const BOTH_UP = d => CARLIFE_UP(d.carlife) && CARPLAY_UP(d.carplay);
 
 const CARLIFE_ROWS = [
   ["会话状态", d => bool(CARLIFE_UP(d), "已建立", "未建立"), d => CARLIFE_UP(d) ? "ok" : null],
-  ["厂商 / 型号", d => pair(d.asked[0], d.asked[1])],
-  ["描述", d => d.asked[2]],
-  ["序列号", d => d.asked[5]],
   ["CarLife 协议版本", d => d.protocol ? d.protocol.major + "." + d.protocol.minor : null],
   ["CUID", d => d.statistic && d.statistic.cuid],
   ["渠道号", d => d.statistic && channelLabel(d.statistic.channel)],
