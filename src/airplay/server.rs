@@ -956,7 +956,7 @@ impl Session {
             // "the stream died" and the phone stops sending video.
             "POST" if path.ends_with("/feedback") => self.feedback().await,
             "POST" if path.ends_with("/command") => {
-                self.command(req).await;
+                self.command(req);
                 Ok(Response::new(200))
             }
             _ => Ok(Response::new(200)),
@@ -1029,7 +1029,7 @@ impl Session {
     ///
     /// `suggestUI` is the phone offering URLs it thinks we might show. Nothing
     /// here shows them.
-    async fn command(&mut self, req: &Request) {
+    fn command(&self, req: &Request) {
         let Ok(dict) = Self::plist_body(&req.body) else {
             Self::describe(&req.body);
             return;
