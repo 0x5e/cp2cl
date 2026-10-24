@@ -173,10 +173,10 @@ impl Visit for Said {
 // --------------------------------------------------------------- the copy ---
 
 /// Where the plain copy of the log is written, and where the chunk before it is
-/// kept. Both are in `/var/log`, on the root filesystem, beside the logs the boot
-/// scripts write: `/tmp` is memory on the board, so a copy there is gone at the
-/// next boot, and the boot that ended badly is the one there is a question about.
-/// Neither is left to grow: see `CAP`.
+/// kept. Both are in `/var/log`, beside the logs the boot scripts write, and
+/// `/var/log` is a tmpfs mount: memory on the board rather than the card, so a
+/// copy costs no write to it and is gone with the boot that produced it. Neither
+/// is left to grow: see `CAP`.
 pub const PATH: &str = "/var/log/cp2cl.log";
 pub const PREVIOUS: &str = "/var/log/cp2cl.log.1";
 

@@ -23,9 +23,9 @@ for f in brcmfmac43430-sdio.bin brcmfmac43430-sdio.txt BCM43430A1.hcd; do
 	install -D -m 0644 "$BOARD_DIR/firmware/$f" "$TARGET_DIR/lib/firmware/brcm/$f"
 done
 
-# The skeleton makes /var/log a symlink to /tmp, and /tmp is a tmpfs: a log
-# written there is gone at the next boot, and the run that ended badly is the one
-# that has to be explained. On this root it is a directory on the disk.
+# The skeleton makes /var/log a symlink to /tmp, and fstab mounts its own tmpfs
+# here. A mount on the path would follow that symlink and land on /tmp, so the
+# symlink goes and what is left in the image is the empty directory to mount.
 rm -rf "$TARGET_DIR/var/log"
 install -d -m 0755 "$TARGET_DIR/var/log"
 

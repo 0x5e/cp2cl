@@ -19,4 +19,8 @@ configfs	/sys/kernel/config	configfs	defaults	0 0
 devpts		/dev/pts	devpts		gid=5,mode=620		0 0
 tmpfs		/dev/shm	tmpfs		mode=1777		0 0
 tmpfs		/tmp		tmpfs		mode=1777		0 0
+# Logs are memory, not the card. The boot scripts write here, and so does the
+# program, and what they leave behind is worth reading only while the boot that
+# wrote it is still up: no line of a log is a write to the card.
+tmpfs		/var/log	tmpfs		mode=0755		0 0
 tmpfs		/run		tmpfs		mode=0755		0 0
