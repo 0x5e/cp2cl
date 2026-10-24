@@ -48,62 +48,33 @@ fn on_air() -> Option<OnAir> {
     ON_AIR.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-/// Runs the iAP2 half of one wireless session on a channel that is already up,
-/// and says whether the phone should be asked back for another one.
+/// Everything a wireless iAP2 session is built from.
 ///
-/// `bt_mac` is this machine's own Bluetooth address: the phone checks that the
-/// accessory it is talking to is the one it paired with, so a made-up value
-/// gets the identification rejected.
-///
-/// One argument per thing the caller holds, which is one more than clippy counts
-/// by default. They are left apart rather than bundled: no two of them belong
-/// with each other, and a struct over them would exist only to be taken apart
-/// again on the first line.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_session(
+/// Two transports carry that session — the Bluetooth link that hands the phone
+/// its Wi-Fi credentials, and the CarPlay data stream the phone moves the same
+/// session onto once CarPlay is running — and both have to describe the access
+/// point and themselves identically, or the phone has no reason to believe the
+/// second one is the accessory it was already talking to.
+pub(crate) struct SessionParams {
+    /// The hostapd file the access point was read from, for the log line.
+    pub path: PathBuf,
+    pub ssid: String,
+    pub channel: u8,
+    pub cp: CpConfig,
+    pub identity: Identity,
+}
+
+/// Reads the access point and builds what both wireless sessions hand the
+/// phone. The passphrase never leaves this function's caller: it is a secret,
+/// and a page is not a place to keep one.
+pub(crate) fn session_params(
     cfg: &Config,
-    auth: SharedCoprocessor,
-    channel: LinkChannel,
     airplay_port: u32,
     bt_mac: [u8; 6],
-    peer: &str,
-    restart: &broadcast::Sender<()>,
-    panel: &ClSink,
-    status: &Status,
-    vehicle: &Arc<Vehicle>,
-) -> Ended {
-    // Subscribed before anything goes out, so a display change made while the
-    // identification is still running is waiting for us rather than lost.
-    let mut changed = restart.subscribe();
-
-    // What the phone is told to join, and where. Read here rather than once at
-    // startup so that editing the file and restarting the access point is
-    // enough for a change to take effect.
-    let (path, ap) = match access_point(&cfg.wifi_iface) {
-        Ok(found) => found,
-        Err(e) => {
-            tracing::error!("wireless.ap_unusable err={e}");
-            return Ended::Finished;
-        }
-    };
-    tracing::info!(
-        "wireless.ap ssid={:?} channel={} iface={} config={}",
-        ap.ssid,
-        ap.channel,
-        cfg.wifi_iface,
-        path.display()
-    );
-    // The passphrase is deliberately left out: it is a secret, and a page is not
-    // a place to keep one. What is here is what the interface is on air with.
-    // Spelled out rather than imported: this module has an `AccessPoint` of its
-    // own, which is the parsed configuration rather than the reported one.
-    status.with(|s| {
-        s.carplay.access_point = Some(crate::web::AccessPoint {
-            ssid: ap.ssid.clone(),
-            channel: ap.channel,
-            iface: cfg.wifi_iface.clone(),
-        });
-    });
+) -> Result<SessionParams, String> {
+    // Read here rather than once at startup so that editing the file and
+    // restarting the access point is enough for a change to take effect.
+    let (path, ap) = access_point(&cfg.wifi_iface)?;
 
     let identity = Identity {
         name: cfg.name.clone(),
@@ -114,9 +85,10 @@ pub(crate) async fn run_session(
         fuels: Fuels::default(),
     };
 
-    // What the phone is about to be told, kept where the bringup can ask for it.
-    // The start session derives the Wi-Fi security from this: a WPA2 network is
-    // named by leaving the field out, a WPA3 or transition one is not.
+    // What the phone is about to be told, kept where the bringup can ask for
+    // it. The start session derives the Wi-Fi security from this: a WPA2
+    // network is named by leaving the field out, a WPA3 or transition one is
+    // not.
     *ON_AIR.lock().unwrap_or_else(|e| e.into_inner()) = Some(OnAir {
         ssid: ap.ssid.clone(),
         channel: Channel::of_number(ap.channel.into()),
@@ -152,10 +124,75 @@ pub(crate) async fn run_session(
         // be given something to start CarPlay from. That cannot be done on this
         // session: `CarPlayStartSession` is the answer to the phone's own offer,
         // and it has already had one. So the whole session is torn down instead
-        // — ending this function drops the link, and the platform paging the
-        // phone again is what gets us a new one.
+        // — ending it drops the link, and the platform paging the phone again
+        // is what gets us a new one.
         start_again: None,
     };
+
+    Ok(SessionParams {
+        path,
+        ssid: ap.ssid,
+        channel: ap.channel,
+        cp,
+        identity,
+    })
+}
+
+/// Runs the iAP2 half of one wireless session on a channel that is already up,
+/// and says whether the phone should be asked back for another one.
+///
+/// `bt_mac` is this machine's own Bluetooth address: the phone checks that the
+/// accessory it is talking to is the one it paired with, so a made-up value
+/// gets the identification rejected.
+///
+/// One argument per thing the caller holds, which is one more than clippy counts
+/// by default. They are left apart rather than bundled: no two of them belong
+/// with each other, and a struct over them would exist only to be taken apart
+/// again on the first line.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_session(
+    cfg: &Config,
+    auth: SharedCoprocessor,
+    channel: LinkChannel,
+    airplay_port: u32,
+    bt_mac: [u8; 6],
+    peer: &str,
+    restart: &broadcast::Sender<()>,
+    panel: &ClSink,
+    status: &Status,
+    vehicle: &Arc<Vehicle>,
+) -> Ended {
+    // Subscribed before anything goes out, so a display change made while the
+    // identification is still running is waiting for us rather than lost.
+    let mut changed = restart.subscribe();
+
+    let params = match session_params(cfg, airplay_port, bt_mac) {
+        Ok(found) => found,
+        Err(e) => {
+            tracing::error!("wireless.ap_unusable err={e}");
+            return Ended::Finished;
+        }
+    };
+    tracing::info!(
+        "wireless.ap ssid={:?} channel={} iface={} config={}",
+        params.ssid,
+        params.channel,
+        cfg.wifi_iface,
+        params.path.display()
+    );
+    // The passphrase is deliberately left out: it is a secret, and a page is not
+    // a place to keep one. What is here is what the interface is on air with.
+    // Spelled out rather than imported: this module has an `AccessPoint` of its
+    // own, which is the parsed configuration rather than the reported one.
+    status.with(|s| {
+        s.carplay.access_point = Some(crate::web::AccessPoint {
+            ssid: params.ssid.clone(),
+            channel: params.channel,
+            iface: cfg.wifi_iface.clone(),
+        });
+    });
+
+    let SessionParams { cp, identity, ssid, .. } = params;
 
     let (tx, rx) = mpsc::channel(64);
     // `Vehicle` owns the two watch senders and `feed` only hands out receivers,
@@ -172,7 +209,7 @@ pub(crate) async fn run_session(
         "wireless",
         peer,
         airplay_port,
-        Some(ap.ssid.as_str()),
+        Some(ssid.as_str()),
         rx,
         &mut changed,
         panel,
