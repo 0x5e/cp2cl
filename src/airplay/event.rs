@@ -295,9 +295,15 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
         // filtered out by `pump_events` as chatter, so only failures reach the
         // log. One line here is the difference between "nothing happened" and
         // "it worked" — which is why it exists, and why it is debug level
-        // rather than `println!`: a finger drag is one line per pointer move.
-        // `CP2CL_LOG_LEVEL=debug` brings it back.
-        tracing::debug!("event.sending cmd={cmd:?}");
+        // rather than `println!`.
+        //
+        // Touch is left out of it: a finger drag is one line per pointer move,
+        // and every one of them says the same thing — a coordinate on the
+        // screen the car was answered with. `CP2CL_LOG_LEVEL=debug` brings the
+        // keys and the wheel back.
+        if !matches!(cmd, Command::Touch(_)) {
+            tracing::debug!("event.sending cmd={cmd:?}");
+        }
 
         match cmd {
             Command::Play => self.media_momentary(MEDIA_PLAY).await?,
