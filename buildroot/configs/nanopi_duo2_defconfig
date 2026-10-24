@@ -77,12 +77,12 @@ BR2_TARGET_UBOOT_NEEDS_OPENSSL=y
 BR2_TARGET_UBOOT_FORMAT_CUSTOM=y
 BR2_TARGET_UBOOT_FORMAT_CUSTOM_NAME="u-boot-sunxi-with-spl.bin"
 
-# The boot script is mkimage's job, not U-Boot's: Buildroot moved it to
-# host-uboot-tools, and the old BR2_TARGET_UBOOT_BOOT_SCRIPT symbol survives only
-# as a legacy stub that stops the build outright.
+# The boot script is mkimage's job, not U-Boot's: the old
+# BR2_TARGET_UBOOT_BOOT_SCRIPT symbol survives only as a legacy stub that stops
+# the build outright. From host-uboot-tools only the tool is wanted; its
+# boot.scr step runs once at install and would freeze whatever boot.cmd existed
+# then, so post-image.sh builds the script on every build.
 BR2_PACKAGE_HOST_UBOOT_TOOLS=y
-BR2_PACKAGE_HOST_UBOOT_TOOLS_BOOT_SCRIPT=y
-BR2_PACKAGE_HOST_UBOOT_TOOLS_BOOT_SCRIPT_SOURCE="$(BR2_EXTERNAL_CP2CL_PATH)/board/nanopi-duo2/boot.cmd"
 
 BR2_PACKAGE_BUSYBOX=y
 BR2_PACKAGE_DBUS=y
