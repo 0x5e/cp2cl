@@ -15,6 +15,8 @@
 
 - 构建拆成 `make app` 与 `make firmware`，`make all` 出程序与卡镜像两样，产物都落在 `dist/`（`1797119`）。
 - 卡镜像名为 `buildroot-2026.02.3-cp2cl-v0.10.0-9063c18.img`，依次是钉住的 Buildroot 版本、提交上的 tag（无 tag 即 `dev`）、提交短哈希，脏树在末尾加 `-dirty`（`1797119`）。
+- 日志全在内存里：`/var/log` 挂 tmpfs，启动脚本的日志与程序的副本同在一处，卡上不再有日志写入，重启即失（`79efa5a`、`947d719`）。
+- 卡镜像的 rootfs 从 64 MB 缩到 24 MB，与 8 MB 的 boot 分区合计 32 MB（`d014bb8`）。
 
 ### 修复
 
