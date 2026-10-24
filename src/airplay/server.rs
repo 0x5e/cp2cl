@@ -2202,8 +2202,12 @@ impl Session {
 fn seed_text(value: &Value) -> Option<String> {
     match value {
         Value::Integer(n) => Some(n.to_string()),
-        // A whole number written as a real is still the same digits.
-        Value::Real(f) if f.fract() == 0.0 && f.abs() < 1e21 => Some(format!("{}", *f as i64)),
+        // A whole number written as a real is still the same digits, as long as
+        // a real can hold all of them: above 2^53 it cannot, so one that large
+        // is written as the real it is rather than as digits it may not have.
+        Value::Real(f) if f.fract() == 0.0 && f.abs() <= 9_007_199_254_740_992.0 => {
+            Some(format!("{}", *f as i64))
+        }
         Value::Real(f) => Some(f.to_string()),
         Value::String(s) => Some(s.clone()),
         _ => None,
