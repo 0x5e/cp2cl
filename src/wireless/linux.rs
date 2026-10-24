@@ -15,7 +15,7 @@ use livi_runtime::mfi_async::SharedCoprocessor;
 use livi_runtime::vehicle::Vehicle;
 use tokio::sync::broadcast;
 
-use super::{page, parse_mac, ready, run_session, short};
+use super::{page, parse_mac, ready, run_session, short, Handover};
 use crate::config::{bt_address, Config};
 use crate::session::{carry_artwork, Ended};
 use crate::sink::ClSink;
@@ -33,6 +33,7 @@ pub async fn watch(
     panel: Arc<ClSink>,
     status: Arc<Status>,
     vehicle: Arc<Vehicle>,
+    handover: Arc<Handover>,
 ) {
     if let Err(e) = ready(&cfg) {
         tracing::error!("wireless.ap_unusable err={e}");
@@ -88,8 +89,13 @@ pub async fn watch(
     loop {
         // Only while nothing is on the link: a phone that is already coming in
         // does not need calling, and one that is mid-session must not be paged
-        // again on top of it.
-        let paging = tokio::spawn(page::run(conn.clone(), cfg.bt_adapter.clone()));
+        // again on top of it. And not at all while the phone has moved its iAP2
+        // session onto the CarPlay data stream — see `Handover`.
+        let paging = tokio::spawn(page::run(
+            conn.clone(),
+            cfg.bt_adapter.clone(),
+            handover.clone(),
+        ));
         let next = match &mut stop {
             Some(sig) => tokio::select! {
                 next = incoming.recv() => next,

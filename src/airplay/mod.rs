@@ -2,8 +2,10 @@
 //!
 //! After CarPlayStartSession goes out over iAP2 the phone opens a *second*,
 //! unrelated connection to the port we advertised and speaks a different
-//! protocol entirely. Nothing in this module shares code with iAP2; the only
-//! thing carried across is the port number.
+//! protocol entirely. Nearly everything here shares no code with iAP2; the one
+//! exception is `tunnel`, because once CarPlay is running a wireless phone may
+//! move its iAP2 control channel onto a data stream of this session and that
+//! stream is an iAP2 link's transport from then on.
 //!
 //! The ordering matters and is enforced by which fields each step requires:
 //!
@@ -34,6 +36,7 @@ pub mod pairing;
 pub mod rtsp;
 pub mod screen;
 mod server;
+pub(crate) mod tunnel;
 
 pub use self::event::EventSink;
 pub use self::mic::MicSink;

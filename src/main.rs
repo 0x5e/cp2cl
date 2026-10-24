@@ -208,6 +208,28 @@ async fn main() -> Result<()> {
     // answer the phone's challenge, and airplay to answer /auth-setup.
     let auth = SharedCoprocessor::new(mfi_signer()?);
 
+    // A wireless phone moves its iAP2 control channel onto the AirPlay session
+    // once CarPlay is running, and these are the two pieces that takes: the gate
+    // that stops Bluetooth being paged while it has — see `wireless::Handover` —
+    // and where the session on the tunnel is described from. A wired run has
+    // neither: its control channel is on the cable and there is nothing to move
+    // it to, so a type 130 SETUP is answered as it always was.
+    let handover = wireless::Handover::new();
+    let tunnel = cfg.wireless.then(|| {
+        Arc::new(airplay::tunnel::Setup {
+            cfg: cfg.clone(),
+            auth: auth.clone(),
+            bt_mac: wireless::parse_mac(&cfg.bt_mac),
+            airplay_port,
+            panel: panel.clone(),
+            vehicle: vehicle.clone(),
+            status: status.clone(),
+            events: event_sink.clone(),
+            handover: handover.clone(),
+            restart: restart.clone(),
+        })
+    });
+
     // Whether the CarPlay half is open for the phone at all. It starts shut and
     // the car's session is the only thing that opens it: nothing is published
     // and nothing is accepted until there is a head unit on the other end.
@@ -248,6 +270,7 @@ async fn main() -> Result<()> {
             audio_clock: Arc::new(Mutex::new(AudioClock::default())),
             timing: Arc::new(Mutex::new(SyncedClock::new())),
             status: status.clone(),
+            tunnel,
         },
         gate.clone(),
     ));
@@ -336,7 +359,10 @@ async fn main() -> Result<()> {
     });
 
     if cfg.wireless {
-        wireless::watch(cfg, auth, airplay_port, restart, gate, panel, status, vehicle).await;
+        wireless::watch(
+            cfg, auth, airplay_port, restart, gate, panel, status, vehicle, handover,
+        )
+        .await;
     } else {
         session::watch(cfg, auth, airplay_port, restart, gate, panel, status, vehicle).await;
     }

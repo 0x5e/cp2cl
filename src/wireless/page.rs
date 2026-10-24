@@ -11,10 +11,13 @@
 //! callback an incoming connection does — see `linux`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use zbus::Connection;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+
+use super::Handover;
 
 /// What the iPhone advertises for its own side of iAP2. Connecting to it is what
 /// wakes the phone; the channel that follows is the one we take.
@@ -42,15 +45,33 @@ struct Phone {
 }
 
 /// Pages every paired phone, again and again, until the caller stops the task.
-pub(super) async fn run(conn: Connection, adapter: String) {
+pub(super) async fn run(conn: Connection, adapter: String, handover: Arc<Handover>) {
     // A page that took its time must not be followed by a burst of retries, which
     // is what a missed tick would otherwise produce.
     let mut round = tokio::time::interval(ROUND);
     round.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // When each phone was first seen on the link with no session on it.
     let mut waiting: HashMap<String, Instant> = HashMap::new();
+    // Said when the state changes rather than once a round: five seconds apart,
+    // the line would be the only thing in the log for as long as a tunnel lasts.
+    let mut held = false;
     loop {
         round.tick().await;
+        // The phone took its iAP2 session to Wi-Fi and asked us to drop
+        // Bluetooth. Calling it back now would give it a second session and a
+        // second `CarPlayStartSession`, which the one on Wi-Fi cannot survive —
+        // see `Handover`.
+        if handover.live() {
+            if !held {
+                held = true;
+                tracing::info!("wireless.page_held reason=handover");
+            }
+            continue;
+        }
+        if held {
+            held = false;
+            tracing::info!("wireless.page_resumed reason=handover_cleared");
+        }
         let phones = match paired(&conn, &adapter).await {
             Ok(phones) => phones,
             Err(e) => {

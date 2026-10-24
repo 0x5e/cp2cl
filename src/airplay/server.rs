@@ -28,6 +28,7 @@ use super::mic::{MicConfig, MicSink};
 use super::pairing::{PairSetup, PairVerify, Pairings, VerifyKeys};
 use super::rtsp::{self, Request, Response, OCTET_CONTENT_TYPE, PAIRING_CONTENT_TYPE};
 use super::screen::{self, VideoReceiver};
+use super::tunnel;
 use crate::config::Config;
 use crate::sink::{AudioCodec, MediaSink, StreamEvent, StreamId};
 use crate::web::{Audio, Mic, Screen, Status};
@@ -354,6 +355,10 @@ pub struct Shared {
     /// Where the status page reads this half from. Reported to and never read
     /// back: see `crate::web::status`.
     pub status: Arc<Status>,
+    /// What a type 130 stream needs to become an iAP2 session. `None` on a wired
+    /// run: there is no second transport to move the control channel to, so the
+    /// stream is answered with a port nobody listens on, exactly as before.
+    pub tunnel: Option<Arc<tunnel::Setup>>,
 }
 
 /// Accepts connections and runs each one to completion.
@@ -410,6 +415,7 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                 let mfi = shared.mfi.clone();
                 let audio_clock = shared.audio_clock.clone();
                 let timing = shared.timing.clone();
+                let tunnel_setup = shared.tunnel.clone();
 
                 tokio::spawn(async move {
                     let mut session = Session {
@@ -429,6 +435,8 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                         mfi,
                         audio_clock,
                         timing,
+                        tunnel_setup,
+                        tunnel: None,
                         peer,
                         setup: None,
                         verify: None,
@@ -608,6 +616,12 @@ struct Session {
     audio_clock: Arc<Mutex<AudioClock>>,
     /// The clock every timestamp we send is stamped with. See `clock::SyncedClock`.
     timing: Arc<Mutex<SyncedClock>>,
+    /// What a type 130 stream is built from, when this run has anywhere to move
+    /// iAP2 to.
+    tunnel_setup: Option<Arc<tunnel::Setup>>,
+    /// The phone's iAP2 session, once it asked to move it here. Owned by the
+    /// session because the phone ends it by ending this: see `tunnel`.
+    tunnel: Option<tunnel::Tunnel>,
     peer: SocketAddr,
     setup: Option<PairSetup>,
     verify: Option<PairVerify>,
@@ -918,6 +932,12 @@ impl Session {
             "SETUP" => self.setup(req).await,
             "RECORD" => {
                 tracing::info!("airplay.media_live");
+                // The phone has asked for the iAP channel and connected to it;
+                // now is when both ends are listening, so now is when the
+                // session on it starts. See `tunnel::Tunnel::start_iap2`.
+                if let Some(tunnel) = self.tunnel.as_mut() {
+                    tunnel.start_iap2();
+                }
                 Ok(Response::new(200))
             }
             // Worth reading: the phone usually names the streams it is dropping,
@@ -936,7 +956,7 @@ impl Session {
             // "the stream died" and the phone stops sending video.
             "POST" if path.ends_with("/feedback") => self.feedback().await,
             "POST" if path.ends_with("/command") => {
-                self.command(req);
+                self.command(req).await;
                 Ok(Response::new(200))
             }
             _ => Ok(Response::new(200)),
@@ -994,7 +1014,9 @@ impl Session {
         Ok(Response::new(200).plist(plist))
     }
 
-    /// What the phone asks for on `/command`, which is UI behaviour.
+    /// What the phone asks for on `/command`, which is UI behaviour — and the
+    /// two things that only appear once a wireless session is moving its iAP2
+    /// control channel onto this one.
     ///
     /// `requestUI` is our own icon on the phone's CarPlay screen being tapped.
     /// On that screen the icon means the head unit's own desktop, so the car is
@@ -1004,7 +1026,7 @@ impl Session {
     ///
     /// `suggestUI` is the phone offering URLs it thinks we might show. Nothing
     /// here shows them.
-    fn command(&self, req: &Request) {
+    async fn command(&mut self, req: &Request) {
         let Ok(dict) = Self::plist_body(&req.body) else {
             Self::describe(&req.body);
             return;
@@ -1029,6 +1051,62 @@ impl Session {
                     .and_then(|v| v.as_array())
                     .map_or(0, Vec::len);
                 tracing::info!("airplay.suggest_ui urls={urls} shown=false");
+            }
+            // The phone's own iAP2 session, arriving down the event channel
+            // instead of the data stream. The reference accepts both, and the
+            // stream is the one used in practice; the bytes are the same either
+            // way, so they go to the same link.
+            Some("iAPSendMessage") => {
+                let data = params
+                    .and_then(|p| p.get("data"))
+                    .and_then(|v| v.as_data())
+                    .map(|d| d.to_vec());
+                match (data, self.tunnel.as_ref()) {
+                    (Some(data), Some(tunnel)) => {
+                        tracing::debug!("airplay.iap_message_in bytes={}", data.len());
+                        tunnel.feed(data);
+                    }
+                    (Some(_), None) => {
+                        tracing::warn!("airplay.iap_message_ignored reason=no_tunnel")
+                    }
+                    (None, _) => {
+                        tracing::warn!("airplay.iap_message_ignored reason=no_data")
+                    }
+                }
+            }
+            // The move is done: everything the phone needs now travels over
+            // Wi-Fi, so the Bluetooth link is only a way back in. Dropping it is
+            // what LIVI does, and what the phone expects — leaving it up costs a
+            // page and a second iAP2 session the tunnel cannot survive.
+            Some("disableBluetooth") => {
+                let named = params
+                    .and_then(|p| p.get("deviceID"))
+                    .and_then(|v| v.as_string())
+                    .unwrap_or("");
+                let mut phone = None;
+                self.status.with(|s| phone = s.carplay.phone.clone());
+                match mac_of(named, phone.as_deref()) {
+                    Some(mac) => {
+                        tracing::info!(
+                            "wireless.bt_disconnecting mac={mac} reason=disable_bluetooth"
+                        );
+                        let adapter = self.cfg.bt_adapter.clone();
+                        // Not awaited: the phone does not wait for this answer
+                        // before it stops using Bluetooth, and holding the
+                        // request open on a D-Bus call serves nobody.
+                        tokio::spawn(async move {
+                            if let Err(e) = crate::wireless::disconnect_phone(&mac, &adapter).await
+                            {
+                                tracing::warn!(
+                                    "wireless.bt_disconnect_failed mac={mac} err={e}"
+                                );
+                            }
+                        });
+                    }
+                    None => tracing::warn!(
+                        "wireless.bt_disconnect_skipped reason=no_address device={named:?}"
+                    ),
+                }
             }
             _ => Self::describe(&req.body),
         }
@@ -1117,6 +1195,15 @@ impl Session {
     /// it. A type with nothing open says nothing: a teardown that arrives twice,
     /// or once after the stream ended on its own, is not news.
     async fn close_stream(&mut self, stream_type: i64) {
+        // The iAP channel is not a pump: it is an iAP2 session of its own, and
+        // letting go of it both ends that session and clears the handover gate,
+        // which is what lets Bluetooth be paged again.
+        if stream_type == 130 {
+            if self.tunnel.take().is_some() {
+                tracing::info!("airplay.iap_tunnel_torn_down");
+            }
+            return;
+        }
         let mut closed = None;
         if let Some(pumps) = self.pumps.get_mut(&stream_type) {
             if !pumps.is_empty() {
@@ -1567,7 +1654,33 @@ impl Session {
                     );
                     replies.push(Value::Dictionary(entry));
                 }
-                // 130 is iAP-over-CarPlay; ignoring it costs nothing visible.
+                // 130 is iAP-over-CarPlay: the phone moving its iAP2 control
+                // channel onto this session. Only the iAP channel is this — the
+                // same number is used for video settings and video overlay,
+                // whose bodies mean something else entirely, and taking one of
+                // those for the control channel would strand the phone. Without
+                // a wireless session behind it there is nowhere to put iAP2, so
+                // the answer stays the port nobody listens on.
+                Some(130) => {
+                    let named = table
+                        .get("clientTypeUUID")
+                        .and_then(|v| v.as_string())
+                        .unwrap_or("");
+                    let seed = table.get("seed").and_then(seed_text);
+                    let mut entry = Dictionary::new();
+                    entry.insert("type".into(), Value::Integer(130.into()));
+                    entry.insert("streamID".into(), Value::Integer(stream_id.into()));
+                    match self.open_tunnel(named, seed, keys.shared).await {
+                        Ok(port) => {
+                            entry.insert("dataPort".into(), Value::Integer((port as i64).into()));
+                        }
+                        Err(why) => {
+                            tracing::warn!("airplay.iap_tunnel_skipped reason={why}");
+                            entry.insert("dataPort".into(), Value::Integer(UNUSED_PORT.into()));
+                        }
+                    }
+                    replies.push(Value::Dictionary(entry));
+                }
                 other => {
                     let mut entry = Dictionary::new();
                     entry.insert("type".into(), Value::Integer(other.unwrap_or(0).into()));
@@ -1581,6 +1694,38 @@ impl Session {
         body.insert("streams".into(), Value::Array(replies));
         let plist = to_binary(&Value::Dictionary(body)).map_err(|e| e.to_string())?;
         Ok(Response::new(200).plist(plist))
+    }
+
+    /// Opens the iAP2 data stream the phone just asked for, and answers with the
+    /// port to connect to.
+    ///
+    /// Nothing more than a listener is started here: the phone connects to it
+    /// during the media handshake and the session on it begins at RECORD.
+    /// Declining is not a failure — a wired run, or a stream that is not the iAP
+    /// channel, is answered exactly as it was before there was a tunnel at all.
+    async fn open_tunnel(
+        &mut self,
+        named: &str,
+        seed: Option<String>,
+        shared: [u8; 32],
+    ) -> Result<u16, String> {
+        let Some(setup) = self.tunnel_setup.clone() else {
+            return Err("not a wireless session".into());
+        };
+        if named != tunnel::IAP_DATASTREAM_UUID {
+            return Err(format!("client {named:?} is not the iAP channel"));
+        }
+        let Some(seed) = seed else {
+            return Err("the SETUP carried no seed".into());
+        };
+        if self.tunnel.is_some() {
+            return Err("a tunnel is already open on this session".into());
+        }
+        let (opened, port) = tunnel::Tunnel::open(shared, &seed, setup)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.tunnel = Some(opened);
+        Ok(port)
     }
 
     /// Opens the microphone uplink for a stream the phone says it will hear on.
@@ -2046,6 +2191,49 @@ impl Session {
     }
 }
 
+/// The seed as the phone wrote it, which the key derivation turns into a salt.
+///
+/// It arrives as a number in one version and as a string in another, and both
+/// spell the same salt — so both are read the same way rather than one of them
+/// being refused as malformed.
+fn seed_text(value: &Value) -> Option<String> {
+    match value {
+        Value::Integer(n) => Some(n.to_string()),
+        // A whole number written as a real is still the same digits.
+        Value::Real(f) if f.fract() == 0.0 && f.abs() < 1e21 => Some(format!("{}", *f as i64)),
+        Value::Real(f) => Some(f.to_string()),
+        Value::String(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// The address `disableBluetooth` is about.
+///
+/// The phone names one, but not always: the field carries its own identifier as
+/// often as an address. So the name is used when it is an address and the phone
+/// the Bluetooth session belonged to is used otherwise — that one is known from
+/// the link the message arrived to say goodbye to.
+fn mac_of(named: &str, fallback: Option<&str>) -> Option<String> {
+    for candidate in [Some(named), fallback].into_iter().flatten() {
+        if is_mac(candidate) {
+            return Some(candidate.to_uppercase());
+        }
+    }
+    None
+}
+
+/// Six pairs of hex digits and nothing else: `AA:BB:CC:DD:EE:FF`.
+fn is_mac(text: &str) -> bool {
+    let mut parts = 0;
+    for part in text.split(':') {
+        if part.len() != 2 || !part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return false;
+        }
+        parts += 1;
+    }
+    parts == 6
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2057,6 +2245,27 @@ mod tests {
             fps: 60,
             ui_scale,
         }
+    }
+
+    /// The phone names an address as often as it names its own identifier, so
+    /// what it says is used when it is an address and the link's own peer is
+    /// used otherwise.
+    #[test]
+    fn disable_bluetooth_names_a_mac() {
+        assert_eq!(
+            mac_of("aa:bb:cc:dd:ee:ff", Some("11:22:33:44:55:66")).as_deref(),
+            Some("AA:BB:CC:DD:EE:FF")
+        );
+        assert_eq!(
+            mac_of(
+                "8A3B4C5D-0000-0000-0000-000000000000",
+                Some("11:22:33:44:55:66")
+            )
+            .as_deref(),
+            Some("11:22:33:44:55:66")
+        );
+        assert_eq!(mac_of("", None), None);
+        assert_eq!(mac_of("aa:bb:cc:dd:ee", Some("nonsense")), None);
     }
 
     /// A percentage turns into a request for a canvas of `100/percent` the size.

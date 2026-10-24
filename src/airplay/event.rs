@@ -102,6 +102,40 @@ impl EventSink {
         outcome
     }
 
+    /// Hands the phone one message of its own iAP2 session.
+    ///
+    /// A wireless phone may move that session onto the CarPlay data stream, and
+    /// the way back from there is this channel: the stream only carries what the
+    /// phone sends. The bytes are passed through untouched — framing them is the
+    /// link's job, on both sides.
+    ///
+    /// Unlike a key press, losing one of these is not a lost press: it is a
+    /// message the phone will wait for. So a channel with nowhere to write is an
+    /// error rather than a dropped message, and the caller decides what that
+    /// means for the session.
+    pub(crate) async fn send_iap(self: &Arc<Self>, data: Vec<u8>) -> std::io::Result<()> {
+        let key = self.key.lock().await.clone();
+        let Some(key) = key else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "the event channel has no keys yet",
+            ));
+        };
+        let mut guard = self.writer.lock().await;
+        let Some((_, writer)) = guard.as_mut() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "the phone has not opened the event channel",
+            ));
+        };
+        let mut counter = self.counter.lock().await;
+        let mut ch = EventChannel::new(key, &mut *writer);
+        ch.set_counter(*counter);
+        let outcome = ch.iap_message(data).await;
+        *counter = ch.counter();
+        outcome
+    }
+
     /// Gives up the write half once the connection it belongs to has gone.
     ///
     /// Left here it would outlive the session: the phone closes the event
@@ -357,6 +391,20 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
     async fn telephony_momentary(&mut self, index: u8) -> std::io::Result<()> {
         self.hid_report(TELEPHONY_HID_UID, vec![index]).await?;
         self.hid_report(TELEPHONY_HID_UID, vec![0]).await
+    }
+
+    /// One message of the phone's own iAP2 session, carried back to it.
+    ///
+    /// The payload is the raw iAP2 bytes: the phone hands them to the same
+    /// session it moved onto the data stream, and nothing here needs to know
+    /// what they say.
+    async fn iap_message(&mut self, data: Vec<u8>) -> std::io::Result<()> {
+        let mut params = Dictionary::new();
+        params.insert("data".into(), Value::Data(data));
+        let mut d = Dictionary::new();
+        d.insert("type".into(), Value::String("iAPSendMessage".into()));
+        d.insert("params".into(), Value::Dictionary(params));
+        self.send(d).await
     }
 
     /// A session command.

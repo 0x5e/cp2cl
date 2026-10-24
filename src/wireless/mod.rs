@@ -16,6 +16,7 @@
 //! the channel it opens.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use livi_runtime::bringup::{run_accessory, CpConfig, OnCable};
@@ -46,6 +47,37 @@ static ON_AIR: Mutex<Option<OnAir>> = Mutex::new(None);
 
 fn on_air() -> Option<OnAir> {
     ON_AIR.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Whether the phone has moved its iAP2 session off Bluetooth and onto the
+/// AirPlay data stream.
+///
+/// While it has, Bluetooth must not be paged: a page pulls the phone back onto
+/// a second iAP2 session and gets another `CarPlayStartSession` ready for it —
+/// the one thing the stream that just took over cannot survive. Set when the
+/// data stream's connection is accepted rather than when the phone asks for it:
+/// a stream that is never connected is a phone that will never send
+/// `disableBluetooth`, and holding the page back for that would only leave it
+/// unreachable. Cleared when the AirPlay session the stream belongs to ends,
+/// which is also the moment paging should resume.
+pub(crate) struct Handover(AtomicBool);
+
+impl Handover {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self(AtomicBool::new(false)))
+    }
+
+    pub(crate) fn live(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn set(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn clear(&self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 /// Everything a wireless iAP2 session is built from.
@@ -338,6 +370,40 @@ pub(crate) fn short(mac: &str) -> String {
     } else {
         mac.to_uppercase()
     }
+}
+
+/// Drops the phone's Bluetooth link, which is what `disableBluetooth` asks for.
+///
+/// By the time the phone sends that it has moved iAP2 onto the CarPlay data
+/// stream, so the Bluetooth link is carrying nothing worth keeping — and
+/// leaving it up is what would let a page pull the phone back onto it. BlueZ
+/// owns the link, so this is one D-Bus call on the device object the address
+/// names; a failure is not fatal, because the phone closing the RFCOMM channel
+/// itself does the same job a moment later.
+pub(crate) async fn disconnect_phone(mac: &str, adapter: &str) -> Result<(), String> {
+    let path = device_path(adapter, mac);
+    let conn = zbus::Connection::system()
+        .await
+        .map_err(|e| format!("system bus: {e}"))?;
+    conn.call_method(
+        Some("org.bluez"),
+        path.as_str(),
+        Some("org.bluez.Device1"),
+        "Disconnect",
+        &(),
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| format!("{path}: {e}"))
+}
+
+/// `/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF`, which is how BlueZ names a device.
+/// The inverse of what `page` reads back out of the object path.
+fn device_path(adapter: &str, mac: &str) -> String {
+    format!(
+        "/org/bluez/{adapter}/dev_{}",
+        mac.replace(':', "_").to_uppercase()
+    )
 }
 
 /// Refuse to start a session we cannot finish: without a network to name, the
