@@ -198,48 +198,31 @@ function utc8(d) {
     pad(t.getUTCMinutes(), 2) + ":" + pad(t.getUTCSeconds(), 2);
 }
 
-const CHANNEL_MAP = {
-  "20012100": "DUAL_AUDIO_TRACK",
-  "20022100": "HYUNDAI", "20022101": "LFSONATA", "20022102": "CFMISTRA",
-  "20022103": "MDAVANTE", "20022104": "LMIX35", "20022105": "GCIX25",
-  "20022106": "GRANDSANTEFE",
-  "20032100": "KIA", "20032101": "KX5", "20032102": "K3",
-  "20041100": "AUDI", "20042100": "AUDI_DUAL_AUDIO",
-  "20051100": "SHANGHAIGM",
-  "20062100": "DAIMLER",
-  "20071100": "PANASONIC",
-  "20081100": "VOLKSWAGEN",
-  "20092100": "CHANGAN", "20092101": "CS15", "20092102": "V716",
-  "20092103": "CS3516", "20092104": "YIDONG16", "20092105": "RUICHENG16",
-  "20101100": "HARMAN",
-  "20111100": "DELPHI",
-  "20122100": "HUAYANG_MTK3360", "20122101": "HUAYANG_MTK8317",
-  "20131100": "ALPINE",
-  "20141100": "PIONEER",
-  "20152100": "ROADROVER_MSTAR786", "20152101": "ROADROVER_QUANZHI",
-  "20152102": "ROADROVER_MTK8317", "20152200": "ROADROVER_MSTAR786_2",
-  "20162100": "FEIGE_G6", "20162101": "FEIGE_G8", "20162102": "FEIGE_G9",
-  "20171100": "WISTEON",
-  "20181100": "上汽通用_CADILLAC", "20182100": "CADILLAC_DUAL_AUDIO",
-  "20191100": "上汽通用_BUICK", "20192100": "BUICK_DUAL_AUDIO",
-  "20201100": "上汽通用_CHEVROLET", "20202100": "CHEVROLET_DUAL_AUDIO",
-  "20211100": "BYD",
-  "20222101": "YUANFENG", "20222102": "YUANFENG_CSRA", "20222103": "CHEVROLET_K216",
-  "20282119": "YIQIFENGTIAN_COROLLA_DA", "20282120": "COROLLA_GSHV",
-  "20282126": "IZOA_PANASONIC",
-  "20302100": "KAIYUE",
-  "20312173": "GELLYAUTO_GEOMETRY",
-  "20452100": "GUANGFENG_LEVIN", "20452101": "HIGHLANDER",
-  "20452102": "AVN", "20452106": "LEVIN_PHV",
-  "20482100": "YUANFENG_ELH_PCBA", "20482101": "YUANFENG_ONLINE",
-  "20542100": "YUANFENG_YILI",
-  "21070001": "TOYOTA_RAV4",
-};
+// The channel table comes from the binary, the same file /info takes its labels
+// from: one entry per make, holding the numbers it answers on and the code that
+// names it. It is asked for once, when the page is opened — a table compiled
+// into the binary does not change while the program runs.
+const CHANNEL_MAP = {};
+
+async function loadChannels() {
+  try {
+    const response = await fetch("/api/channels", { cache: "no-store" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    for (const entry of await response.json()) {
+      const code = entry.code || "UNKNOWN";
+      for (const channel of entry.channels || []) {
+        if (channel && channel.id) CHANNEL_MAP[String(channel.id).trim()] = code;
+      }
+    }
+  } catch (e) {
+    // No table is a page that shows the number alone, which is still the number.
+  }
+}
 
 function channelLabel(raw) {
   if (!raw) return null;
-  const name = CHANNEL_MAP[raw.trim()];
-  return name ? raw + " (" + name + ")" : raw;
+  const id = raw.trim();
+  return id + " (" + (CHANNEL_MAP[id] || "UNKNOWN") + ")";
 }
 
 const CARLIFE_UP = d => d.session_up === true;
@@ -607,9 +590,13 @@ function schedule() {
   if (tab === "log") logTick();
 }
 
-select("status");
-setInterval(schedule, 2000);
-document.addEventListener("visibilitychange", schedule);
+// The channel table is asked for before the first status, so the first answer is
+// drawn with the make already known instead of being redrawn a poll later.
+loadChannels().then(() => {
+  select("status");
+  setInterval(schedule, 2000);
+  document.addEventListener("visibilitychange", schedule);
+});
 </script>
 </body>
 </html>

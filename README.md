@@ -673,8 +673,8 @@ program says so and carries on, because the streams are the bridge and the page
 is not.
 
 The page asks for nothing over the network of its own: it polls `GET /api/status`
-every two seconds and redraws from what comes back. That endpoint is the whole
-API, and it answers with the same snapshot the page shows:
+every two seconds and redraws from what comes back. That endpoint carries the
+same snapshot the page shows:
 
 ```json
 { "carlife": { ... }, "carplay": { ... }, "now_playing": { ... }, "device": { ... } }
@@ -690,13 +690,18 @@ name would be one song's picture drawn as another's and cached under it for a
 year. A new song arrives without a cover and puts the last one down — see
 [Now playing](#now-playing).
 
+The channel table is the other answer outside the snapshot: `GET /api/channels`
+is `assets/carlife_channel_map.json` as written, asked for once when the page is
+opened. It is the same file `GET /info` takes its icon labels from, so a make
+added by hand is named on the page by its code and drawn on the phone, both from
+the one table. A number the table does not hold is shown as `UNKNOWN`.
+
 A field is either a value or `null`, and `null` means the thing it describes has
 not happened yet — a car that has not asked for its six identifiers has six
-`null`s, not six empty strings. Every value is one the program observed, apart from
-the two the page adds itself: the vendor name a channel number maps to, and the
-codec this bridge only ever sends. The fields belonging to a connection are cleared
-when that connection ends, so a page left open shows the present rather than the
-last session.
+`null`s, not six empty strings. Every value is one the program observed, apart
+from the codec, which the page names from the stream being sent. The fields
+belonging to a connection are cleared when that connection ends, so a page left
+open shows the present rather than the last session.
 
 Both sections are short on purpose. What is worth reading there is the two ends
 side by side — the resolution the car agreed to against the one the phone renders,
@@ -919,7 +924,7 @@ this a derivative work, so cp2cl inherits that.
 | `src/assets.rs` | the lookup over `assets/`: what the binary carries besides code |
 | `assets/` | the icons, the channel table and the status page — `build.rs` includes every file here, so adding one is enough to be able to ask for it by name |
 | `assets/icons/` | the icon `GET /info` puts on the phone's screen, two sizes per make, `Default-*` for the rest |
-| `assets/carlife_channel_map.json` | the head unit's channel number, and the label worth showing for it |
+| `assets/carlife_channel_map.json` | one entry per make: its code, the channel numbers it answers on, and the label worth showing for it |
 | `assets/web/index.html` | the page itself — one file, four sections, polling |
 | `assets/web/vendor/weui.min.css` | its stylesheet, vendored so the page needs no network |
 | `Makefile` | the binary for the board, the tests, and the card image — each in its own container |

@@ -13,6 +13,11 @@
 //! what, and `device` for the one part of it that nobody reports: the board's own
 //! CPU and memory, sampled on a task of its own.
 //!
+//! `/api/channels` is the channel table, asked for once when the page is opened.
+//! It is the same file `/info` takes its labels from, handed over as it is
+//! written: the page names a head unit's make from it, and a table compiled into
+//! the binary is not one a second copy in the page could keep up with.
+//!
 //! `/api/cover` is the one answer that is not JSON: the song's picture, which
 //! the page draws rather than reads. It is fetched by the name of the cover —
 //! a hash of the picture — so a page that has one keeps it and asks again only
@@ -56,6 +61,10 @@ use crate::logging;
 /// alongside it and nothing to fetch over a network the board may not have.
 const PAGE_NAME: &str = "web/index.html";
 const WEUI_NAME: &str = "web/vendor/weui.min.css";
+/// The channel table, which the page reads the make of a head unit out of. The
+/// same file `/info` takes its labels from: one table, so a make added by hand
+/// is named on the page without a second copy to keep in step.
+const CHANNELS_NAME: &str = "carlife_channel_map.json";
 
 /// One of those two, which is in the binary because `build.rs` put every file
 /// under `assets/` there. A name it does not have is a build that lost a file,
@@ -98,6 +107,7 @@ pub async fn serve(listener: TcpListener, status: Arc<Status>) {
         .route("/index.html", get(page))
         .route("/vendor/weui.min.css", get(stylesheet))
         .route("/api/status", get(api))
+        .route("/api/channels", get(channels))
         .route("/api/cover", get(cover))
         .route("/api/log", get(log))
         .route("/api/log/download", get(download))
@@ -130,6 +140,17 @@ async fn api(State(status): State<Arc<Status>>) -> Response {
         status.json().to_string(),
     )
         .into_response()
+}
+
+/// The channel table as the binary carries it: one entry per make, each with the
+/// channel numbers it answers on and, where there is one, the label the phone
+/// draws. Answered as it is written rather than as a table built here, so what a
+/// browser is given is what `/info` is given.
+///
+/// The page asks for it once, when it is opened: the table is built in and does
+/// not change while the program runs.
+async fn channels() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, JSON)], embedded(CHANNELS_NAME))
 }
 
 /// The picture on the car's panel, which is the one answer here that is not
@@ -312,6 +333,25 @@ mod tests {
         assert!(
             weui_text().contains(".weui-cells"),
             "which is the one that was vendored"
+        );
+    }
+
+    /// The channel table is the binary's, and the page keeps no copy: a make
+    /// added to the file by hand is named on the page, and on the phone, from
+    /// the one table — there is nothing else to remember to edit.
+    #[test]
+    fn the_page_reads_the_channel_table_from_the_binary() {
+        assert!(
+            page_text().contains("/api/channels"),
+            "the page asks for the table"
+        );
+        assert!(
+            !page_text().contains("20062100"),
+            "and carries no numbers of its own"
+        );
+        assert!(
+            embedded(CHANNELS_NAME).contains("20062100"),
+            "which the binary has"
         );
     }
 

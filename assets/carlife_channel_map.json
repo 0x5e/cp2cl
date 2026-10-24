@@ -1,183 +1,73 @@
-{
-  "20012100": {
-    "code": "DUAL_AUDIO_TRACK"
-  },
-  "20022100": {
-    "code": "HYUNDAI"
-  },
-  "20022101": {
-    "code": "LFSONATA"
-  },
-  "20022102": {
-    "code": "CFMISTRA"
-  },
-  "20022103": {
-    "code": "MDAVANTE"
-  },
-  "20022104": {
-    "code": "LMIX35"
-  },
-  "20022105": {
-    "code": "GCIX25"
-  },
-  "20022106": {
-    "code": "GRANDSANTEFE"
-  },
-  "20032100": {
-    "code": "KIA"
-  },
-  "20032101": {
-    "code": "KX5"
-  },
-  "20032102": {
-    "code": "K3"
-  },
-  "20041100": {
-    "code": "AUDI"
-  },
-  "20042100": {
-    "code": "AUDI_DUAL_AUDIO"
-  },
-  "20051100": {
-    "code": "SHANGHAIGM"
-  },
-  "20062100": {
+[
+  { "code": "DUAL_AUDIO_TRACK", "channels": [{ "id": "20012100" }] },
+  { "code": "HYUNDAI", "channels": [{ "id": "20022100" }] },
+  { "code": "LFSONATA", "channels": [{ "id": "20022101" }] },
+  { "code": "CFMISTRA", "channels": [{ "id": "20022102" }] },
+  { "code": "MDAVANTE", "channels": [{ "id": "20022103" }] },
+  { "code": "LMIX35", "channels": [{ "id": "20022104" }] },
+  { "code": "GCIX25", "channels": [{ "id": "20022105" }] },
+  { "code": "GRANDSANTEFE", "channels": [{ "id": "20022106" }] },
+  { "code": "KIA", "channels": [{ "id": "20032100" }] },
+  { "code": "KX5", "channels": [{ "id": "20032101" }] },
+  { "code": "K3", "channels": [{ "id": "20032102" }] },
+  { "code": "AUDI", "channels": [{ "id": "20041100" }] },
+  { "code": "AUDI_DUAL_AUDIO", "channels": [{ "id": "20042100" }] },
+  { "code": "SHANGHAIGM", "channels": [{ "id": "20051100" }] },
+  {
     "code": "DAIMLER",
-    "label": "Mercedes"
+    "label": "Mercedes",
+    "channels": [
+      { "id": "20062100" },
+      { "id": "20062101" },
+      { "id": "20062102" },
+      { "id": "20062103" },
+      { "id": "20062104" },
+      { "id": "20062105" }
+    ]
   },
-  "20071100": {
-    "code": "PANASONIC"
-  },
-  "20081100": {
-    "code": "VOLKSWAGEN"
-  },
-  "20092100": {
-    "code": "CHANGAN"
-  },
-  "20092101": {
-    "code": "CS15"
-  },
-  "20092102": {
-    "code": "V716"
-  },
-  "20092103": {
-    "code": "CS3516"
-  },
-  "20092104": {
-    "code": "YIDONG16"
-  },
-  "20092105": {
-    "code": "RUICHENG16"
-  },
-  "20101100": {
-    "code": "HARMAN"
-  },
-  "20111100": {
-    "code": "DELPHI"
-  },
-  "20122100": {
-    "code": "HUAYANG_MTK3360"
-  },
-  "20122101": {
-    "code": "HUAYANG_MTK8317"
-  },
-  "20131100": {
-    "code": "ALPINE"
-  },
-  "20141100": {
-    "code": "PIONEER"
-  },
-  "20152100": {
-    "code": "ROADROVER_MSTAR786"
-  },
-  "20152101": {
-    "code": "ROADROVER_QUANZHI"
-  },
-  "20152102": {
-    "code": "ROADROVER_MTK8317"
-  },
-  "20152200": {
-    "code": "ROADROVER_MSTAR786_2"
-  },
-  "20162100": {
-    "code": "FEIGE_G6"
-  },
-  "20162101": {
-    "code": "FEIGE_G8"
-  },
-  "20162102": {
-    "code": "FEIGE_G9"
-  },
-  "20171100": {
-    "code": "WISTEON"
-  },
-  "20181100": {
-    "code": "上汽通用_CADILLAC"
-  },
-  "20182100": {
-    "code": "CADILLAC_DUAL_AUDIO"
-  },
-  "20191100": {
-    "code": "上汽通用_BUICK"
-  },
-  "20192100": {
-    "code": "BUICK_DUAL_AUDIO"
-  },
-  "20201100": {
-    "code": "上汽通用_CHEVROLET"
-  },
-  "20202100": {
-    "code": "CHEVROLET_DUAL_AUDIO"
-  },
-  "20211100": {
-    "code": "BYD"
-  },
-  "20222101": {
-    "code": "YUANFENG"
-  },
-  "20222102": {
-    "code": "YUANFENG_CSRA"
-  },
-  "20222103": {
-    "code": "CHEVROLET_K216"
-  },
-  "20282119": {
-    "code": "YIQIFENGTIAN_COROLLA_DA"
-  },
-  "20282120": {
-    "code": "COROLLA_GSHV"
-  },
-  "20282126": {
-    "code": "IZOA_PANASONIC"
-  },
-  "20302100": {
-    "code": "KAIYUE"
-  },
-  "20312173": {
-    "code": "GELLYAUTO_GEOMETRY"
-  },
-  "20452100": {
-    "code": "GUANGFENG_LEVIN"
-  },
-  "20452101": {
-    "code": "HIGHLANDER"
-  },
-  "20452102": {
-    "code": "AVN"
-  },
-  "20452106": {
-    "code": "LEVIN_PHV"
-  },
-  "20482100": {
-    "code": "YUANFENG_ELH_PCBA"
-  },
-  "20482101": {
-    "code": "YUANFENG_ONLINE"
-  },
-  "20542100": {
-    "code": "YUANFENG_YILI"
-  },
-  "21070001": {
-    "code": "TOYOTA_RAV4"
-  }
-}
+  { "code": "PANASONIC", "channels": [{ "id": "20071100" }] },
+  { "code": "VOLKSWAGEN", "channels": [{ "id": "20081100" }] },
+  { "code": "CHANGAN", "channels": [{ "id": "20092100" }] },
+  { "code": "CS15", "channels": [{ "id": "20092101" }] },
+  { "code": "V716", "channels": [{ "id": "20092102" }] },
+  { "code": "CS3516", "channels": [{ "id": "20092103" }] },
+  { "code": "YIDONG16", "channels": [{ "id": "20092104" }] },
+  { "code": "RUICHENG16", "channels": [{ "id": "20092105" }] },
+  { "code": "HARMAN", "channels": [{ "id": "20101100" }] },
+  { "code": "DELPHI", "channels": [{ "id": "20111100" }] },
+  { "code": "HUAYANG_MTK3360", "channels": [{ "id": "20122100" }] },
+  { "code": "HUAYANG_MTK8317", "channels": [{ "id": "20122101" }] },
+  { "code": "ALPINE", "channels": [{ "id": "20131100" }] },
+  { "code": "PIONEER", "channels": [{ "id": "20141100" }] },
+  { "code": "ROADROVER_MSTAR786", "channels": [{ "id": "20152100" }] },
+  { "code": "ROADROVER_QUANZHI", "channels": [{ "id": "20152101" }] },
+  { "code": "ROADROVER_MTK8317", "channels": [{ "id": "20152102" }] },
+  { "code": "ROADROVER_MSTAR786_2", "channels": [{ "id": "20152200" }] },
+  { "code": "FEIGE_G6", "channels": [{ "id": "20162100" }] },
+  { "code": "FEIGE_G8", "channels": [{ "id": "20162101" }] },
+  { "code": "FEIGE_G9", "channels": [{ "id": "20162102" }] },
+  { "code": "WISTEON", "channels": [{ "id": "20171100" }] },
+  { "code": "上汽通用_CADILLAC", "channels": [{ "id": "20181100" }] },
+  { "code": "CADILLAC_DUAL_AUDIO", "channels": [{ "id": "20182100" }] },
+  { "code": "上汽通用_BUICK", "channels": [{ "id": "20191100" }] },
+  { "code": "BUICK_DUAL_AUDIO", "channels": [{ "id": "20192100" }] },
+  { "code": "上汽通用_CHEVROLET", "channels": [{ "id": "20201100" }] },
+  { "code": "CHEVROLET_DUAL_AUDIO", "channels": [{ "id": "20202100" }] },
+  { "code": "BYD", "channels": [{ "id": "20211100" }] },
+  { "code": "YUANFENG", "channels": [{ "id": "20222101" }] },
+  { "code": "YUANFENG_CSRA", "channels": [{ "id": "20222102" }] },
+  { "code": "CHEVROLET_K216", "channels": [{ "id": "20222103" }] },
+  { "code": "YIQIFENGTIAN_COROLLA_DA", "channels": [{ "id": "20282119" }] },
+  { "code": "COROLLA_GSHV", "channels": [{ "id": "20282120" }] },
+  { "code": "IZOA_PANASONIC", "channels": [{ "id": "20282126" }] },
+  { "code": "KAIYUE", "channels": [{ "id": "20302100" }] },
+  { "code": "GELLYAUTO_GEOMETRY", "channels": [{ "id": "20312173" }] },
+  { "code": "GUANGFENG_LEVIN", "channels": [{ "id": "20452100" }] },
+  { "code": "HIGHLANDER", "channels": [{ "id": "20452101" }] },
+  { "code": "AVN", "channels": [{ "id": "20452102" }] },
+  { "code": "LEVIN_PHV", "channels": [{ "id": "20452106" }] },
+  { "code": "YUANFENG_ELH_PCBA", "channels": [{ "id": "20482100" }] },
+  { "code": "YUANFENG_ONLINE", "channels": [{ "id": "20482101" }] },
+  { "code": "YUANFENG_YILI", "channels": [{ "id": "20542100" }] },
+  { "code": "TOYOTA_RAV4", "channels": [{ "id": "21070001" }] }
+]

@@ -105,20 +105,33 @@ const DEFAULT_LABEL: &str = "App";
 
 /// The channel number a head unit reports, and the label worth showing for it.
 ///
-/// The table is `assets/carlife_channel_map.json`, the page's own mapping with a
-/// `label` added where a make has one. Only those labels are kept: `code` names
-/// the head unit family on the page and is not part of this answer.
+/// The table is `assets/carlife_channel_map.json`: one entry per make, holding
+/// the channel numbers that make answers on and — for the makes we ship a
+/// picture for — the `label` the phone draws under the icon. A make with several
+/// numbers is one entry with several `channels`, which is why the table is not
+/// keyed by the number. Only entries that name a label are kept: `code` names the
+/// head unit on the page and is not part of this answer.
 static CHANNEL_LABELS: OnceLock<HashMap<String, String>> = OnceLock::new();
 
 fn channel_labels() -> &'static HashMap<String, String> {
     CHANNEL_LABELS.get_or_init(|| {
         let table = crate::assets::text("carlife_channel_map.json")
             .expect("the channel map is built into the binary");
-        let map: HashMap<String, HashMap<String, String>> =
+        let entries: Vec<serde_json::Value> =
             serde_json::from_str(table).expect("the channel map is valid JSON");
-        map.into_iter()
-            .filter_map(|(channel, entry)| Some((channel, entry.get("label")?.clone())))
-            .collect()
+        let mut labels = HashMap::new();
+        for entry in entries {
+            // No label, or a blank one, is a make with no picture of its own.
+            let label = entry["label"].as_str().unwrap_or("").trim();
+            if label.is_empty() {
+                continue;
+            }
+            let channels = entry["channels"].as_array().into_iter().flatten();
+            for id in channels.filter_map(|channel| channel["id"].as_str()) {
+                labels.insert(id.trim().to_string(), label.to_string());
+            }
+        }
+        labels
     })
 }
 
@@ -482,11 +495,16 @@ mod tests {
 
     /// A channel with a label of its own gets that label and the matching
     /// picture; every other channel, and no channel at all, gets the default.
+    /// The label belongs to the make, so every number the make answers on gets
+    /// it — not just the first.
     #[test]
     fn a_channel_names_its_own_icon() {
-        assert_eq!(oem_label(Some("20062100")), "Mercedes");
+        for channel in ["20062100", "20062101", "20062104"] {
+            assert_eq!(oem_label(Some(channel)), "Mercedes", "{channel} is a Mercedes");
+        }
         assert_eq!(oem_label(Some(" 20062100 ")), "Mercedes");
-        assert_eq!(oem_label(Some("20012100")), DEFAULT_LABEL);
+        assert_eq!(oem_label(Some("20062106")), DEFAULT_LABEL, "not a number it answers on");
+        assert_eq!(oem_label(Some("20012100")), DEFAULT_LABEL, "a make with no label");
         assert_eq!(oem_label(None), DEFAULT_LABEL);
         assert_ne!(icon("Mercedes", 256), icon(DEFAULT_LABEL, 256));
 
@@ -506,5 +524,31 @@ mod tests {
             .and_then(Value::as_data)
             .expect("the picture is carried");
         assert_eq!(&png[..4], b"\x89PNG");
+    }
+
+    /// The table is edited by hand, and the two mistakes that cost something are
+    /// silent ones: a make with no number answers nothing, and a number listed
+    /// twice is answered by whichever entry came last. Both fail here instead.
+    #[test]
+    fn a_channel_number_belongs_to_one_make() {
+        let table = crate::assets::text("carlife_channel_map.json")
+            .expect("the channel map is built into the binary");
+        let entries: Vec<serde_json::Value> =
+            serde_json::from_str(table).expect("the channel map is valid JSON");
+
+        let mut seen = std::collections::HashSet::new();
+        for entry in &entries {
+            let code = entry["code"].as_str().unwrap_or_default().trim();
+            assert!(!code.is_empty(), "every entry names a code");
+            let channels = entry["channels"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{code} lists its channels"));
+            assert!(!channels.is_empty(), "{code} answers on a number");
+            for channel in channels {
+                let id = channel["id"].as_str().unwrap_or_default().trim();
+                assert!(!id.is_empty(), "{code} has a number that is not blank");
+                assert!(seen.insert(id.to_string()), "{id} is listed under two makes");
+            }
+        }
     }
 }
