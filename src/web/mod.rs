@@ -13,6 +13,11 @@
 //! what, and `device` for the one part of it that nobody reports: the board's own
 //! CPU and memory, sampled on a task of its own.
 //!
+//! `/api/channels` is the channel table, asked for once when the page is opened.
+//! It is the same file `/info` takes its labels from, handed over as it is
+//! written: the page names a head unit's make from it, and a table compiled into
+//! the binary is not one a second copy in the page could keep up with.
+//!
 //! `/api/cover` is the one answer that is not JSON: the song's picture, which
 //! the page draws rather than reads. It is fetched by the name of the cover —
 //! a hash of the picture — so a page that has one keeps it and asks again only
@@ -56,6 +61,10 @@ use crate::logging;
 /// alongside it and nothing to fetch over a network the board may not have.
 const PAGE_NAME: &str = "web/index.html";
 const WEUI_NAME: &str = "web/vendor/weui.min.css";
+/// The channel table, which the page reads the make of a head unit out of. The
+/// same file `/info` takes its labels from: one table, so a make added by hand
+/// is named on the page without a second copy to keep in step.
+const CHANNELS_NAME: &str = "carlife_channel_map.json";
 
 /// One of those two, which is in the binary because `build.rs` put every file
 /// under `assets/` there. A name it does not have is a build that lost a file,
@@ -98,6 +107,7 @@ pub async fn serve(listener: TcpListener, status: Arc<Status>) {
         .route("/index.html", get(page))
         .route("/vendor/weui.min.css", get(stylesheet))
         .route("/api/status", get(api))
+        .route("/api/channels", get(channels))
         .route("/api/cover", get(cover))
         .route("/api/log", get(log))
         .route("/api/log/download", get(download))
@@ -132,6 +142,17 @@ async fn api(State(status): State<Arc<Status>>) -> Response {
         .into_response()
 }
 
+/// The channel table as the binary carries it: one entry per make, each with the
+/// channel numbers it answers on and, where there is one, the label the phone
+/// draws. Answered as it is written rather than as a table built here, so what a
+/// browser is given is what `/info` is given.
+///
+/// The page asks for it once, when it is opened: the table is built in and does
+/// not change while the program runs.
+async fn channels() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, JSON)], embedded(CHANNELS_NAME))
+}
+
 /// The picture on the car's panel, which is the one answer here that is not
 /// JSON.
 ///
@@ -163,12 +184,6 @@ async fn cover(State(status): State<Arc<Status>>, RawQuery(query): RawQuery) -> 
         .into_response()
 }
 
-/// How much of the copy one fetch may carry, in bytes.
-///
-/// A page that has been closed for an hour catches up over the next few polls
-/// rather than being handed four megabytes the moment it is opened again.
-const LOG_CHUNK: u64 = 256 * 1024;
-
 /// The copy of the log, from the byte the page has read up to.
 ///
 /// Asked for by offset rather than in full: the copy is written continuously
@@ -178,8 +193,8 @@ const LOG_CHUNK: u64 = 256 * 1024;
 /// `reset` is the one way an offset can turn out to be nowhere: the copy was
 /// rolled over and is now shorter than where the page had got to, or the
 /// program has run again. Either way the page is told to drop what it had, and
-/// is given the last chunk of the copy — which is where a page that asks for
-/// nothing at all starts too.
+/// is given the copy from its beginning — which is what a page that asks for
+/// nothing at all is given too.
 async fn log(RawQuery(query): RawQuery) -> Response {
     let (reset, from, text) = copied(Path::new(logging::PATH), from(&query)).await;
     (
@@ -201,9 +216,10 @@ async fn log(RawQuery(query): RawQuery) -> Response {
 /// What has been written to the copy since `from`, which is `None` when the
 /// page has not asked for a place in it yet.
 ///
-/// No offset means the end of the copy, not the beginning of it: a page that
-/// has just been opened is asking what is happening now, and the copy it is
-/// looking at may be four megabytes of a run that started an hour ago.
+/// No offset means the whole of the copy, not the end of it. The copy is capped
+/// at four megabytes, so handing all of it over is bounded, and a page that
+/// opens at the tail would only ever be able to read forward from wherever it
+/// was opened.
 async fn copied(path: &Path, from: Option<u64>) -> (bool, u64, String) {
     // No copy yet, or one that cannot be read, is an empty one: the page shows
     // nothing and asks again.
@@ -214,14 +230,13 @@ async fn copied(path: &Path, from: Option<u64>) -> (bool, u64, String) {
     let (reset, from) = match from {
         Some(at) if at <= written => (false, at),
         // Nowhere in this copy: either it was rolled over and is shorter than
-        // where the page had got to, or the program has run again. The last
-        // chunk of it is what is shown, since that is where the story is.
-        _ => (true, written.saturating_sub(LOG_CHUNK)),
+        // where the page had got to, or the program has run again.
+        _ => (true, 0),
     };
 
     let mut bytes = Vec::new();
     if file.seek(std::io::SeekFrom::Start(from)).await.is_ok() {
-        let _ = file.take(LOG_CHUNK).read_to_end(&mut bytes).await;
+        let _ = file.read_to_end(&mut bytes).await;
     }
     (reset, from, String::from_utf8_lossy(&bytes).into_owned())
 }
@@ -318,6 +333,25 @@ mod tests {
         assert!(
             weui_text().contains(".weui-cells"),
             "which is the one that was vendored"
+        );
+    }
+
+    /// The channel table is the binary's, and the page keeps no copy: a make
+    /// added to the file by hand is named on the page, and on the phone, from
+    /// the one table — there is nothing else to remember to edit.
+    #[test]
+    fn the_page_reads_the_channel_table_from_the_binary() {
+        assert!(
+            page_text().contains("/api/channels"),
+            "the page asks for the table"
+        );
+        assert!(
+            !page_text().contains("20062100"),
+            "and carries no numbers of its own"
+        );
+        assert!(
+            embedded(CHANNELS_NAME).contains("20062100"),
+            "which the binary has"
         );
     }
 
@@ -585,18 +619,19 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
-    /// A page that has just been opened asks what is happening now: the answer
-    /// is the last chunk of the copy, not four megabytes from an hour ago.
+    /// A page that has just been opened is given the whole of the copy, not the
+    /// tail of it: the copy is capped at four megabytes, and a page that opened
+    /// at the tail could only ever read forward from there.
     #[tokio::test]
-    async fn the_log_opens_at_its_tail() {
+    async fn the_log_opens_at_its_beginning() {
         let path = std::env::temp_dir().join(format!("cp2cl-tail-{}", std::process::id()));
         let line = "x".repeat(99) + "\n";
         std::fs::write(&path, line.repeat(3000)).unwrap();
 
         let (reset, from, text) = copied(&path, None).await;
         assert!(reset, "a page with no offset starts over");
-        assert_eq!(from, 300_000 - LOG_CHUNK, "at the last chunk of the copy");
-        assert_eq!(text.len() as u64, LOG_CHUNK);
+        assert_eq!(from, 0, "at the beginning of the copy");
+        assert_eq!(text.len(), 300_000, "and carries all of it");
 
         std::fs::remove_file(&path).ok();
     }

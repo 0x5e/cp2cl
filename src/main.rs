@@ -59,10 +59,11 @@ async fn main() -> Result<()> {
     // page reads and what is still there of a run that has ended. See
     // `logging::Journal` for how the copy is kept to size.
     //
-    // The level is the terminal's alone: the copy takes every level there is.
-    // A terminal is watched as it happens, and a run cannot be dialled up to
-    // `debug` after the fact, so what is left on disk is what a question about
-    // that run is answered from — and it is asked once the run is over.
+    // The terminal is held to `CP2CL_LOG_LEVEL`, the copy is not: a run cannot
+    // be dialled up to `debug` after the fact, so what is left on disk is what
+    // a question about that run is answered from, and it is asked once the run
+    // is over. `trace` is below both of them — nothing writes it, and what did
+    // would be the internals of other people's crates.
     let journal = logging::Journal::open();
     let unnoticed = journal.reason().map(str::to_owned);
     tracing_subscriber::registry()
@@ -75,7 +76,8 @@ async fn main() -> Result<()> {
             tracing_subscriber::fmt::layer()
                 .event_format(logging::Line)
                 .with_ansi(false)
-                .with_writer(journal),
+                .with_writer(journal)
+                .with_filter(tracing::level_filters::LevelFilter::DEBUG),
         )
         .init();
     if let Some(reason) = unnoticed {

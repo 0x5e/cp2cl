@@ -395,12 +395,12 @@ mod tests {
     }
 
     #[test]
-    fn the_copy_takes_every_level_even_the_ones_the_terminal_is_spared() {
+    fn the_copy_takes_debug_but_not_trace() {
         let (path, previous) = (scratch("levels.log"), scratch("levels.log.1"));
         let journal = Journal::at(&path, &previous);
 
-        // The same pair the program installs: the level filter is on the
-        // terminal's layer, and the copy has none to be held back by.
+        // The same pair the program installs: the terminal is held to its
+        // setting, the copy to `debug`, and nothing wants `trace`.
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sink = seen.clone();
         let subscriber = tracing_subscriber::registry()
@@ -414,9 +414,11 @@ mod tests {
                 tracing_subscriber::fmt::layer()
                     .event_format(Line)
                     .with_ansi(false)
-                    .with_writer(journal),
+                    .with_writer(journal)
+                    .with_filter(LevelFilter::DEBUG),
             );
         tracing::subscriber::with_default(subscriber, || {
+            tracing::trace!("cl.below_the_copy");
             tracing::debug!("cl.below_the_terminal");
             tracing::info!("cl.at_the_terminal");
         });
@@ -428,6 +430,7 @@ mod tests {
         let copy = fs::read_to_string(&path).unwrap();
         assert!(copy.contains("cl.at_the_terminal"), "{copy:?}");
         assert!(copy.contains("cl.below_the_terminal"), "{copy:?}");
+        assert!(!copy.contains("cl.below_the_copy"), "{copy:?}");
 
         fs::remove_file(&path).ok();
         fs::remove_file(&previous).ok();
