@@ -50,29 +50,10 @@ const MFISAP_VERSION: u8 = 0x01;
 const TIMING_REQUEST: u8 = 210;
 const TIMING_RESPONSE: u8 = 211;
 
-/// How often the audio pump reports how it is going. Choppy sound is either
-/// packets that never arrived or an uneven trickle of them, and nothing else in
-/// the program can tell those apart.
-const AUDIO_REPORT: Duration = Duration::from_secs(5);
-
-/// An arrival this much later than the one before it closes the burst that was
-/// in progress and starts a new one.
-///
-/// The phone does not send a buffered stream one packet at a time: it hands
-/// over a lump and lets the receiver's buffer absorb it. Whether the player can
-/// absorb that lump is the difference between sound and stutter, so the lumps
-/// are counted instead of inferred from packet totals.
-const BURST_GAP: Duration = Duration::from_millis(50);
-
 /// The buffered media stream. It is the one stream the phone hands over in
 /// lumps — ~384 ms at a time — rather than at its own playback rate, so it is
 /// the one stream that has to be re-timed on the way out.
 const BUFFERED_AUDIO: u8 = 102;
-
-/// Samples in one AAC-LC frame, which is every frame the re-timed stream carries.
-/// The pacer works in the phone's counter and has no need of this; the report
-/// reads that counter back as a rate with it.
-const FRAME_SAMPLES: u32 = 1024;
 
 /// How long the phone may go unheard before its session is taken as over.
 ///
@@ -1925,16 +1906,6 @@ impl Session {
         let mut duplicates: u64 = 0;
         let mut worst_gap = Duration::ZERO;
         let mut last_at = Instant::now();
-        let mut report_at = last_at + AUDIO_REPORT;
-        let mut reported_at = last_at;
-        // Lumps, counted directly: a gap longer than BURST_GAP closes the one
-        // before it, so every closed lump is a burst and its packet count is
-        // how much audio the phone handed over at once.
-        let mut bursts: u64 = 0;
-        let mut burst_sum: u64 = 0;
-        let mut burst_min = u32::MAX;
-        let mut burst_max: u32 = 0;
-        let mut in_burst: u32 = 0;
         // The buffered stream is re-timed: frames wait here for the moment the
         // phone's own timestamp gives them and leave one at a time, so the
         // consumer never sees the lump they arrived in. Every other stream is
@@ -1947,17 +1918,6 @@ impl Session {
         // stamped at or before it is a frame whose moment has passed — playing it
         // now would put it after sound that has already gone out.
         let mut sent: Option<u64> = None;
-        // Frames taken in, as against frames sent on: the two should keep step
-        // with each other, and a queue that grows is the two of them out of step.
-        let mut queued: u64 = 0;
-        // And what the decoder costs, which is the one thing in this loop that
-        // has to keep up with the phone's encoder rather than with the wire.
-        // Reported beside the gaps so that sound which stutters can be told
-        // apart between packets that arrived in lumps and frames that took too
-        // long to become PCM.
-        let mut decoded: u64 = 0;
-        let mut decode_time = Duration::ZERO;
-        let mut worst_decode = Duration::ZERO;
         loop {
             // A frame waiting to go out is the other thing this loop waits on.
             // With none there is nothing to wait for but the next packet.
@@ -1967,13 +1927,8 @@ impl Session {
                 _ = wait_due(&mut aired, front.unwrap_or(0)), if front.is_some() => {
                     if let Some(frame) = queue.pop_front() {
                         sent = Some(frame.timestamp_us);
-                        let started = Instant::now();
                         let opened = rx.decode(&frame.sealed);
-                        let spent = started.elapsed();
-                        decode_time += spent;
-                        worst_decode = worst_decode.max(spent);
                         if let Some((timestamp_us, data)) = opened {
-                            decoded += 1;
                             sink.push(StreamEvent::AudioPacket {
                                 stream,
                                 timestamp_us,
@@ -1996,14 +1951,6 @@ impl Session {
                     let gap = now - last_at;
                     worst_gap = worst_gap.max(gap);
                     last_at = now;
-                    if gap > BURST_GAP && in_burst > 0 {
-                        bursts += 1;
-                        burst_sum += u64::from(in_burst);
-                        burst_min = burst_min.min(in_burst);
-                        burst_max = burst_max.max(in_burst);
-                        in_burst = 0;
-                    }
-                    in_burst += 1;
                     // The RTP timestamp is the phone's own sample counter; it is
                     // what /feedback reports back as the playout position.
                     if n >= audio::RTP_HEADER_LEN {
@@ -2033,9 +1980,7 @@ impl Session {
                                 timestamp_us: audio::sample_stamp(codec.rate(), &buf[..n]),
                                 sealed: buf[..n].to_vec(),
                             };
-                            if hold(&mut queue, frame, sent) {
-                                queued += 1;
-                            }
+                            hold(&mut queue, frame, sent);
                         }
                     } else {
                         rx.feed(&buf[..n]);
@@ -2047,56 +1992,6 @@ impl Session {
                     // late, the wait was the phone opening the audio stream.
                     if packets == 1 {
                         tracing::debug!("audio.first_packet");
-                    }
-                    if now >= report_at {
-                        // A burst is only counted once the next one starts, so a
-                        // window that saw none reports zero rather than a stale
-                        // minimum.
-                        let (lo, hi, avg) = if bursts == 0 {
-                            (0, 0, 0.0)
-                        } else {
-                            (burst_min, burst_max, burst_sum as f64 / bursts as f64)
-                        };
-                        // `held` is what the re-timing shows: the lumps the phone
-                        // hands over are spread out again here, so the queue
-                        // should sit inside one lump's worth rather than grow —
-                        // and whether it grows is `arrived` against `sent`.
-                        //
-                        // Debug level: it repeats every five seconds for as long
-                        // as sound plays, which is noise unless something is
-                        // being measured. The stream's closing line carries the
-                        // same totals for the whole stream.
-                        let window = (now - reported_at).as_secs_f64();
-                        let in_rate = queued as f64 / window;
-                        let out_rate = decoded as f64 / window;
-                        // The rate the arrival implies, which is the number that
-                        // says whether the stream is being paced as the sound it
-                        // carries: a queue that grows for as long as the music
-                        // plays is this one not matching the codec's rate.
-                        let source = in_rate * f64::from(FRAME_SAMPLES);
-                        tracing::debug!(
-                            "audio.stats packets={packets} missing={missing} \
-                             out_of_order={out_of_order} duplicates={duplicates} \
-                             worst_gap_ms={:.0} bursts={bursts} burst_lo={lo} burst_hi={hi} \
-                             burst_avg={avg:.1} held={} in_fps={in_rate:.1} \
-                             source_hz={source:.0} out_fps={out_rate:.1} decode_ms={:.0} \
-                             worst_decode_ms={:.0}",
-                            worst_gap.as_secs_f64() * 1000.0,
-                            queue.len(),
-                            decode_time.as_secs_f64() * 1000.0,
-                            worst_decode.as_secs_f64() * 1000.0
-                        );
-                        worst_gap = Duration::ZERO;
-                        bursts = 0;
-                        burst_sum = 0;
-                        burst_min = u32::MAX;
-                        burst_max = 0;
-                        decoded = 0;
-                        queued = 0;
-                        decode_time = Duration::ZERO;
-                        worst_decode = Duration::ZERO;
-                        reported_at = now;
-                        report_at = now + AUDIO_REPORT;
                     }
                 }
             }
