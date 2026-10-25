@@ -3,20 +3,13 @@
 # cp2cl, last: it reads the access point's network out of /etc/hostapd, and for
 # wireless it needs BlueZ registered.
 #
-# The program has no settings file; everything it takes from outside comes from
-# the environment. This script is the settings file.
+# The program has no settings file and needs no environment: every value it
+# takes from outside has a default in it, and the state it keeps — the identity
+# it presents to the phone — lives in /etc/cp2cl, which it creates itself.
 case "$1" in
 	start)
 		printf 'Starting cp2cl: '
 
-		# Where the program keeps the accessory identity it presents to
-		# the phone and the controllers it has paired with. It creates
-		# the directory under $XDG_DATA_HOME on first run; with that
-		# unset it goes to $HOME/.local/share/cp2cl, and this board's
-		# HOME is /.
-		#
-		# /var/lib rather than /run: the identity has to outlive the boot,
-		# or the phone meets a new accessory every time the ignition turns.
 		# The copy under /var/log is the program's own (`logging::Journal`):
 		# the same lines without colour, at every level, rolled at 4 MiB.
 		# A second, coloured copy of every line went into that same file
@@ -26,13 +19,7 @@ case "$1" in
 		# download puts first. What is left for these two redirects is what
 		# never reaches the layer: a panic, and whatever a library prints on
 		# its own.
-		#
-		# The interface and the adapter are named by the program when nothing
-		# names them, and wireless is on unless `CP2CL_WIRELESS` turns it off,
-		# so none of the three is repeated here.
-		XDG_DATA_HOME=/var/lib \
-		CP2CL_LOG_LEVEL=info \
-			setsid /usr/bin/cp2cl >/dev/null 2>>/var/log/cp2cl.err &
+		setsid /usr/bin/cp2cl >/dev/null 2>>/var/log/cp2cl.err &
 		echo $! > /run/cp2cl.pid
 		echo "ok"
 		;;

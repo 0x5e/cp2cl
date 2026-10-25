@@ -135,8 +135,6 @@ the core; none is loaded on this chip.
 
 ### 2.6 Environment
 
-    XDG_DATA_HOME=/var/lib
-    CP2CL_LOG_LEVEL=info
     CP2CL_INPUT_FILE=<unset>
 
 ## 3. Everything else
@@ -156,7 +154,7 @@ the core; none is loaded on this chip.
 
 ### 3.2 Paths written
 
-    /var/lib/cp2cl/pairings.json
+    /etc/cp2cl/pairings.json
     /dev/usb-ffs/carlife
     /sys/devices/platform/soc/1c19000.usb/musb-hdrc.2.auto/mode    peripheral
     /run/cp2cl.pid
@@ -216,8 +214,6 @@ by `post-build.sh`: it would start a second dnsmasq after the one in
                                     EAFNOSUPPORT and cp2cl exits at startup
     /sys, /proc, /dev/pts in fstab  without /sys, /sys/class/net is empty and
                                     wlan0 is invisible to every check
-    XDG_DATA_HOME                   unset with HOME=/ resolves to
-                                    /.local/share/cp2cl and fails with EROFS
     dr_mode = "otg"                 leaves the port to the ID pin on PG12, which
                                     nothing drives; musb sits in OTG_STATE_UNDEFINED
                                     and never pulls up. cp2cl writes `peripheral`

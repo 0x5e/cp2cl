@@ -13,7 +13,7 @@
 //! the phone asks to be paired again (or refuses outright).
 
 use num_bigint::BigUint;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::crypto::{
     self, ed25519_verify, hkdf32, hkdf_sha512, nonce_label, open, seal, Identity, SymKey,
@@ -104,21 +104,8 @@ pub struct Pairings {
 }
 
 impl Pairings {
-    pub fn load_or_create(dir: Option<&Path>) -> std::io::Result<Self> {
-        let path = match dir {
-            Some(d) => d.join("pairings.json"),
-            None => {
-                let base = std::env::var("XDG_DATA_HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|_| {
-                        PathBuf::from(std::env::var("HOME").unwrap_or_default())
-                            .join(".local/share")
-                    });
-                let dir = base.join("cp2cl");
-                std::fs::create_dir_all(&dir)?;
-                dir.join("pairings.json")
-            }
-        };
+    pub fn load_or_create() -> std::io::Result<Self> {
+        let path = crate::config::data_dir()?.join("pairings.json");
 
         if let Ok(text) = std::fs::read_to_string(&path) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {

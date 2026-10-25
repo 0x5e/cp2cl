@@ -42,6 +42,21 @@ pub fn log_filter() -> LevelFilter {
     }
 }
 
+/// Where the program keeps what it has to remember: the identity it presents to
+/// the phone now, and its settings once there are any.
+///
+/// `/etc/cp2cl` rather than a home directory: this board has no user with one,
+/// and `/etc` is on the writable root, so what lands here outlives the boot — a
+/// new identity every ignition reads as a new accessory to the phone.
+pub const DATA_DIR: &str = "/etc/cp2cl";
+
+/// `DATA_DIR`, created if the first run has not made it yet.
+pub fn data_dir() -> std::io::Result<PathBuf> {
+    let dir = PathBuf::from(DATA_DIR);
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
 /// What a machine with no controller to ask reports. Every caller wants
 /// something stable and shaped like a MAC, and this is all that can be said.
 const NO_ADDRESS: &str = "00:11:22:33:44:55";

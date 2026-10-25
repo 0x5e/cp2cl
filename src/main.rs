@@ -201,7 +201,7 @@ async fn main() -> Result<()> {
     // car has said what that screen is.
     tracing::info!("bridge.ready sink=carlife screen_source=car");
 
-    let pairings = Arc::new(Mutex::new(Pairings::load_or_create(None)?));
+    let pairings = Arc::new(Mutex::new(Pairings::load_or_create()?));
     // The half of the pairing identity the phone is told: the key it was given
     // at pair-setup and checks the pair-verify signature against. Every session
     // names it in the answer that starts CarPlay — the cable, the Bluetooth link
