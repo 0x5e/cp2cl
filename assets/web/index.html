@@ -453,6 +453,7 @@ const logStamp = document.getElementById("log-stamp");
 
 let logTail = "";    // 上一次没读完的半行
 let logAt = null;    // 已经读到的字节位置，null = 还没读过
+let logReading = false;  // 有一个读取还没回来
 
 const LEVELS = {
   DEBUG: "debug", INFO: "info", WARN: "warn", ERROR: "error",
@@ -551,6 +552,15 @@ function counted() {
 }
 
 async function logTick() {
+  // One read at a time. The answer is what says where the next one starts, so
+  // two reads in flight ask from the same byte: each carries the same lines,
+  // and whichever comes back second writes them down after newer ones — the
+  // copy reads as repeating itself and as out of order, which is a fault of
+  // the reading rather than of the copy. A tick that arrives while one is
+  // running is dropped, because the running one is already bringing what is
+  // new; the next tick is two seconds away.
+  if (logReading) return;
+  logReading = true;
   try {
     const asked = logAt === null ? "" : "?from=" + logAt;
     const response = await fetch("/api/log" + asked, { cache: "no-store" });
@@ -569,6 +579,8 @@ async function logTick() {
   } catch (e) {
     logStamp.className = "stamp v-bad";
     logStamp.textContent = "读取失败：" + e.message;
+  } finally {
+    logReading = false;
   }
 }
 
