@@ -26,6 +26,7 @@
 //! sends `disableBluetooth` and the Bluetooth link can go. See `Handover`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use iap2_link::LinkConfig;
 use livi_runtime::bringup::run_accessory;
@@ -34,7 +35,7 @@ use livi_runtime::mfi_async::SharedCoprocessor;
 use livi_runtime::vehicle::Vehicle;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Notify};
 use tokio::task::JoinHandle;
 
 use super::crypto::{hkdf32, open_frames, SymKey};
@@ -58,6 +59,10 @@ const PACKAGE_COMM: u32 = 0x636f_6d6d;
 /// A package claiming to be larger than this is a decrypt that went wrong
 /// rather than a message, and the framing is gone with it.
 const MAX_PACKAGE: usize = 4 * 1024 * 1024;
+/// How long the session waits for the phone to connect before it sends anyway.
+/// The phone reads the port out of the SETUP reply and dials it immediately, so
+/// this is only ever reached when something went wrong on its side.
+const PEER_WAIT: Duration = Duration::from_secs(15);
 
 /// What the tunnel's iAP2 session is built from.
 ///
@@ -109,6 +114,11 @@ pub(crate) struct Tunnel {
     /// The wireless session as it was when the phone asked for this stream.
     params: SessionParams,
     setup: Arc<Setup>,
+    /// Fires when the phone's data connection arrives, which is the first
+    /// moment it is listening on the port it read out of the SETUP reply.
+    /// Nothing is written down the event channel before then: an iAP2 message
+    /// sent into that gap is one the phone has nowhere to put.
+    connected: Arc<Notify>,
 }
 
 /// The four tasks one tunnel's iAP2 session is made of. Aborting them is how the
@@ -148,12 +158,14 @@ impl Tunnel {
         let port = listener.local_addr()?.port();
         let (to_link, from_link) = mpsc::unbounded_channel();
         let reader = Arc::new(std::sync::Mutex::new(None));
+        let connected = Arc::new(Notify::new());
         let accept = tokio::spawn(accept_loop(
             listener,
             key,
             to_link.clone(),
             setup.clone(),
             reader.clone(),
+            connected.clone(),
         ));
         tracing::info!(
             "airplay.iap_tunnel_ready seed={seed} data_port={port} ssid={:?} channel={} config={} \
@@ -173,6 +185,7 @@ impl Tunnel {
                 from_link: Some(from_link),
                 params,
                 setup,
+                connected,
             },
             port,
         ))
@@ -184,12 +197,14 @@ impl Tunnel {
         let _ = self.to_link.send(data);
     }
 
-    /// Starts the iAP2 session on the tunnel, at RECORD.
+    /// Starts the iAP2 session on the tunnel.
     ///
-    /// Not at SETUP: the phone asks for the stream and connects to it in the
-    /// middle of the media handshake, and a session offered before the phone is
-    /// listening for it would negotiate with nobody. LIVI starts its relay at
-    /// the same point, and so does MacPlay.
+    /// Called once the SETUP reply carrying the port has gone out, which is the
+    /// earliest moment the phone can be holding a copy of it — see
+    /// `server::Session::run`. Starting any earlier would offer a session to a
+    /// phone that does not yet know where to look for it, and waiting for
+    /// RECORD instead is no better: the phone is free to send RECORD before it
+    /// asks for this stream, and then nothing ever starts the session.
     pub(crate) fn start_iap2(&mut self) {
         if self.link.is_some() {
             return;
@@ -226,7 +241,12 @@ impl Tunnel {
             run_accessory(channel, auth, identity, cp, tx, feed).await
         });
 
-        let pump = tokio::spawn(pump(phone_side, from_link, setup.events.clone()));
+        let pump = tokio::spawn(pump(
+            phone_side,
+            from_link,
+            setup.events.clone(),
+            self.connected.clone(),
+        ));
 
         let mut changed = setup.restart.subscribe();
         let (panel, status, ssid, airplay_port) = (
@@ -300,6 +320,7 @@ async fn accept_loop(
     to_link: mpsc::UnboundedSender<Vec<u8>>,
     setup: Arc<Setup>,
     reader: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
+    connected: Arc<Notify>,
 ) {
     loop {
         let (socket, peer) = match listener.accept().await {
@@ -311,8 +332,10 @@ async fn accept_loop(
         };
         tracing::info!("tunnel.connected peer={peer}");
         // The phone only sends `disableBluetooth` once this is carrying iAP2, so
-        // this is the moment Bluetooth has to stop paging.
+        // this is the moment Bluetooth has to stop paging — and the moment the
+        // link may say anything, because the phone is listening now.
         setup.handover.set();
+        connected.notify_one();
         let task = tokio::spawn(read_stream(socket, key.clone(), to_link.clone()));
         let old = reader.lock().unwrap_or_else(|e| e.into_inner()).replace(task);
         if let Some(old) = old {
@@ -388,6 +411,7 @@ async fn pump(
     phone_side: DuplexStream,
     mut from_stream: mpsc::UnboundedReceiver<Vec<u8>>,
     events: Arc<EventSink>,
+    connected: Arc<Notify>,
 ) {
     let (mut read, mut write) = tokio::io::split(phone_side);
 
@@ -400,10 +424,26 @@ async fn pump(
     };
     let out_of_link = async {
         let mut buf = vec![0u8; 8 * 1024];
+        let mut peer_seen = false;
         loop {
             match read.read(&mut buf).await {
                 Ok(0) => break,
                 Ok(n) => {
+                    // The link speaks first — identify, and then the session —
+                    // and the phone has nowhere to put any of it until it has
+                    // dialled the port from the SETUP reply.
+                    if !peer_seen {
+                        peer_seen = true;
+                        if tokio::time::timeout(PEER_WAIT, connected.notified())
+                            .await
+                            .is_err()
+                        {
+                            tracing::warn!(
+                                "tunnel.peer_absent wait_s={} action=send_anyway",
+                                PEER_WAIT.as_secs()
+                            );
+                        }
+                    }
                     // One `iAPSendMessage` per read: the phone reassembles the
                     // frames out of them, and a frame split across two messages
                     // is no different from one split across two reads.

@@ -437,6 +437,7 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                         timing,
                         tunnel_setup,
                         tunnel: None,
+                        tunnel_start_pending: false,
                         peer,
                         setup: None,
                         verify: None,
@@ -622,6 +623,10 @@ struct Session {
     /// The phone's iAP2 session, once it asked to move it here. Owned by the
     /// session because the phone ends it by ending this: see `tunnel`.
     tunnel: Option<tunnel::Tunnel>,
+    /// Whether a SETUP reply naming the tunnel is still on its way out. The
+    /// session on the tunnel starts once it has gone: the port it is reached on
+    /// is inside that reply. See `run`.
+    tunnel_start_pending: bool,
     peer: SocketAddr,
     setup: Option<PairSetup>,
     verify: Option<PairVerify>,
@@ -834,6 +839,18 @@ impl Session {
                 }
 
                 writer.write_all(&out).await?;
+
+                // The reply that named the iAP channel has just gone out, which
+                // is the first moment the phone can reach the port in it. The
+                // session starts here rather than at RECORD because the phone
+                // chooses the order of the two, and a session waiting for the
+                // step it did not send never begins at all.
+                if std::mem::take(&mut self.tunnel_start_pending) {
+                    writer.flush().await?;
+                    if let Some(tunnel) = self.tunnel.as_mut() {
+                        tunnel.start_iap2();
+                    }
+                }
             }
         }
     }
@@ -932,12 +949,6 @@ impl Session {
             "SETUP" => self.setup(req).await,
             "RECORD" => {
                 tracing::info!("airplay.media_live");
-                // The phone has asked for the iAP channel and connected to it;
-                // now is when both ends are listening, so now is when the
-                // session on it starts. See `tunnel::Tunnel::start_iap2`.
-                if let Some(tunnel) = self.tunnel.as_mut() {
-                    tunnel.start_iap2();
-                }
                 Ok(Response::new(200))
             }
             // Worth reading: the phone usually names the streams it is dropping,
@@ -1703,9 +1714,10 @@ impl Session {
     /// port to connect to.
     ///
     /// Nothing more than a listener is started here: the phone connects to it
-    /// during the media handshake and the session on it begins at RECORD.
-    /// Declining is not a failure — a wired run, or a stream that is not the iAP
-    /// channel, is answered exactly as it was before there was a tunnel at all.
+    /// during the media handshake, and the session on it begins once the reply
+    /// carrying the port has been written — see `run`. Declining is not a
+    /// failure — a wired run, or a stream that is not the iAP channel, is
+    /// answered exactly as it was before there was a tunnel at all.
     async fn open_tunnel(
         &mut self,
         named: &str,
@@ -1728,6 +1740,9 @@ impl Session {
             .await
             .map_err(|e| e.to_string())?;
         self.tunnel = Some(opened);
+        // The port is only reachable once the phone has read it, so the session
+        // is armed here and started by the writer below.
+        self.tunnel_start_pending = true;
         Ok(port)
     }
 
