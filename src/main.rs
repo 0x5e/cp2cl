@@ -202,6 +202,12 @@ async fn main() -> Result<()> {
     tracing::info!("bridge.ready sink=carlife screen_source=car");
 
     let pairings = Arc::new(Mutex::new(Pairings::load_or_create(None)?));
+    // The half of the pairing identity the phone is told: the key it was given
+    // at pair-setup and checks the pair-verify signature against. Every session
+    // names it in the answer that starts CarPlay — the cable, the Bluetooth link
+    // and the tunnel — so it is read once here from the pairing the receiver
+    // uses rather than kept anywhere else.
+    let accessory_key = hex::encode(pairings.lock().await.identity.public());
 
     // Built before the receiver starts because both halves need it: iAP2 to
     // answer the phone's challenge, and airplay to answer /auth-setup.
@@ -219,6 +225,7 @@ async fn main() -> Result<()> {
             cfg: cfg.clone(),
             auth: auth.clone(),
             bt_mac: wireless::parse_mac(&cfg.bt_mac),
+            accessory_key: accessory_key.clone(),
             airplay_port,
             panel: panel.clone(),
             vehicle: vehicle.clone(),
@@ -359,11 +366,31 @@ async fn main() -> Result<()> {
 
     if cfg.wireless {
         wireless::watch(
-            cfg, auth, airplay_port, restart, gate, panel, status, vehicle, handover,
+            cfg,
+            auth,
+            airplay_port,
+            accessory_key,
+            restart,
+            gate,
+            panel,
+            status,
+            vehicle,
+            handover,
         )
         .await;
     } else {
-        session::watch(cfg, auth, airplay_port, restart, gate, panel, status, vehicle).await;
+        session::watch(
+            cfg,
+            auth,
+            airplay_port,
+            accessory_key,
+            restart,
+            gate,
+            panel,
+            status,
+            vehicle,
+        )
+        .await;
     }
     Ok(())
 }

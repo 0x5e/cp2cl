@@ -70,6 +70,11 @@ pub(crate) struct Setup {
     pub cfg: Arc<Config>,
     pub auth: SharedCoprocessor,
     pub bt_mac: [u8; 6],
+    /// The AirPlay identity's public key, hex, which the start session names so
+    /// the phone recognises the accessory on this stream as the one it paired
+    /// with. Read once at startup from the pairing the receiver is already
+    /// using, so both halves of the session describe the same key.
+    pub accessory_key: String,
     pub airplay_port: u32,
     pub panel: Arc<ClSink>,
     pub vehicle: Arc<Vehicle>,
@@ -127,8 +132,13 @@ impl Tunnel {
         seed: &str,
         setup: Arc<Setup>,
     ) -> std::io::Result<(Self, u16)> {
-        let params = session_params(&setup.cfg, setup.airplay_port, setup.bt_mac)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        let params = session_params(
+            &setup.cfg,
+            setup.airplay_port,
+            setup.bt_mac,
+            &setup.accessory_key,
+        )
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
         let key = SymKey::from_bytes(&hkdf32(
             &shared,
             &salt(seed),
@@ -146,10 +156,12 @@ impl Tunnel {
             reader.clone(),
         ));
         tracing::info!(
-            "airplay.iap_tunnel_ready seed={seed} data_port={port} ssid={:?} channel={} config={}",
+            "airplay.iap_tunnel_ready seed={seed} data_port={port} ssid={:?} channel={} config={} \
+             pk_len={}",
             params.ssid,
             params.channel,
-            params.path.display()
+            params.path.display(),
+            params.cp.public_key.len()
         );
         Ok((
             Self {

@@ -151,10 +151,15 @@ async fn carkit(mux: &Arc<iap2_usbmux::MuxDevice>) -> anyhow::Result<Box<dyn ide
 /// playing, the route it is guiding along. It is the CarLife side's own sink, so
 /// all of it reaches the car by the road every other thing the phone produces
 /// does.
+///
+/// `accessory_key` is the AirPlay identity's public key in hex: the start
+/// session names it so the phone recognises the accessory on the cable as the
+/// one it paired with.
 pub async fn watch(
     cfg: Arc<Config>,
     auth: SharedCoprocessor,
     airplay_port: u32,
+    accessory_key: String,
     restart: broadcast::Sender<()>,
     mut gate: tokio::sync::watch::Receiver<bool>,
     panel: Arc<ClSink>,
@@ -203,6 +208,7 @@ pub async fn watch(
                     auth.clone(),
                     &phone,
                     airplay_port,
+                    &accessory_key,
                     &restart,
                     &panel,
                     &status,
@@ -237,6 +243,7 @@ async fn attach(
     auth: SharedCoprocessor,
     phone: &Phone,
     airplay_port: u32,
+    accessory_key: &str,
     restart: &broadcast::Sender<()>,
     panel: &Arc<ClSink>,
     status: &Status,
@@ -301,7 +308,9 @@ async fn attach(
             channel: Channel::of_number(36),
             airplay_port,
             source_version: "320.17".into(),
-            public_key: String::new(),
+            // The key the phone was given at pair-setup, so the cable and the
+            // AirPlay session over it are the same accessory it already knows.
+            public_key: accessory_key.to_string(),
             transport: Transport::Wired,
             av_iface: av_iface.clone(),
             // The USB network function is already up by the time we get here —

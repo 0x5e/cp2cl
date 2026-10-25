@@ -4,6 +4,12 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## 未发布
+
+### 修复
+
+- 启动 CarPlay 的应答里 accessory 公钥是空的，手机收下起点却不认这个会话，无线首次连接停在连接页。
+
 ## v0.11.0 alpha — 2026-10-25
 
 ### 新增

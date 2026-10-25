@@ -99,10 +99,15 @@ pub(crate) struct SessionParams {
 /// Reads the access point and builds what both wireless sessions hand the
 /// phone. The passphrase never leaves this function's caller: it is a secret,
 /// and a page is not a place to keep one.
+///
+/// `accessory_key` is the AirPlay identity's public key in hex, handed in
+/// rather than read here: it belongs to the pairing the caller already holds
+/// open, and a second copy read off disk could disagree with it.
 pub(crate) fn session_params(
     cfg: &Config,
     airplay_port: u32,
     bt_mac: [u8; 6],
+    accessory_key: &str,
 ) -> Result<SessionParams, String> {
     // Read here rather than once at startup so that editing the file and
     // restarting the access point is enough for a change to take effect.
@@ -134,7 +139,12 @@ pub(crate) fn session_params(
         channel: Channel::of_number(ap.channel.into()),
         airplay_port,
         source_version: "320.17".into(),
-        public_key: String::new(),
+        // Who the phone is talking to, in the answer that starts CarPlay: the
+        // AirPlay identity's Ed25519 public key, hex. It is the same key the
+        // phone was given at pair-setup and checks the pair-verify signature
+        // against, and an empty value here is a start session the phone takes
+        // but never acts on.
+        public_key: accessory_key.to_string(),
         transport: Transport::Wireless,
         // The media comes back over Wi-Fi, so the Wi-Fi interface is the AV
         // interface — there is no USB network function to name here.
@@ -188,6 +198,7 @@ pub(crate) async fn run_session(
     channel: LinkChannel,
     airplay_port: u32,
     bt_mac: [u8; 6],
+    accessory_key: &str,
     peer: &str,
     restart: &broadcast::Sender<()>,
     panel: &ClSink,
@@ -198,7 +209,7 @@ pub(crate) async fn run_session(
     // identification is still running is waiting for us rather than lost.
     let mut changed = restart.subscribe();
 
-    let params = match session_params(cfg, airplay_port, bt_mac) {
+    let params = match session_params(cfg, airplay_port, bt_mac, accessory_key) {
         Ok(found) => found,
         Err(e) => {
             tracing::error!("wireless.ap_unusable err={e}");
@@ -206,11 +217,12 @@ pub(crate) async fn run_session(
         }
     };
     tracing::info!(
-        "wireless.ap ssid={:?} channel={} iface={} config={}",
+        "wireless.ap ssid={:?} channel={} iface={} config={} pk_len={}",
         params.ssid,
         params.channel,
         cfg.wifi_iface,
-        params.path.display()
+        params.path.display(),
+        params.cp.public_key.len()
     );
     // The passphrase is deliberately left out: it is a secret, and a page is not
     // a place to keep one. What is here is what the interface is on air with.
