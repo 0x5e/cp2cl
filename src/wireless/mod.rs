@@ -34,6 +34,7 @@ use crate::web::Status;
 
 mod linux;
 mod page;
+mod power;
 
 pub use linux::watch;
 
