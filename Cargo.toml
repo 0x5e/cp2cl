@@ -29,6 +29,12 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 # Needed directly to name `idevice::ReadWrite` in our own function signatures.
 # Same version LIVI resolves, so it unifies into one build.
 idevice = "0.1"
+# The car stamps its own reports, and turning a stamp into a date is a calendar
+# rather than a clock: leap years and month lengths are the library's problem.
+# `idevice` already builds chrono with all of its defaults, so naming it costs
+# the binary nothing; only `std` is asked for here and the rest of the set comes
+# in through that same unification. See `carlife::session`.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"

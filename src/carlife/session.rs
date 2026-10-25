@@ -25,6 +25,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use chrono::{DateTime, FixedOffset, SecondsFormat};
 use livi_runtime::vehicle::Vehicle;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{broadcast, mpsc};
@@ -48,6 +49,7 @@ const HU_VIDEO_ENCODER_START: u32 = 0x0001_8009;
 const HU_VIDEO_ENCODER_PAUSE: u32 = 0x0001_800A;
 const HU_VIDEO_ENCODER_RESET: u32 = 0x0001_800B;
 const HU_VIDEO_ENCODER_FRAME_RATE_CHANGE: u32 = 0x0001_800C;
+const HU_CAR_VELOCITY: u32 = 0x0001_800F;
 const HU_CAR_GPS: u32 = 0x0001_8010;
 const HU_GO_TO_FOREGROUND: u32 = 0x0001_8025;
 const HU_STATISTIC_INFO: u32 = 0x0001_8027;
@@ -418,6 +420,8 @@ where
         next_tick: Instant::now(),
         position_seen: false,
         last_fix: None,
+        speed_seen: false,
+        last_speed: None,
         delivered: false,
         handed: None,
         // Nothing is assumed about the datum before the car has named one, and a
@@ -583,8 +587,10 @@ where
         s.carlife.session_up = false;
         s.carlife.encoding = false;
         // A fix belongs to the car it came from. Left behind, it would describe a
-        // position this device no longer has any way of updating.
+        // position this device no longer has any way of updating. The speed goes
+        // with it, and for the same reason.
         s.carlife.gps = None;
+        s.carlife.speed = None;
     });
     outcome
 }
@@ -776,6 +782,13 @@ struct Session<'a, W> {
     /// `untimed`. A parked car sends the same position over and over with only
     /// the timestamp moving, and that report is not worth a line.
     last_fix: Option<proto::CarGps>,
+    /// Whether the car has sent a speed yet. The first one is worth a line at
+    /// `info` for the same reason a position is: it is the evidence that the
+    /// subscription worked.
+    speed_seen: bool,
+    /// The last speed the car reported. A car sitting still sends the same number
+    /// every second, and only a change of it is worth a line.
+    last_speed: Option<i32>,
     /// Whether a position has been handed to the phone at all, which is the
     /// other half of that evidence: the car spoke, and the phone was told.
     delivered: bool,
@@ -945,9 +958,10 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 self.status.with(|s| s.carlife.features = configs);
             }
             // The car's answer to the question asked with the statistics: the
-            // modules it can report. GPS is the one this bridge consumes, and it
-            // is asked to start — the other five are the phone's own navigation's
-            // business and nothing here reads them.
+            // modules it can report. Two of them are asked to start — the
+            // position, which this bridge hands to the phone, and the speed,
+            // which nothing here consumes. The other four are the phone's own
+            // navigation's business and nothing here reads them.
             HU_CAR_DATA_SUBSCRIBE_DONE => {
                 let offered = proto::decode_vehicle_infos(&message.body);
                 let modules: Vec<i32> = offered.iter().map(|info| info.module).collect();
@@ -982,6 +996,48 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                         tracing::info!("cl.car_data_offered modules={modules:?} action=none")
                     }
                 }
+                // The speed is asked for as well. Nothing here consumes it — the
+                // phone's own navigation is the only reader the protocol has for
+                // one — but a car that reports only what it was asked for would
+                // send none at all, and this is the ask the phone makes. Its flag
+                // is not a coordinate system, so it is only handed back.
+                if let Some(info) = offered
+                    .iter()
+                    .find(|info| info.module == proto::CAR_DATA_VELOCITY)
+                {
+                    tracing::info!(
+                        "cl.car_data_offered modules={modules:?} action=subscribe \
+                         module={} flag={}",
+                        proto::CAR_DATA_VELOCITY,
+                        info.flag
+                    );
+                    let body =
+                        proto::car_data_subscribe_start(proto::CAR_DATA_VELOCITY, info.flag, 0);
+                    self.send(CAR_DATA_SUBSCRIBE_START, &body).await?;
+                }
+            }
+            // The car's own speed, which it reports on its own clock rather than
+            // on a request. Nothing here acts on it, so it is a line only when it
+            // says something the last one did not.
+            HU_CAR_VELOCITY => {
+                let speed = proto::decode_car_speed(&message.body);
+                self.status.with(|s| s.carlife.speed = Some(speed.speed));
+                if !self.speed_seen {
+                    self.speed_seen = true;
+                    tracing::info!(
+                        "cl.car_speed_received speed_kmh={} clock={}",
+                        speed.speed,
+                        clock(speed.timestamp_ms)
+                    );
+                }
+                if self.last_speed != Some(speed.speed) {
+                    self.last_speed = Some(speed.speed);
+                    tracing::debug!(
+                        "cl.car_speed speed_kmh={} clock={}",
+                        speed.speed,
+                        clock(speed.timestamp_ms)
+                    );
+                }
             }
             // The car's position, at the rate it reports at. Two consumers: the
             // page, and the phone, which takes a fix only as NMEA sentences and
@@ -994,8 +1050,9 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     self.position_seen = true;
                     tracing::info!(
                         "cl.car_gps_received antenna={} latitude={latitude:.6} \
-                         longitude={longitude:.6}",
-                        fix.antenna_state
+                         longitude={longitude:.6} clock={}",
+                        fix.antenna_state,
+                        clock(fix.timestamp_ms)
                     );
                 }
                 let report = untimed(fix);
@@ -1003,12 +1060,13 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     self.last_fix = Some(report);
                     tracing::debug!(
                         "cl.car_gps antenna={} latitude={latitude:.6} longitude={longitude:.6} \
-                         height={} speed={} heading={} accuracy_m={}",
+                         height={} speed={} heading={} accuracy_m={} clock={}",
                         fix.antenna_state,
                         fix.height,
                         fix.speed,
                         fix.heading,
-                        fix.hor_pos_error
+                        fix.hor_pos_error,
+                        clock(fix.timestamp_ms)
                     );
                 }
                 self.hand_to_phone(&fix);
@@ -1900,6 +1958,37 @@ fn untimed(fix: proto::CarGps) -> proto::CarGps {
         second: 0,
         timestamp_ms: 0,
         ..fix
+    }
+}
+
+/// The clock both of the car's stamped messages are read at.
+const UTC_PLUS_EIGHT: FixedOffset = match FixedOffset::east_opt(8 * 3600) {
+    Some(offset) => offset,
+    None => panic!("eight hours east of UTC is a valid offset"),
+};
+
+/// The moment the car stamped its report with, as the clock that reads it.
+///
+/// Both the position and the speed carry milliseconds since the epoch, and the
+/// board's own clock is not the car's — a car whose reports are being read here
+/// is a car this machine is in, so what the message says is the only time the
+/// report is true at. The wall clock it is written in is UTC+8, to the second,
+/// with the offset spelled out: nothing in the protocol names a zone.
+///
+/// A stamp of 0 is a car that left the optional field out, and that reads as
+/// `none` rather than as 1970.
+fn clock(epoch_ms: u64) -> String {
+    if epoch_ms == 0 {
+        return "none".to_string();
+    }
+    match DateTime::from_timestamp_millis(epoch_ms as i64) {
+        Some(at) => at
+            .with_timezone(&UTC_PLUS_EIGHT)
+            .to_rfc3339_opts(SecondsFormat::Secs, false),
+        // A stamp outside the calendar's range is a field that is not a
+        // timestamp at all; what the car did send is more use than a date made
+        // up here to stand in for it.
+        None => format!("{epoch_ms}ms"),
     }
 }
 
@@ -3544,6 +3633,31 @@ mod tests {
         car.await.unwrap();
     }
 
+    /// A speed as the car reports it: the number on its own, which is what a car
+    /// that leaves the optional stamp out sends.
+    fn speed(speed: i32) -> Vec<u8> {
+        let mut body = Vec::new();
+        proto::put_int(&mut body, 1, speed);
+        body
+    }
+
+    /// The stamp a report carries is the only moment it is true at, and it is
+    /// read at the clock this is operated on rather than at UTC.
+    #[test]
+    fn the_cars_stamp_is_read_as_utc_plus_eight() {
+        assert_eq!(clock(1_792_497_600_000), "2026-10-20T20:00:00+08:00");
+        // An evening in UTC is the next morning here, so the date follows the
+        // hour rather than the other way round.
+        assert_eq!(clock(1_761_065_637_000), "2025-10-22T00:53:57+08:00");
+        // The same at the end of a month and of a year.
+        assert_eq!(clock(1_793_476_800_000), "2026-11-01T04:00:00+08:00");
+        assert_eq!(clock(1_798_747_200_000), "2027-01-01T04:00:00+08:00");
+        // A leap day is a date like any other.
+        assert_eq!(clock(1_709_164_800_000), "2024-02-29T08:00:00+08:00");
+        // And no stamp at all is said to be nothing rather than 1970.
+        assert_eq!(clock(0), "none");
+    }
+
     /// The car's position is asked for as soon as the car has said what it is,
     /// and not when something starts being guided: the answer is a property of
     /// the car, and the fix is worth having either way.
@@ -3567,7 +3681,7 @@ mod tests {
             car.expect(FEATURE_CONFIG_REQUEST).await;
             car.expect(CAR_DATA_SUBSCRIBE).await;
 
-            // A car with a GPS in WGS84, and one module it cannot report.
+            // A car with a GPS in WGS84, and a speed it reports on its own.
             car.send(HU_CAR_DATA_SUBSCRIBE_DONE, &vehicle_list(&[(0, 1), (1, 0)]))
                 .await;
             let start = car.expect(CAR_DATA_SUBSCRIBE_START).await;
@@ -3575,8 +3689,19 @@ mod tests {
                 start.body,
                 proto::car_data_subscribe_start(proto::CAR_DATA_GPS, 1, 0)
             );
+            // The speed is asked for as well, with the flag the car offered it
+            // under — which for this module is nothing to do with coordinates.
+            let start = car.expect(CAR_DATA_SUBSCRIBE_START).await;
+            assert_eq!(
+                start.body,
+                proto::car_data_subscribe_start(proto::CAR_DATA_VELOCITY, 0, 0)
+            );
 
             car.send(HU_CAR_GPS, &position()).await;
+            // Two of the same speed in a row, which is what a stopped car sends:
+            // the second one is read and says nothing new.
+            car.send(HU_CAR_VELOCITY, &speed(0)).await;
+            car.send(HU_CAR_VELOCITY, &speed(0)).await;
             // A message the session answers, so that the position is known to
             // have been read by the time the page is looked at.
             car.send(HU_GO_TO_FOREGROUND, &[]).await;
@@ -3617,6 +3742,11 @@ mod tests {
         assert!(
             status.json()["carlife"]["gps"].is_null(),
             "the position goes when the car does"
+        );
+        // The speed is the same kind of report and goes the same way.
+        assert!(
+            status.json()["carlife"]["speed"].is_null(),
+            "the speed goes with it"
         );
     }
 

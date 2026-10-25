@@ -80,6 +80,8 @@
     <div class="weui-cells" id="playing"></div>
     <div class="weui-cells__title" id="gps-title" style="display: none">车载数据 · GPS</div>
     <div class="weui-cells" id="gps" style="display: none"></div>
+    <div class="weui-cells__title" id="speed-title" style="display: none">车载数据 · 车速</div>
+    <div class="weui-cells" id="speed" style="display: none"></div>
     <div class="weui-cells__title">设备端</div>
     <div class="weui-cells" id="device"></div>
     <p class="stamp" id="stamp">正在读取…</p>
@@ -288,6 +290,11 @@ const GPS_ROWS = [
   ["时间", d => FIXED(d) ? utc8(d) : null],
 ];
 
+// The car's own speed, which it reports whether or not anything asked for it.
+const SPEED_ROWS = [
+  ["车速", d => d.speed == null ? null : d.speed + " km/h"],
+];
+
 function cell(label, value, tone, block) {
   const row = document.createElement("div");
   row.className = block ? "weui-cell weui-cell_block" : "weui-cell";
@@ -403,6 +410,15 @@ function render(data) {
     document.getElementById(id).style.display = fix ? "" : "none";
   }
   fill(document.getElementById("gps"), GPS_ROWS, [], fix || {}, true);
+
+  // The speed comes and goes the same way: the section is there while the car is
+  // reporting one, and a speed of zero is something the car says rather than
+  // something the page falls back to.
+  const speed = data.carlife ? data.carlife.speed : null;
+  for (const id of ["speed-title", "speed"]) {
+    document.getElementById(id).style.display = speed == null ? "none" : "";
+  }
+  fill(document.getElementById("speed"), SPEED_ROWS, [], { speed }, true);
 }
 
 function now() {

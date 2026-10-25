@@ -420,10 +420,14 @@ pub fn car_data_subscribe_start(module: i32, flag: i32, frequency: i32) -> Vec<u
 }
 
 /// `ModuleID.CAR_DATA_GPS`: the car's own position, which is the one module this
-/// bridge has anything to do with. The other five — speed, gyroscope,
-/// acceleration, gear, oil — are read by the phone's own navigation and are left
-/// alone.
+/// bridge does anything with. The other five — speed, gyroscope, acceleration,
+/// gear, oil — are read by the phone's own navigation and are left alone.
 pub const CAR_DATA_GPS: i32 = 0;
+
+/// `ModuleID.CAR_DATA_VELOCITY`: the same answer's second module. It is asked for
+/// as well, because the phone asks: this car reports it unasked, and one that
+/// reports only what it was asked for would otherwise never send a speed.
+pub const CAR_DATA_VELOCITY: i32 = 1;
 
 // --------------------------------------------------------- what comes down ---
 
@@ -506,6 +510,28 @@ pub fn decode_vehicle_infos(body: &[u8]) -> Vec<VehicleInfo> {
         });
     }
     out
+}
+
+/// `MSG_CMD_CAR_VELOCITY`: the car's own speed, which it reports on a clock of its
+/// own — once a second on the car in the log this was written against, without
+/// being asked and without anything being subscribed to.
+///
+/// `speed` is kilometres an hour. The schema names no unit — the car's library
+/// carries it as a bare `u32` — so that is the one the page and the log read it
+/// in, and nothing is converted on the way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CarSpeed {
+    pub speed: i32,
+    /// Milliseconds since the epoch, and optional in the schema: 0 is a car that
+    /// did not stamp one.
+    pub timestamp_ms: u64,
+}
+
+pub fn decode_car_speed(body: &[u8]) -> CarSpeed {
+    CarSpeed {
+        speed: int_of(body, 1).unwrap_or(0) as i32,
+        timestamp_ms: int_of(body, 2).unwrap_or(0) as u64,
+    }
 }
 
 /// `MSG_CMD_CAR_GPS`: the car's position, in the units the message is defined in.
@@ -841,6 +867,31 @@ mod tests {
         // A body that stops early is a car that left the fields out, and the
         // schema's defaults are what it says.
         assert_eq!(decode_car_gps(&[]), CarGps::default());
+    }
+
+    /// The speed is a number and the moment it was measured at, and the moment is
+    /// optional: a car that leaves it out reads as one that did not stamp it.
+    #[test]
+    fn the_speed_is_read_as_the_number_and_the_moment_beside_it() {
+        let mut body = Vec::new();
+        put_int(&mut body, 1, 42);
+        tag(&mut body, 2, 0);
+        put_varint(&mut body, 1_761_065_637_000);
+        assert_eq!(
+            decode_car_speed(&body),
+            CarSpeed {
+                speed: 42,
+                timestamp_ms: 1_761_065_637_000,
+            }
+        );
+
+        assert_eq!(
+            decode_car_speed(&[0x08, 0x00]),
+            CarSpeed {
+                speed: 0,
+                timestamp_ms: 0
+            }
+        );
     }
 
     #[test]

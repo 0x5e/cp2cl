@@ -264,6 +264,11 @@ pub struct Carlife {
     /// until the first one arrives, and again once the car has gone: it is the
     /// one report here that describes a place rather than a connection.
     pub gps: Option<CarGps>,
+    /// The last speed the head unit reported, in kilometres an hour — see
+    /// `MSG_CMD_CAR_VELOCITY`. `None` until the first one arrives, and again once
+    /// the car has gone: like the position, it is something only the car can say
+    /// and nothing here can keep saying for it.
+    pub speed: Option<i32>,
 }
 
 /// The USB device this program presents, as a host reads it.
@@ -567,6 +572,7 @@ impl Carlife {
                 "second": gps.second,
                 "timestamp_ms": gps.timestamp_ms,
             })),
+            "speed": self.speed,
         })
     }
 }

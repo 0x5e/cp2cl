@@ -611,6 +611,30 @@ mod tests {
         assert_eq!(body["carlife"]["gps"]["longitude"], 120_128_094);
     }
 
+    /// The speed is a section of its own as well, and it is the car's for the same
+    /// reason: no speed reported yet is not a car standing still.
+    #[test]
+    fn the_page_reads_the_cars_speed_from_its_own_part() {
+        assert!(
+            page_text().contains("车载数据 · 车速"),
+            "it has a heading of its own"
+        );
+        assert!(
+            page_text().contains("data.carlife.speed"),
+            "and the page reads the speed"
+        );
+
+        let status = Status::new();
+        assert!(
+            status.json()["carlife"]["speed"].is_null(),
+            "a car that has not reported a speed yet is not one at zero"
+        );
+
+        // Zero is a speed the car has reported, and it is shown as one.
+        status.with(|s| s.carlife.speed = Some(0));
+        assert_eq!(status.json()["carlife"]["speed"], 0);
+    }
+
     /// The log is a file that is always being added to, so the page asks for
     /// what it has not read rather than for all of it: an answer carries what
     /// was written since the offset, and the offset to ask from next.
