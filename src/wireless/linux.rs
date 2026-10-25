@@ -15,7 +15,7 @@ use livi_runtime::mfi_async::SharedCoprocessor;
 use livi_runtime::vehicle::Vehicle;
 use tokio::sync::broadcast;
 
-use super::{page, parse_mac, ready, run_session, short, Handover};
+use super::{page, parse_mac, power, ready, run_session, short, Handover};
 use crate::config::{bt_address, Config};
 use crate::session::{carry_artwork, Ended};
 use crate::sink::ClSink;
@@ -78,6 +78,16 @@ pub async fn watch(
         "wireless.bt_service_up adapter={} name={:?} action=pair_phone",
         cfg.bt_adapter, cfg.name
     );
+
+    // The controller has nothing to do once the phone has moved its session
+    // onto Wi-Fi, and every page it answers is a slice of the antenna the
+    // stream needed — see `power`. A task of its own, because the loop below
+    // sits inside a session for as long as the controller has to stay off.
+    let guard = tokio::spawn(power::guard(
+        conn.clone(),
+        cfg.bt_adapter.clone(),
+        handover.clone(),
+    ));
 
     // The channel never closes while we hold the connection that owns the
     // profiles, so being told to stop is the only way out of the loop — and the
@@ -164,6 +174,9 @@ pub async fn watch(
 
     // Nothing is listening any more: the profiles went with the channel, and the
     // controllers go back to the name and discoverability they were found with.
+    // The power state is not among them — leaving it off costs nothing, because
+    // the next start powers the controller on as it always did.
+    guard.abort();
     livi_runtime::bt::let_go(&conn, &cfg.bt_adapter, &held).await;
     tracing::info!("wireless.bt_service_down adapter={} state=restored", cfg.bt_adapter);
 }
