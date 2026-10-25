@@ -249,7 +249,7 @@ impl PairSetup {
                 let a_bytes = tlv_get(&items, TYPE_PUBLIC_KEY).ok_or("M3 without A")?;
                 let proof = tlv_get(&items, TYPE_PROOF).ok_or("M3 without proof")?;
                 let a = to_big(&a_bytes);
-                let key = self.finish(&a);
+                let key = self.finish(&a, &a_bytes);
 
                 let n = n_prime();
                 // HAP hashes the *unpadded* group bytes here: `g` is one byte
@@ -265,7 +265,7 @@ impl PairSetup {
                     &xor,
                     &crypto::sha512(USERNAME.as_bytes()),
                     &self.salt,
-                    &pad(&a),
+                    &a_bytes,
                     &pad(&self.public_b_biguint()),
                     &key,
                 ]);
@@ -273,14 +273,15 @@ impl PairSetup {
                     // Both sides are 64 bytes when the maths agrees; a length
                     // difference means the TLV was split, not that SRP failed.
                     tracing::error!(
-                        "pairing.proof_mismatch got_bytes={} got={} want={}",
+                        "pairing.proof_mismatch a_bytes={} got_bytes={} got={} want={}",
+                        a_bytes.len(),
                         proof.len(),
                         hex::encode(&proof[..proof.len().min(8)]),
                         hex::encode(&expected[..8]),
                     );
                     return Err("controller proof mismatch".into());
                 }
-                let ours = crypto::sha512_all(&[&pad(&a), &expected, &key]);
+                let ours = crypto::sha512_all(&[&a_bytes, &expected, &key]);
                 tracing::info!("pairing.setup step=3 result=srp_verified");
                 Ok(tlv_encode(&vec![
                     (TYPE_STATE, vec![4]),
@@ -294,12 +295,17 @@ impl PairSetup {
 
     /// Derives the SRP session key from the controller's public `A`.
     ///
+    /// `a_form` is `A` exactly as it arrived, which is what both proofs hash:
+    /// the phone drops the high zero byte when its `A` happens to be 383 bytes
+    /// and hashes the 383 it sent, so re-padding here would make the two sides
+    /// disagree about `u` on about one attempt in 256.
+    ///
     /// There is no failure path: every step is arithmetic on values we already
     /// validated, so this returns the key directly instead of a `Result`.
-    fn finish(&mut self, a: &BigUint) -> [u8; 64] {
+    fn finish(&mut self, a: &BigUint, a_form: &[u8]) -> [u8; 64] {
         let n = n_prime();
         let u = to_big(&crypto::sha512_all(&[
-            &pad(a),
+            a_form,
             &pad(&self.public_b_biguint()),
         ]));
         let s = (a * (self.verifier_ref().modpow(&u, &n))).modpow(&self.private, &n) % &n;
