@@ -109,10 +109,10 @@ async fn main() -> Result<()> {
     // The board's lights and its one button. All three are best-effort: an
     // image without them runs exactly as before and says so once.
     //
-    // The red light is the program's own state: out while it runs, back when it
-    // does not — so a red board with a green light showing anything is a board
-    // with a program on it. Two ways out skip the drop that would put it back,
-    // a panic (`panic = "abort"`) and a signal; both are handled here.
+    // The red light is the program's own state: out while the green one shows a
+    // phase, back when the bridge has nothing to show and when there is no
+    // program at all. Two ways out skip the drop that would put it back, a panic
+    // (`panic = "abort"`) and a signal; both are handled here.
     let lights = led::Lights::take().map(Arc::new);
     if let Some(lights) = &lights {
         let lights = lights.clone();
@@ -123,7 +123,7 @@ async fn main() -> Result<()> {
         }));
     }
     let (led, led_state) = tokio::sync::watch::channel(led::Phase::Off);
-    tokio::spawn(led::run(led_state));
+    tokio::spawn(led::run(led_state, lights.clone()));
     tokio::spawn(button::watch());
     if let Some(lights) = &lights {
         // A wireless run already catches SIGTERM to put the Bluetooth
