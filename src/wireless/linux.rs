@@ -28,6 +28,7 @@ pub async fn watch(
     cfg: Arc<Config>,
     auth: SharedCoprocessor,
     airplay_port: u32,
+    accessory_key: String,
     restart: broadcast::Sender<()>,
     mut gate: tokio::sync::watch::Receiver<bool>,
     panel: Arc<ClSink>,
@@ -121,6 +122,14 @@ pub async fn watch(
         let link = LinkConfig {
             max_outgoing: 4,
             control_version: 2,
+            // This board's HCI UART runs at 115200 baud, about 11 KB/s, and the
+            // retransmission timeout is 4 s: a 64 KB packet cannot arrive in
+            // time and is sent again until the budget runs out, which is how the
+            // session used to die mid-transfer. The phone takes this as the size
+            // it may send, so a cover arrives in packets of a fraction of a
+            // second each. Only this link is this slow — the cable and the tunnel
+            // keep the default.
+            max_len: 4096,
             ..LinkConfig::default()
         };
         // Over RFCOMM the phone speaks first, so we must not open with a
@@ -138,6 +147,7 @@ pub async fn watch(
             channel,
             airplay_port,
             local_mac(&cfg),
+            &accessory_key,
             &peer,
             &restart,
             &panel,
