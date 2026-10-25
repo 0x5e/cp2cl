@@ -2214,9 +2214,17 @@ impl Session {
 /// It arrives as a number in one version and as a string in another, and both
 /// spell the same salt — so both are read the same way rather than one of them
 /// being refused as malformed.
+///
+/// A number is read as unsigned. The phone draws the seed from the whole 64-bit
+/// range and spells the salt from it as `PRIu64`, while a plist integer reaches
+/// us as the same eight bytes read as signed: half of all seeds are negative
+/// here, and each of those names a salt the phone never computes.
 fn seed_text(value: &Value) -> Option<String> {
     match value {
-        Value::Integer(n) => Some(n.to_string()),
+        Value::Integer(n) => n
+            .as_signed()
+            .map(|v| (v as u64).to_string())
+            .or_else(|| n.as_unsigned().map(|v| v.to_string())),
         // A whole number written as a real is still the same digits, as long as
         // a real can hold all of them: above 2^53 it cannot, so one that large
         // is written as the real it is rather than as digits it may not have.
@@ -2288,6 +2296,28 @@ mod tests {
         );
         assert_eq!(mac_of("", None), None);
         assert_eq!(mac_of("aa:bb:cc:dd:ee", Some("nonsense")), None);
+    }
+
+    /// A seed above `i64::MAX` arrives as the same eight bytes read as signed,
+    /// while the phone spells the salt from the unsigned value.
+    #[test]
+    fn a_seed_above_the_signed_range_is_spelled_unsigned() {
+        assert_eq!(
+            seed_text(&Value::Integer((-1_687_929_222_165_462_259i64).into())).as_deref(),
+            Some("16758814851544089357")
+        );
+        assert_eq!(
+            seed_text(&Value::Integer(16_758_814_851_544_089_357u64.into())).as_deref(),
+            Some("16758814851544089357")
+        );
+        assert_eq!(
+            seed_text(&Value::Integer(42.into())).as_deref(),
+            Some("42")
+        );
+        assert_eq!(
+            seed_text(&Value::String("42".into())).as_deref(),
+            Some("42")
+        );
     }
 
     /// A percentage turns into a request for a canvas of `100/percent` the size.
