@@ -512,7 +512,7 @@ configuration out of `/etc/hostapd`, taking the file that names the interface
 |---|---|
 | `S00diag` | writes what the boot had to say to `/var/log`, then samples the radio for two minutes |
 | `S10radio` | loads the Wi-Fi and Bluetooth modules, and waits for `wlan0` and `hci0` |
-| `S50cp2cl` | the program, with the environment the README documents |
+| `S50cp2cl` | the program, which sets no environment and reads no settings file |
 | `S50dropbear` | dropbear, for the console the image does not otherwise have |
 | `S55ap` | hostapd on `wlan0` at `192.168.4.1/24`, then dnsmasq for the leases |
 
@@ -596,12 +596,14 @@ happen, an endpoint that would not open. A device that enumerates and then goes
 quiet is a head unit waiting for an answer, which `CP2CL_LOG_LEVEL=debug` prints
 request by request.
 
-**The access point advertises no gateway.** Joining it does not take a machine's
-default route away from wherever it was: the client keeps that route, and still
-reaches this board on the route to `192.168.4.0/24` that its own address and netmask
-give it. Both options are written with no value, which is what suppresses them —
-removing the line would restore dnsmasq's default of advertising itself. The DNS
-option is suppressed for a second reason: `--port=0` means nothing answers DNS here.
+**The access point advertises no gateway, and answers DNS for one question.**
+Joining it does not take a machine's default route away from wherever it was: the
+client keeps that route, and still reaches this board on the route to
+`192.168.4.0/24` that its own address and netmask give it — `--dhcp-option=3` with
+no value is what suppresses the gateway. `--dhcp-option=6,192.168.4.1` with
+`--no-resolv --address=/apple.com/` is the whole of its DNS: the phone's probe comes
+back NXDOMAIN, which is what settles the link as one without internet rather than
+leaving it pending.
 
 **A DHCP range on the wrong subnet is silent.** `S55ap` serves
 `192.168.4.2`–`100`, and the line above it is what puts `192.168.4.1/24` on the
