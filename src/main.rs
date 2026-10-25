@@ -3,8 +3,8 @@
 //!
 //! Nothing here draws anything itself. Three pieces run concurrently:
 //!
-//! * a session watcher that carries iAP2 over USB — or over Bluetooth, when
-//!   `CP2CL_WIRELESS` is set — and starts CarPlay,
+//! * a session watcher that carries iAP2 over Bluetooth — or over USB, when
+//!   `CP2CL_WIRELESS=0` — and starts CarPlay,
 //! * an airplay receiver that accepts the phone's return call and decrypts its
 //!   media,
 //! * the CarLife session, which presents this device to a head unit as a phone

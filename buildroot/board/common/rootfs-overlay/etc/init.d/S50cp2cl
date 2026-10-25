@@ -26,11 +26,12 @@ case "$1" in
 		# download puts first. What is left for these two redirects is what
 		# never reaches the layer: a panic, and whatever a library prints on
 		# its own.
+		#
+		# The interface and the adapter are named by the program when nothing
+		# names them, and wireless is on unless `CP2CL_WIRELESS` turns it off,
+		# so none of the three is repeated here.
 		XDG_DATA_HOME=/var/lib \
-		CP2CL_WIRELESS=1 \
 		CP2CL_LOG_LEVEL=info \
-		CP2CL_WIFI_IFACE=wlan0 \
-		CP2CL_BT_ADAPTER=hci0 \
 			setsid /usr/bin/cp2cl >/dev/null 2>>/var/log/cp2cl.err &
 		echo $! > /run/cp2cl.pid
 		echo "ok"

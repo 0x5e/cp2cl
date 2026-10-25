@@ -224,7 +224,7 @@ them.
 | Variable | Default | Meaning |
 |---|---|---|
 | `CP2CL_LOG_LEVEL` | `info` | log level: `error`, `warn`, `info`, `debug` |
-| `CP2CL_WIRELESS` | off | take CarPlay over Wi-Fi instead of USB |
+| `CP2CL_WIRELESS` | on | take CarPlay over Wi-Fi instead of USB; `0` for the cable |
 | `CP2CL_WIFI_IFACE` | `wlan0` | the interface the access point runs on |
 | `CP2CL_BT_ADAPTER` | `hci0` | which Bluetooth adapter |
 | `CP2CL_INPUT_FILE` | — | test video stream file |
@@ -241,9 +241,10 @@ composed by the program, and what it is made of is in `src/carlife/desc.rs` — 
 
 ## Wireless CarPlay
 
-`CP2CL_WIRELESS=1` moves the handshake from the cable to Bluetooth. The phone is
-paired in the operating system first — this program pairs nothing — and then
-finds the iAP2 service we publish. Bluetooth carries only that beginning: the
+Wireless CarPlay is what the program starts in: the handshake goes over
+Bluetooth rather than the cable. `CP2CL_WIRELESS=0` puts it back on USB. The
+phone is paired in the operating system first — this program pairs nothing — and
+then finds the iAP2 service we publish. Bluetooth carries only that beginning: the
 moment we answer `CarPlayStartSession` with a Wi-Fi network and our link-local
 address, the phone hangs up and comes back over Wi-Fi, where the same airplay
 receiver takes over. Nothing about the media changes.
@@ -313,7 +314,7 @@ so everything up to the picture can be exercised without one:
 ```bash
 # On the board, in the foreground. Ctrl-C ends the run and takes the device off
 # the bus with it.
-CP2CL_WIRELESS=1 ./cp2cl
+./cp2cl
 ```
 
 The video channel then carries the phone's frames, which needs both a phone and a

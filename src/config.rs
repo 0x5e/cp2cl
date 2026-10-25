@@ -114,11 +114,12 @@ impl Config {
         Self {
             bt_mac: bt_address(&bt_adapter),
             name: hostname(),
-            // Wired stays the default: it needs nothing the operator has to
-            // look up first.
+            // Wireless is what this is for: the board is reached as an
+            // accessory over Bluetooth and Wi-Fi. `CP2CL_WIRELESS=0` is the way
+            // back to the cable, for a machine with no radio to use.
             wireless: std::env::var("CP2CL_WIRELESS")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
+                .unwrap_or(true),
             wifi_iface: env_or("CP2CL_WIFI_IFACE", "wlan0"),
             input_file: env("CP2CL_INPUT_FILE").map(PathBuf::from),
             bt_adapter,
