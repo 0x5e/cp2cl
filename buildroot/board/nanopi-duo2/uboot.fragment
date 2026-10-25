@@ -1,0 +1,10 @@
+# Applied on top of U-Boot's own nanopi_duo2_defconfig.
+
+# Two seconds of countdown, waiting for a key on a console this board does not
+# have.
+CONFIG_BOOTDELAY=0
+
+# ARCH_SUNXI selects USE_PREBOOT, so preboot cannot be turned off, only emptied:
+# its default is `usb start`, a scan of the USB controllers for boot media that
+# might be a stick, and the boot media here is the card.
+CONFIG_PREBOOT=""
