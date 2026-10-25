@@ -1,7 +1,8 @@
 #!/bin/sh
 #
-# cp2cl, last: it reads the access point's network out of /etc/hostapd, and for
-# wireless it needs BlueZ registered.
+# cp2cl: what it needs is behind it — the two radios by `S10radio`, BlueZ by
+# `S40bluetoothd` — and what is still ahead of it, the access point, it reads out
+# of /etc/hostapd, which is a file rather than a daemon.
 #
 # The program has no settings file and needs no environment: every value it
 # takes from outside has a default in it, and the state it keeps — the identity

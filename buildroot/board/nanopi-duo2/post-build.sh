@@ -62,7 +62,7 @@ for f in usr/bin/gio usr/bin/gdbus usr/bin/gsettings usr/bin/gresource \
 done
 
 # The dnsmasq package installs a start script of its own, which runs at S80 from
-# /etc/dnsmasq.conf — after S20ap has already started the one instance this board
+# /etc/dnsmasq.conf — after S55ap has already started the one instance this board
 # wants, on wlan0, with the range the phone is handed. The binary stays.
 rm -f "$TARGET_DIR/etc/init.d/S80dnsmasq"
 

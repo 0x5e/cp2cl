@@ -195,7 +195,7 @@ the core; none is loaded on this chip.
 
 ### 3.5 Start order
 
-    S00diag  S10radio  S20ap  S30dbus-daemon  S40bluetoothd  S50cp2cl
+    S00diag  S10radio  S30dbus-daemon  S40bluetoothd  S50cp2cl  S55ap
 
 ### 3.6 Not needed
 
@@ -205,7 +205,7 @@ the core; none is loaded on this chip.
 Leftovers in this image, doing nothing: `S11modules` (no `/etc/modules`),
 `S40network` (no interfaces), `S50crond` (no crontabs). `S80dnsmasq` is deleted
 by `post-build.sh`: it would start a second dnsmasq after the one in
-`S20ap`, from `/etc/dnsmasq.conf`, which sets no `dhcp-range`.
+`S55ap`, from `/etc/dnsmasq.conf`, which sets no `dhcp-range`.
 
 ### 3.7 Traps, one line each
 
