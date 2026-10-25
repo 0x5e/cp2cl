@@ -27,6 +27,7 @@
 - cp2cl 包的版本号改为从 `Cargo.toml` 读：`cp2cl.mk` 里写死的 `0.9.1` 与 crate 的 `0.11.0` 早已不一致，构建目录名和每次 firmware 日志里那几行删标记的命令都跟着报旧号。
 - 音频泵不再每五秒打印 `audio.stats`，只给它用的计数（包簇、入队与解码帧数、解码耗时）连同 `AUDIO_REPORT`、`BURST_GAP`、`FRAME_SAMPLES` 三个常量一并删掉：那一行只覆盖一个窗口，整条流的总数在结束行 `audio.stream_closed` 和状态页上仍有。`worst_gap` 因此不再每五秒清零，状态页的 `worst_gap_ms` 现在报的是整条流的最差值。
 - boot 分区的卷标改为 `BOOT`，此前是 mkfs 的默认值 `NO NAME`，卡插到电脑上显示的就是这个名字；板上没有东西读它，U-Boot 按 `mmc 0:1` 的分区号加载，`/etc/fstab` 也不挂这个分区。
+- 设备在会话进行中被拿下总线（切 accessory、拔线）时不再打印 `usb.session_failed`：端点失效后每个在途传输都以 `ESHUTDOWN` 结束，这是链路结束而不是故障，带走设备的那条事件自己会报。
 
 ### 修复
 

@@ -170,7 +170,15 @@ where
                         )
                         .await
                         {
-                            tracing::warn!("usb.session_failed err={e:#}");
+                            // A session that ends because the device left the
+                            // bus is not one that failed: every transfer on a
+                            // disabled endpoint comes back with `ESHUTDOWN`, and
+                            // what took the device away — the switch to
+                            // accessory, or the car unplugging — reports itself
+                            // where it happens.
+                            if !off_bus(&e) {
+                                tracing::warn!("usb.session_failed err={e:#}");
+                            }
                         }
                     }
                     Err(e) => tracing::error!("usb.endpoints_unusable err={e:#}"),
@@ -190,6 +198,18 @@ where
     controlling.abort();
     tracing::info!("usb.control_closed");
     Ok(())
+}
+
+/// Whether a session ended because the device left the bus.
+///
+/// FunctionFS answers every transfer on an endpoint that is no longer active with
+/// `ESHUTDOWN`, whether the host went away or the gadget was unbound for its
+/// other form; there is no third way to get it. So this is the pipe ending, not a
+/// fault in it.
+fn off_bus(e: &anyhow::Error) -> bool {
+    e.root_cause()
+        .downcast_ref::<io::Error>()
+        .is_some_and(|e| e.raw_os_error() == Some(libc::ESHUTDOWN))
 }
 
 /// Reads the control endpoint for the life of the process.
