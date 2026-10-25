@@ -1,0 +1,10 @@
+--- a/arch/arm/boot/dts/allwinner/sun8i-h3-nanopi-duo2.dts
++++ b/arch/arm/boot/dts/allwinner/sun8i-h3-nanopi-duo2.dts
+@@ -151,6 +151,7 @@
+ 
+ 	bluetooth {
+ 		compatible = "brcm,bcm43438-bt";
++		max-speed = <1500000>;
+ 		clocks = <&rtc CLK_OSC32K_FANOUT>;
+ 		clock-names = "lpo";
+ 		vbat-supply = <&reg_vcc3v3>;

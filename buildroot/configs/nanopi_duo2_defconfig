@@ -46,6 +46,11 @@ BR2_TARGET_ROOTFS_EXT2_LABEL="rootfs"
 # 6.18 is the current longterm, not Buildroot's own default (6.19, a plain stable
 # that is replaced every few months). A car that has to be right in three years
 # wants the branch that still gets fixes then.
+# For every package that has a directory under it, not just the one below: the
+# patch in the tree so far is the kernel's device tree, which is the only place
+# the Bluetooth UART speed can be raised — mainline has no fragment for dts.
+BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_CP2CL_PATH)/patches"
+
 BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_CUSTOM_VERSION=y
 BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.18.58"
