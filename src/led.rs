@@ -7,10 +7,10 @@
 //! a loop: nothing in this process wakes up to turn a light on or off.
 //!
 //! The red one means something about *this program* rather than about the
-//! board: the device tree lights it with `default-state = "on"`. It is put out
-//! only while the green one is showing a phase — waiting, connecting, linked —
-//! and lit while the green one is out (no car, or nothing here for a phone to
-//! come back to) and when there is no program at all.
+//! board: the device tree lights it with `default-state = "on"`. It beats while
+//! the green one is out (no car, or nothing here for a phone to come back to),
+//! is put out while the green one is showing a phase — waiting, connecting,
+//! linked — and is lit when there is no program at all.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -32,8 +32,8 @@ const POWER: &str = "/sys/class/leds/nanopi:red:pwr";
 /// sees can be read without a log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
-    /// Put out, and the red one lit: no car, or nothing here for a phone to come
-    /// back to.
+    /// Put out, and the red one beating: no car, or nothing here for a phone to
+    /// come back to.
     Off,
     /// The car is up and no phone is connected: a slow beat.
     Waiting,
@@ -64,11 +64,33 @@ impl Phase {
             Phase::Linked => Look::Steady(true),
         }
     }
+
+    /// What the red one says while this phase holds: a beat while the green one
+    /// is out, meaning nothing here is ready for a phone, and out while the
+    /// green one is saying something.
+    fn power(self) -> Look {
+        match self {
+            Phase::Off => Look::Blink { on: 500, off: 500 },
+            Phase::Waiting | Phase::Connecting | Phase::Linked => Look::Steady(false),
+        }
+    }
 }
 
+#[derive(Clone, Copy)]
 enum Look {
     Steady(bool),
     Blink { on: u64, off: u64 },
+}
+
+impl Look {
+    /// How the log names it.
+    fn state(self) -> &'static str {
+        match self {
+            Look::Steady(true) => "on",
+            Look::Steady(false) => "off",
+            Look::Blink { .. } => "blink",
+        }
+    }
 }
 
 /// Drives both lights for as long as the program runs.
@@ -77,18 +99,18 @@ enum Look {
 /// phase; this is the only place that writes it to the filesystem, because a
 /// sysfs write blocks and none of those places is one to wait in.
 ///
-/// The red one follows the same phase: out while the green one is saying
-/// something, lit while it has nothing to say.
+/// The red one follows the same phase: beating while the green one is out, and
+/// out while the green one is saying something.
 pub async fn run(mut phase: watch::Receiver<Phase>, lights: Option<Arc<Lights>>) {
     let status = Led::open(STATUS, "status");
     // Written on the first pass rather than in `take`: the phase is what says
-    // whether the red one is lit, and it is the same answer here as on every
-    // change after.
-    let mut lit = None;
+    // what the red one does, and it is the same answer here as on every change
+    // after.
+    let mut shown = None;
     loop {
         let wanted = *phase.borrow_and_update();
         if let Some(status) = &status {
-            match status.show(wanted) {
+            match status.show(wanted.look()) {
                 Ok(()) => tracing::info!("led.phase light=status phase={}", wanted.name()),
                 Err(e) => tracing::warn!(
                     "led.write_failed light=status phase={} err={e}",
@@ -96,12 +118,11 @@ pub async fn run(mut phase: watch::Receiver<Phase>, lights: Option<Arc<Lights>>)
                 ),
             }
         }
-        let out = wanted == Phase::Off;
-        if lit != Some(out) {
+        if shown != Some(wanted) {
             if let Some(lights) = &lights {
-                lights.show_power(out);
+                lights.show_power(wanted);
             }
-            lit = Some(out);
+            shown = Some(wanted);
         }
         if phase.changed().await.is_err() {
             return;
@@ -131,10 +152,11 @@ impl Lights {
         Some(Self { power, status })
     }
 
-    /// Lit or put out, which is the whole of what the red light says.
-    fn show_power(&self, on: bool) {
-        match self.power.level(on) {
-            Ok(()) => tracing::info!("led.power state={}", if on { "on" } else { "off" }),
+    /// Beating or put out, which is the whole of what the red light says.
+    fn show_power(&self, phase: Phase) {
+        let look = phase.power();
+        match self.power.show(look) {
+            Ok(()) => tracing::info!("led.power state={}", look.state()),
             Err(e) => tracing::warn!("led.write_failed light=power err={e}"),
         }
     }
@@ -239,8 +261,8 @@ impl Led {
         Some(Self { dir })
     }
 
-    fn show(&self, phase: Phase) -> io::Result<()> {
-        match phase.look() {
+    fn show(&self, look: Look) -> io::Result<()> {
+        match look {
             Look::Steady(on) => self.level(on),
             Look::Blink { on, off } => {
                 // Selecting the trigger starts the blink; the delays come after
@@ -269,17 +291,21 @@ impl Led {
 mod tests {
     use super::*;
 
-    /// The two rates are the requirement, and they are the one thing here that
-    /// a typo would change without anything failing.
+    /// The rates are the requirement, and they are the one thing here that a
+    /// typo would change without anything failing.
     #[test]
-    fn the_two_blink_rates_are_the_ones_asked_for() {
-        let blink = |phase: Phase| match phase.look() {
+    fn the_blink_rates_are_the_ones_asked_for() {
+        let blink = |look: Look| match look {
             Look::Blink { on, off } => (on, off),
             Look::Steady(_) => (0, 0),
         };
-        assert_eq!(blink(Phase::Waiting), (500, 500));
-        assert_eq!(blink(Phase::Connecting), (200, 200));
+        assert_eq!(blink(Phase::Waiting.look()), (500, 500));
+        assert_eq!(blink(Phase::Connecting.look()), (200, 200));
+        assert_eq!(blink(Phase::Off.power()), (500, 500));
         assert!(matches!(Phase::Off.look(), Look::Steady(false)));
         assert!(matches!(Phase::Linked.look(), Look::Steady(true)));
+        for phase in [Phase::Waiting, Phase::Connecting, Phase::Linked] {
+            assert!(matches!(phase.power(), Look::Steady(false)));
+        }
     }
 }
