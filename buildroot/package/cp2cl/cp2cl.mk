@@ -14,7 +14,10 @@
 #
 ################################################################################
 
-CP2CL_VERSION = 0.9.1
+# Read out of Cargo.toml rather than written here a second time: the copy that
+# lived here said 0.9.1 while the crate said 0.11.0, and this number is what
+# names the build directory and what the log prints on every package step.
+CP2CL_VERSION = $(shell sed -n 's/^version = "//p' $(BR2_EXTERNAL_CP2CL_PATH)/../Cargo.toml | head -n1 | tr -d '"')
 CP2CL_SITE = $(BR2_EXTERNAL_CP2CL_PATH)/../dist
 CP2CL_SITE_METHOD = local
 CP2CL_LICENSE = GPL-3.0-or-later
