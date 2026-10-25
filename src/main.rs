@@ -14,9 +14,11 @@ mod aac;
 mod airplay;
 mod artwork;
 mod assets;
+mod button;
 mod carlife;
 mod commands;
 mod config;
+mod led;
 mod logging;
 mod navigation;
 mod playing;
@@ -103,6 +105,40 @@ async fn main() -> Result<()> {
         cfg.wifi_iface,
         cfg.bt_adapter
     );
+
+    // The board's lights and its one button. All three are best-effort: an
+    // image without them runs exactly as before and says so once.
+    //
+    // The red light is the program's own state: out while it runs, back when it
+    // does not — so a red board with a green light showing anything is a board
+    // with a program on it. Two ways out skip the drop that would put it back,
+    // a panic (`panic = "abort"`) and a signal; both are handled here.
+    let lights = led::Lights::take().map(Arc::new);
+    if let Some(lights) = &lights {
+        let lights = lights.clone();
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            lights.restore();
+            default(info);
+        }));
+    }
+    let (led, led_state) = tokio::sync::watch::channel(led::Phase::Off);
+    tokio::spawn(led::run(led_state));
+    tokio::spawn(button::watch());
+    if let Some(lights) = &lights {
+        // A wireless run already catches SIGTERM to put the Bluetooth
+        // controllers back, and that path ends by returning through here, where
+        // the lights go back anyway. Taking the same signal here as well would
+        // cut it short, so only a wired run takes it — neither run has a
+        // handler for SIGINT, SIGHUP or SIGQUIT.
+        //
+        // Cloned rather than handed over: this `lights` stays in `main` to the
+        // end, so the drop that puts them back is the one on the way out of
+        // `main` and not whatever the runtime does with a task it is shutting
+        // down.
+        let catch_term = !cfg.wireless;
+        tokio::spawn(led::stopper(lights.clone(), catch_term));
+    }
 
     // Everything the page shows is reported from wherever it is learned, and
     // nothing reads it back: see `web::status`. Started before anything else so
@@ -277,6 +313,7 @@ async fn main() -> Result<()> {
             timing: Arc::new(Mutex::new(SyncedClock::new())),
             status: status.clone(),
             tunnel,
+            led: led.clone(),
         },
         gate.clone(),
     ));
@@ -286,8 +323,18 @@ async fn main() -> Result<()> {
     // bridge, and both go away again when it does.
     let opening = carplay.clone();
     let nudge = restart.clone();
+    let led_car = led.clone();
+    let readiness = cfg.clone();
     let mut report = move |up: bool| {
         let _ = opening.send(up);
+        // Checked here rather than at startup: this is the moment the light
+        // would start to beat, and an access point or a controller that is not
+        // up is a phone that cannot arrive.
+        led_car.send_replace(if up && led::ready(&readiness) {
+            led::Phase::Waiting
+        } else {
+            led::Phase::Off
+        });
         if up {
             // The phone will not start CarPlay on its own — it has to be told
             // again — and a fresh iAP2 session is how it is told.
