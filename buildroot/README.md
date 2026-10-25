@@ -170,6 +170,7 @@ the core; none is loaded on this chip.
     /var/log/ap.log
     /var/log/hostapd.log
     /var/log/cp2cl.log
+    /var/log/cp2cl.err        stderr only: a panic, not the log
     /var/log/messages         busybox syslogd, no args
 
 `/var/log` has to be a real directory on a writable filesystem, not the
