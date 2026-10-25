@@ -574,11 +574,25 @@ async function logTick() {
 
 // ---------------------------------------------------------------- tabs ----
 
-let tab = "status";
+// The tab in view is part of the address, so a reload or a link to the page
+// opens on the tab it names instead of on the first one.
+const TABS = ["status", "log", "settings"];
+
+function routed() {
+  const name = location.hash.replace(/^#\/?/, "");
+  return TABS.includes(name) ? name : "status";
+}
+
+let tab = routed();
 
 function select(name) {
+  if (!TABS.includes(name)) name = "status";
+  // Written over the address rather than after it: the three tabs are one page
+  // with three views, and going back should leave the page, not walk back
+  // through the views that were looked at.
+  if (location.hash !== "#/" + name) history.replaceState(null, "", "#/" + name);
   tab = name;
-  for (const id of ["status", "log", "settings"]) {
+  for (const id of TABS) {
     document.getElementById("panel-" + id).classList.toggle("on", id === name);
     document.getElementById("tab-" + id).classList.toggle("on", id === name);
   }
@@ -597,6 +611,13 @@ for (const button of document.querySelectorAll(".tabbar .tab")) {
   button.addEventListener("click", () => select(button.dataset.tab));
 }
 
+// An address typed in, or followed from a link someone sent, arrives as a
+// change to the hash rather than as a load of the page.
+window.addEventListener("hashchange", () => {
+  const name = routed();
+  if (name !== tab) select(name);
+});
+
 function schedule() {
   if (document.hidden) return;
   if (tab === "status") statusTick();
@@ -606,7 +627,7 @@ function schedule() {
 // The channel table is asked for before the first status, so the first answer is
 // drawn with the make already known instead of being redrawn a poll later.
 loadChannels().then(() => {
-  select("status");
+  select(tab);
   setInterval(schedule, 2000);
   document.addEventListener("visibilitychange", schedule);
 });
