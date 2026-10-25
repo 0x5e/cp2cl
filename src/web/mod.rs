@@ -196,7 +196,7 @@ async fn cover(State(status): State<Arc<Status>>, RawQuery(query): RawQuery) -> 
 /// is given the copy from its beginning — which is what a page that asks for
 /// nothing at all is given too.
 async fn log(RawQuery(query): RawQuery) -> Response {
-    let (reset, from, text) = copied(Path::new(logging::PATH), from(&query)).await;
+    let (reset, from, text, read) = copied(Path::new(logging::PATH), from(&query)).await;
     (
         [
             (header::CONTENT_TYPE, JSON),
@@ -205,7 +205,7 @@ async fn log(RawQuery(query): RawQuery) -> Response {
         json!({
             "reset": reset,
             "from": from,
-            "next": from + text.len() as u64,
+            "next": from + read,
             "text": text,
         })
         .to_string(),
@@ -220,11 +220,17 @@ async fn log(RawQuery(query): RawQuery) -> Response {
 /// at four megabytes, so handing all of it over is bounded, and a page that
 /// opens at the tail would only ever be able to read forward from wherever it
 /// was opened.
-async fn copied(path: &Path, from: Option<u64>) -> (bool, u64, String) {
+///
+/// The last part is how many bytes were handed over, which is the offset the
+/// next answer starts at. It is counted from the bytes rather than taken from
+/// the text: a copy is not promised to be valid UTF-8, and a lossy reading of
+/// what is not spells one or more bytes as a three-byte `U+FFFD`, so the text
+/// is longer than what it was read from and its length is no offset at all.
+async fn copied(path: &Path, from: Option<u64>) -> (bool, u64, String, u64) {
     // No copy yet, or one that cannot be read, is an empty one: the page shows
     // nothing and asks again.
     let Ok(mut file) = tokio::fs::File::open(path).await else {
-        return (true, 0, String::new());
+        return (true, 0, String::new(), 0);
     };
     let written = file.metadata().await.map(|m| m.len()).unwrap_or(0);
     let (reset, from) = match from {
@@ -238,7 +244,8 @@ async fn copied(path: &Path, from: Option<u64>) -> (bool, u64, String) {
     if file.seek(std::io::SeekFrom::Start(from)).await.is_ok() {
         let _ = file.read_to_end(&mut bytes).await;
     }
-    (reset, from, String::from_utf8_lossy(&bytes).into_owned())
+    let read = bytes.len() as u64;
+    (reset, from, String::from_utf8_lossy(&bytes).into_owned(), read)
 }
 
 /// Everything the board still has of the log, for taking away.
@@ -648,31 +655,50 @@ mod tests {
         let path = std::env::temp_dir().join(format!("cp2cl-log-{}", std::process::id()));
         std::fs::write(&path, "one\ntwo\n").unwrap();
 
-        let (reset, from, text) = copied(&path, None).await;
+        let (reset, from, text, read) = copied(&path, None).await;
         assert!(reset, "no offset is the beginning");
-        assert_eq!((from, text.as_str()), (0, "one\ntwo\n"));
+        assert_eq!((from, text.as_str(), read), (0, "one\ntwo\n", 8));
 
         // The next answer starts where that one ended, and carries nothing new.
-        let (reset, from, text) = copied(&path, Some(text.len() as u64)).await;
+        let (reset, from, text, read) = copied(&path, Some(read)).await;
         assert!(!reset, "an offset in the copy is kept");
-        assert_eq!((from, text.as_str()), (8, ""));
+        assert_eq!((from, text.as_str(), read), (8, "", 0));
 
         // Half way in is the rest of it, from there.
-        let (reset, from, text) = copied(&path, Some(4)).await;
+        let (reset, from, text, read) = copied(&path, Some(4)).await;
         assert!(!reset);
-        assert_eq!((from, text.as_str()), (4, "two\n"));
+        assert_eq!((from, text.as_str(), read), (4, "two\n", 4));
 
         // Past the end is a copy that moved under the page: rolled, or written
         // by another run.
-        let (reset, from, text) = copied(&path, Some(4096)).await;
+        let (reset, from, text, read) = copied(&path, Some(4096)).await;
         assert!(reset);
-        assert_eq!((from, text.as_str()), (0, "one\ntwo\n"));
+        assert_eq!((from, text.as_str(), read), (0, "one\ntwo\n", 8));
 
         // A copy that is not there is an empty one, and is not an error.
         let gone = std::env::temp_dir().join("cp2cl-log-not-here");
-        let (reset, from, text) = copied(&gone, Some(8)).await;
+        let (reset, from, text, read) = copied(&gone, Some(8)).await;
         assert!(reset);
-        assert_eq!((from, text.as_str()), (0, ""));
+        assert_eq!((from, text.as_str(), read), (0, "", 0));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// How far the page has read is a count of bytes, and a text is not one: a
+    /// byte the copy has that UTF-8 does not is spelled as a three-byte
+    /// `U+FFFD`, so an offset taken from the text would run ahead of the copy
+    /// and the lines after it would be read from the wrong place.
+    #[tokio::test]
+    async fn the_offset_counts_the_bytes_and_not_the_text() {
+        let path = std::env::temp_dir().join(format!("cp2cl-log-odd-{}", std::process::id()));
+        std::fs::write(&path, b"a\xffb\n").unwrap();
+
+        let (reset, from, text, read) = copied(&path, None).await;
+        assert!(reset);
+        assert_eq!(from, 0);
+        assert_eq!(read, 4, "four bytes in the copy");
+        assert_eq!(text.len(), 6, "and six in the text made of them");
+        assert!(text.ends_with("b\n"));
 
         std::fs::remove_file(&path).ok();
     }
@@ -686,10 +712,11 @@ mod tests {
         let line = "x".repeat(99) + "\n";
         std::fs::write(&path, line.repeat(3000)).unwrap();
 
-        let (reset, from, text) = copied(&path, None).await;
+        let (reset, from, text, read) = copied(&path, None).await;
         assert!(reset, "a page with no offset starts over");
         assert_eq!(from, 0, "at the beginning of the copy");
         assert_eq!(text.len(), 300_000, "and carries all of it");
+        assert_eq!(read, 300_000, "which is where the next one starts");
 
         std::fs::remove_file(&path).ok();
     }
