@@ -119,8 +119,12 @@ Optional, absent here: `brcmfmac43430-sdio.clm_blob` — brcmfmac warns and cont
 
     /lib/modules/$(uname -r)/kernel/drivers/net/wireless/broadcom/brcm80211/brcmutil/brcmutil.ko
     /lib/modules/$(uname -r)/kernel/drivers/net/wireless/broadcom/brcm80211/brcmfmac/brcmfmac.ko
+    /lib/modules/$(uname -r)/kernel/crypto/{ecc,ecdh_generic}.ko
+    /lib/modules/$(uname -r)/kernel/net/bluetooth/{bluetooth,rfcomm}.ko
+    /lib/modules/$(uname -r)/kernel/drivers/bluetooth/{btbcm,hci_uart}.ko
 
-No `depmod`, no `kmod`: both are `insmod`-ed by path from `/etc/init.d/S10wifi`.
+No `depmod`, no `kmod`: all of them are `insmod`-ed by path from
+`/etc/init.d/S10radio`, which lists them in the order they have to be loaded.
 6.18 also ships `brcmfmac-bca.ko`, `brcmfmac-cyw.ko`, `brcmfmac-wcc.ko` beside
 the core; none is loaded on this chip.
 
@@ -161,7 +165,7 @@ the core; none is loaded on this chip.
     /var/log/boot.log
     /var/log/dmesg.log
     /var/log/state.log
-    /var/log/wifi.log
+    /var/log/radio.log
     /var/log/ap.log
     /var/log/hostapd.log
     /var/log/cp2cl.log
@@ -191,7 +195,7 @@ the core; none is loaded on this chip.
 
 ### 3.5 Start order
 
-    S00diag  S10wifi  S20ap  S30dbus-daemon  S40bluetoothd  S50cp2cl
+    S00diag  S10radio  S20ap  S30dbus-daemon  S40bluetoothd  S50cp2cl
 
 ### 3.6 Not needed
 

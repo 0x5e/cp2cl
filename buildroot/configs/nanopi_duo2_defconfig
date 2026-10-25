@@ -101,7 +101,7 @@ BR2_PACKAGE_IW=y
 # it is what makes channel 11 legal rather than merely tolerated.
 BR2_PACKAGE_WIRELESS_REGDB=y
 # No kmod. The one module this image has is brcmfmac, loaded by name and path
-# from /etc/init.d/S10wifi, so busybox's insmod is enough and there is no depmod
+# from /etc/init.d/S10radio, so busybox's insmod is enough and there is no depmod
 # to run: the two modules are listed in the order they have to be loaded.
 
 # dropbear rather than openssh: openssh is 7 MB of binaries and 4.7 MB of

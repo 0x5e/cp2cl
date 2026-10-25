@@ -1,0 +1,134 @@
+#!/bin/sh
+#
+# Both radios, loaded from here rather than compiled in.
+#
+# A built-in driver probes at device_initcall, before the root is mounted, and
+# /lib/firmware does not exist yet. brcmfmac's firmware request fails with
+# -ENOENT and is not retried, so the SDIO function stays bound to a driver that
+# never brought the chip up; btbcm's patch request fails the same way, and an
+# unpatched BCM43430A1 answers READ_BD_ADDR with AA:AA:AA:AA:AA:AA, which btbcm
+# marks invalid, so BlueZ builds /var/lib/bluetooth/AA:AA:AA:AA:AA:AA/ instead
+# of the directory that holds the pairings.
+#
+# One script for both: the two drivers are independent, and waiting for them in
+# series costs the boot the sum of the waits. Everything here goes to
+# /var/log/radio.log, because "no SSID", "no adapter" and "no driver" look the
+# same from a phone.
+
+MODDIR=/lib/modules/$(uname -r)
+LOG=/var/log
+
+# In the order the dependencies need, without the modprobe that would read them:
+# brcmutil before brcmfmac, the two crypto primitives and the core before the
+# serial profile, the Broadcom patcher before the transport that uses it.
+MODULES="brcmutil brcmfmac ecc ecdh_generic bluetooth rfcomm btbcm hci_uart"
+
+# The ceiling for both, in tenths of a second. If either has not appeared by
+# then it is not going to, and the reason is in dmesg.
+CEILING=200
+
+log() {
+	echo "$*"
+	[ -w "$LOG" ] && echo "$*" >> "$LOG/radio.log"
+}
+
+# On the same clock as /var/log/boot.log, so the two can be read together.
+now() {
+	cut -d' ' -f1 /proc/uptime
+}
+
+start() {
+	printf 'Loading radios: '
+	ERR=/dev/null
+	if [ -w "$LOG" ]; then
+		: > "$LOG/radio.log"
+		ERR=$LOG/radio.log
+	fi
+
+	for m in $MODULES; do
+		ko=$(find "$MODDIR" -name "$m.ko" 2>/dev/null | head -n 1)
+		if [ -z "$ko" ]; then
+			log "missing $m.ko under $MODDIR"
+			continue
+		fi
+		if insmod "$ko" 2>>"$ERR"; then
+			log "loaded $ko"
+		else
+			log "insmod $ko failed"
+		fi
+	done
+
+	if [ ! -d /sys/class/net ] || [ ! -d /sys/class/bluetooth ]; then
+		log "/sys is not mounted: wlan0 and hci0 may exist and be invisible"
+		dmesg | grep -i -E 'brcmf|mmc1|sdio|bluetooth|bcm|hci' >> "$ERR" 2>/dev/null
+		echo "no /sys"
+		return 1
+	fi
+
+	# The interface appears once the chip has taken its firmware, and the
+	# controller once btbcm has pushed the patch. Neither reports anything
+	# while it works, and both do it at the same time.
+	wlan=""
+	hci=""
+	i=0
+	while [ -z "$wlan" ] || [ -z "$hci" ]; do
+		i=$((i + 1))
+		if [ -z "$wlan" ] && [ -e /sys/class/net/wlan0 ]; then
+			wlan=$(now)
+		fi
+		if [ -z "$hci" ] && [ -e /sys/class/bluetooth/hci0 ]; then
+			hci=$(now)
+		fi
+		if [ "$i" -ge "$CEILING" ]; then
+			break
+		fi
+		usleep 100000
+	done
+
+	if [ -z "$wlan" ]; then
+		log "wlan0 did not appear in $((CEILING / 10)) s"
+		dmesg | grep -i -E 'brcmf|mmc1|sdio' >> "$ERR" 2>/dev/null
+	else
+		log "wlan0 up at ${wlan}s: $(cat /sys/class/net/wlan0/address 2>/dev/null)"
+	fi
+
+	if [ -z "$hci" ]; then
+		log "hci0 did not appear in $((CEILING / 10)) s"
+		dmesg | grep -i -E 'bluetooth|bcm|hci' >> "$ERR" 2>/dev/null
+	else
+		# The two lines that say whether this boot got the address
+		# right: one when the patch went in, the other when it did not
+		# and the chip fell back to its default.
+		dmesg | grep -i -E 'BCM43430A1.*Patch|Using default device address' \
+			>> "$ERR" 2>/dev/null
+		log "hci0 up at ${hci}s"
+	fi
+
+	if [ -z "$wlan" ] || [ -z "$hci" ]; then
+		echo "failed"
+		return 1
+	fi
+	echo "ok"
+}
+
+stop() {
+	printf 'Unloading radios: '
+	for m in hci_uart btbcm rfcomm bluetooth ecdh_generic ecc brcmfmac brcmutil; do
+		rmmod "$m" 2>/dev/null
+	done
+	echo "ok"
+}
+
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart|reload)
+		"$0" stop
+		sleep 1
+		"$0" start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+		;;
+esac

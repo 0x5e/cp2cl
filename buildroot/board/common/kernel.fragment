@@ -43,7 +43,7 @@ CONFIG_RFKILL=y
 # invalid (btbcm_check_bdaddr). BlueZ then keeps its adapter under
 # /var/lib/bluetooth/AA:AA:AA:AA:AA:AA/ rather than under the real address, so
 # the pairings saved there are never read and the phone has to be paired again.
-# /etc/init.d/S15bt loads the two modules once the blobs can be read.
+# /etc/init.d/S10radio loads the two modules once the blobs can be read.
 CONFIG_BT=m
 CONFIG_BT_BREDR=y
 CONFIG_BT_RFCOMM=m

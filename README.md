@@ -511,7 +511,7 @@ configuration out of `/etc/hostapd`, taking the file that names the interface
 | Script | What it is |
 |---|---|
 | `S00diag` | writes what the boot had to say to `/var/log`, then samples the radio for two minutes |
-| `S10wifi` | loads `brcmutil` and `brcmfmac`, and waits for `wlan0` |
+| `S10radio` | loads the Wi-Fi and Bluetooth modules, and waits for `wlan0` and `hci0` |
 | `S20ap` | hostapd on `wlan0` at `192.168.4.1/24`, then dnsmasq for the leases |
 | `S50cp2cl` | the program, with the environment the README documents |
 | `S50dropbear` | dropbear, for the console the image does not otherwise have |
@@ -525,16 +525,15 @@ the range the phone is handed. The binary stays, the script goes.
 not the size: a built-in driver probes before the root is mounted, when
 `/lib/firmware` does not exist yet, and a firmware request that fails at that
 point is not retried — the board comes up with no `wlan0` and nothing said
-anywhere. Loaded from `S10wifi` it runs after the root is there, and `S20ap`
+anywhere. Loaded from `S10radio` it runs after the root is there, and `S20ap`
 retries hostapd five times because the interface it beacons on belongs to a
 module loaded a second earlier.
 
-There is no third script for the Bluetooth firmware, and that is the point of
-running mainline: the device tree puts the chip on UART2 as a serdev child, so
-the kernel's own `btbcm` downloads the patchram and BlueZ finds `hci0` when it
-appears. The vendor's 4.14 image had to push it from userspace, as a systemd
-oneshot that `multi-user.target` waited on — which was 34 of that image's 45
-seconds of boot.
+The patchram is still the kernel's own `btbcm`, on the serdev child the device
+tree puts on `uart2`: `S10radio` loads the transport, and BlueZ finds `hci0` once
+the patch is in. The vendor's 4.14 image pushed the same file from userspace, as
+a systemd oneshot that `multi-user.target` waited on — which was 34 of that
+image's 45 seconds of boot.
 
 **The root is a writable ext4, and that is the point of it.** It was a read-only
 squashfs, on the argument that a card which loses power with the ignition should
@@ -546,12 +545,12 @@ is what a card pulled mid-write costs, and that is a replay of milliseconds.
 **The log is `/var/log`, on the disk.** `S00diag` writes the kernel ring buffer,
 the command line and the interfaces that exist before anything else runs, then
 samples the radio every five seconds for two minutes — enough to tell "appeared
-late" from "never appeared", which a single snapshot cannot. `S10wifi`,
+late" from "never appeared", which a single snapshot cannot. `S10radio`,
 `S20ap` and the program write beside it:
 
 ```bash
 ssh root@192.168.4.1 'tail -50 /var/log/cp2cl.log'
-ssh root@192.168.4.1 'cat /var/log/wifi.log /var/log/ap.log /var/log/hostapd.log'
+ssh root@192.168.4.1 'cat /var/log/radio.log /var/log/ap.log /var/log/hostapd.log'
 ssh root@192.168.4.1 'cat /var/log/boot.log; grep -i brcmf /var/log/dmesg.log'
 ```
 
