@@ -74,6 +74,8 @@ pub enum Fitted {
         bytes: Vec<u8>,
         /// The format it arrived in, which is not the one it leaves in.
         kind: Kind,
+        /// The size it was decoded at, upright, before anything was scaled.
+        src_size: (u32, u32),
         /// Its size once it was made small enough.
         size: (u32, u32),
         quality: u8,
@@ -236,6 +238,7 @@ pub fn fit(bytes: &[u8], budget: usize) -> Fitted {
                 return Fitted::Shrunk {
                     bytes: encoded,
                     kind,
+                    src_size: (width, height),
                     size: (w, h),
                     quality,
                     tries,
@@ -655,13 +658,19 @@ mod tests {
         assert_eq!(orientation(&cover), 6);
 
         let Fitted::Shrunk {
-            size, orientation, ..
+            src_size,
+            size,
+            orientation,
+            ..
         } = fit(&cover, BUDGET)
         else {
             panic!("a cover that should have been shrunk");
         };
 
         assert_eq!(orientation, 6);
+        // The size it is reported at is the one it was decoded at, already
+        // turned: 1200x600 stored is 600x1200 seen.
+        assert_eq!(src_size, (600, 1200));
         // Turned, it is 600 wide and 1200 tall, so 400 along the long edge is
         // 200 across.
         assert_eq!(size, (200, 400));

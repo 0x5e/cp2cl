@@ -596,6 +596,7 @@ fn report_cover(fitted: &Fitted, bytes: usize, took: Duration) {
         Fitted::Shrunk {
             bytes: out,
             kind,
+            src_size,
             size,
             quality,
             tries,
@@ -607,8 +608,10 @@ fn report_cover(fitted: &Fitted, bytes: usize, took: Duration) {
                 format!(" orientation={orientation}")
             };
             tracing::info!(
-                "cp.cover_fitted src={kind} in_bytes={bytes} out_bytes={} width={} height={} \
-                 quality={quality} tries={tries}{turned} ms={ms}",
+                "cp.cover_fitted src={kind} in_bytes={bytes} in_width={} in_height={} \
+                 out_bytes={} width={} height={} quality={quality} tries={tries}{turned} ms={ms}",
+                src_size.0,
+                src_size.1,
                 out.len(),
                 size.0,
                 size.1
