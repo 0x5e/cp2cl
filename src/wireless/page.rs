@@ -55,6 +55,11 @@ pub(super) async fn run(conn: Connection, adapter: String, handover: Arc<Handove
     // Said when the state changes rather than once a round: five seconds apart,
     // the line would be the only thing in the log for as long as a tunnel lasts.
     let mut held = false;
+    // What the last round had to call. An empty list is the one state that
+    // leaves the log at `bt_service_up` with nothing after it, and telling that
+    // apart from a phone that is merely away — which does log, one line per
+    // round — is the whole question such a log asks.
+    let mut to_call: Option<Vec<String>> = None;
     loop {
         round.tick().await;
         // The phone took its iAP2 session to Wi-Fi and asked us to drop
@@ -81,6 +86,11 @@ pub(super) async fn run(conn: Connection, adapter: String, handover: Arc<Handove
         };
         // A phone that left keeps no timer: one that comes back starts over.
         waiting.retain(|mac, _| phones.iter().any(|p| &p.mac == mac));
+        let macs: Vec<String> = phones.iter().map(|p| p.mac.clone()).collect();
+        if to_call.as_ref() != Some(&macs) {
+            tracing::info!("wireless.paired_phones count={} macs={macs:?}", macs.len());
+            to_call = Some(macs);
+        }
         for Phone { path, mac, connected } in phones {
             if !connected {
                 waiting.remove(&mac);
