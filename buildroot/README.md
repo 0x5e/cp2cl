@@ -93,7 +93,7 @@ Device tree nodes the above bind to, in `sun8i-h3-nanopi-duo2.dtb`:
     dbus-daemon --system        before bluetoothd
     bluetoothd                  BlueZ, system bus
     hostapd                     driver=nl80211, one interface
-    dnsmasq                     DHCP only, --port=0
+    dnsmasq                     DHCP, and DNS that answers NXDOMAIN
     dropbear                    optional, tcp/22
     busybox                     sh, init, insmod, ip, find, dmesg, start-stop-daemon
 
