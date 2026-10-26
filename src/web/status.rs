@@ -168,6 +168,13 @@ pub struct NowPlaying {
     pub album: Option<String>,
     /// Seconds, as `Track` has it. The page writes it as minutes and seconds.
     pub duration_s: Option<i32>,
+    /// The position that last went to the car's bar, in milliseconds — see
+    /// `MSG_CMD_MEDIA_PROGRESS_BAR`. `None` until one has gone out, and kept
+    /// after the bar stops moving: the car is still drawing that one.
+    pub progress_ms: Option<u32>,
+    /// What the car was last told the song is doing. `None` until the phone has
+    /// said, because the car hears about a change of state and nothing else.
+    pub playing: Option<bool>,
     /// The cover exactly as it went to the car, which is the only picture the
     /// panel can be showing. Kept when a song changes without one, because
     /// that is what the car does with it too.
@@ -495,6 +502,8 @@ impl NowPlaying {
             "artist": self.artist,
             "album": self.album,
             "duration_s": self.duration_s,
+            "progress_ms": self.progress_ms,
+            "playing": self.playing,
             // The bytes are not in the answer: the page fetches the picture
             // from its own path, and this is what it asks for it by.
             "cover": self.cover.as_ref().map(|cover| json!({

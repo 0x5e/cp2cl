@@ -74,6 +74,7 @@ const NAVI_NEXT_TURN_INFO: u32 = 0x0001_0030;
 const CAR_DATA_SUBSCRIBE: u32 = 0x0001_0031;
 const CAR_DATA_SUBSCRIBE_START: u32 = 0x0001_0033;
 const MEDIA_INFO: u32 = 0x0001_0035;
+const MEDIA_PROGRESS_BAR: u32 = 0x0001_0036;
 const DATA_SUBSCRIBE_DONE: u32 = 0x0001_0044;
 const MD_AUTHEN_RESPONSE: u32 = 0x0001_0049;
 const MD_AUTHEN_RESULT: u32 = 0x0001_004B;
@@ -83,6 +84,8 @@ const VIDEO_DATA: u32 = 0x0002_0001;
 const VIDEO_HEARTBEAT: u32 = 0x0002_0002;
 const MEDIA_INIT: u32 = 0x0003_0001;
 const MEDIA_STOP: u32 = 0x0003_0002;
+const MEDIA_PAUSE: u32 = 0x0003_0003;
+const MEDIA_RESUME_PLAY: u32 = 0x0003_0004;
 const MEDIA_DATA: u32 = 0x0003_0006;
 // The navigation prompt has a channel of its own, with the same three messages
 // in the same order. See the guide's §10.4 and CarLifeVehicleLib's
@@ -124,6 +127,11 @@ const KEY_VR_START: i32 = 0x0000_0021;
 /// How often the video channel is touched when there is no picture to send. The
 /// reference does the same whenever its own interface is not in the foreground.
 const HEARTBEAT: Duration = Duration::from_secs(1);
+
+/// How often the car is told where the song is. The phone's own app sends the
+/// same message no more often than this, and a second is finer than the bar it
+/// draws moves.
+const PROGRESS_PERIOD: Duration = Duration::from_secs(1);
 
 /// How long a car is given to say the first thing before the pipe is probed.
 ///
@@ -406,6 +414,11 @@ where
         nav_deadline: None,
         track: Track::default(),
         art: None,
+        // Nothing is known about where the song is until the phone says, and
+        // the channel has carried nothing until the first sample goes out.
+        playhead: None,
+        progress_sent: None,
+        media_streaming: false,
         // A route is described by the phone in messages of its own, so the
         // session starts knowing nothing about one and hears about it as it
         // goes. A car that plugs in mid-route is a car the phone describes the
@@ -441,6 +454,11 @@ where
     // quiet long enough that there is nothing else it could be doing.
     let probe_at = Instant::now() + PROBE_QUIET;
     let mut probed = false;
+
+    // The panel's bar is on a schedule of its own: it is the media channel's
+    // clock rather than the video one's, and a session whose picture is paused
+    // still has a song playing behind the panel.
+    let mut progress_at = Instant::now() + PROGRESS_PERIOD;
 
     let outcome = loop {
         let deadline = session.next_tick;
@@ -545,6 +563,15 @@ where
                     break Err(e);
                 }
                 session.next_tick = Instant::now() + session.period();
+            }
+            // Where the song is, which the car's bar reads. Its own schedule
+            // rather than the video tick's: the two channels are told different
+            // things and either may be idle while the other is not.
+            _ = tokio::time::sleep_until(progress_at) => {
+                if let Err(e) = session.send_progress().await {
+                    break Err(e);
+                }
+                progress_at = Instant::now() + PROGRESS_PERIOD;
             }
             // Nothing from the car since the pipe opened, and the handshake
             // has not got as far as `up`. See `probe`.
@@ -701,6 +728,21 @@ async fn recv_guidance(guidance: &mut Option<mpsc::Receiver<Guidance>>) -> Optio
     }
 }
 
+/// Where in the song it is playing, and whether it is still moving through it.
+///
+/// The phone says a position when it says anything at all about playback, and
+/// nothing between those moments; the car's bar is drawn from a position at a
+/// moment of its own, so the two are kept together here.
+#[derive(Clone, Copy)]
+struct Playhead {
+    /// Milliseconds into the song when the phone said so.
+    elapsed: Duration,
+    /// The moment that reading belongs to.
+    at: Instant,
+    /// Whether the song was playing then.
+    moving: bool,
+}
+
 struct Session<'a, W> {
     writer: W,
     cfg: &'a Config,
@@ -752,6 +794,15 @@ struct Session<'a, W> {
     /// apart from the track because it arrives as a file of its own, after the
     /// update that named the song and names none itself.
     art: Option<Vec<u8>>,
+    /// Where in the song it is playing, as of the moment the phone said so.
+    playhead: Option<Playhead>,
+    /// The position the car was last given, so a bar that has stopped moving is
+    /// not told the same number every second.
+    progress_sent: Option<u32>,
+    /// Whether any of the phone's samples have reached the media channel. The
+    /// first one is worth a line: the channel takes no reply, so a sample
+    /// written is the only evidence this side has that the sound is on the wire.
+    media_streaming: bool,
     /// The route the phone is guiding along, folded together from the two
     /// messages it describes one with — see `crate::navigation`, which is also
     /// where the phone's turn types become the car's.
@@ -1579,11 +1630,25 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             Media::Pcm {
                 timestamp_ms,
                 data,
-            } => self.send_frame(MEDIA_DATA, timestamp_ms, &data).await,
+            } => {
+                // The media channel takes no reply, so this is the one place
+                // this side can say the phone's sound reached the wire — with
+                // the timestamp it went out on, which is the field a car that
+                // plays none of it may be reading as something else.
+                if !self.media_streaming {
+                    self.media_streaming = true;
+                    tracing::info!(
+                        "cl.media_streaming ts_ms={timestamp_ms} bytes={}",
+                        data.len()
+                    );
+                }
+                self.send_frame(MEDIA_DATA, timestamp_ms, &data).await
+            }
             // The phone stopped playing. Saying so is what lets the car put down
             // what it took up for the stream rather than hold it over silence.
             Media::Ended => {
                 self.media_format = None;
+                self.media_streaming = false;
                 self.send(MEDIA_STOP, &[]).await
             }
         }
@@ -1685,6 +1750,66 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     self.publish_cover();
                 }
             }
+            // Where the song is, which is a message of its own rather than part
+            // of the song's. It is kept rather than sent: the phone reports it
+            // when it changes and not on a clock, and `send_progress` is what
+            // turns a reading into the position the car draws right now.
+            Playing::Position(position) => {
+                let had_reading = self.playhead.is_some();
+                let was_moving = self.playhead.is_some_and(|playhead| playhead.moving);
+                // A reading with no play state is about the position alone:
+                // the song is doing what the last message said it was, and
+                // taking it for paused here would stop the bar until the phone
+                // said otherwise.
+                let moving = position.playing.unwrap_or(was_moving);
+                self.playhead = Some(Playhead {
+                    elapsed: Duration::from_millis(u64::from(position.elapsed_ms)),
+                    at: Instant::now(),
+                    moving,
+                });
+                // The phone decides when to send these, so how often it does —
+                // and what one costs across a pause or a drag — is not
+                // something this side can know any other way.
+                tracing::debug!(
+                    "cl.media_position elapsed_ms={} playing={moving} stated={}",
+                    position.elapsed_ms,
+                    position.playing.is_some()
+                );
+                // A change of play state is what the car's own pause and play
+                // messages are for, and the state of the module playing the
+                // song is the same news on the command channel. The phone
+                // repeats the state with every reading, so only a change of it
+                // is worth a message.
+                if let Some(playing) = position.playing {
+                    if playing == was_moving {
+                        return Ok(());
+                    }
+                    tracing::info!(
+                        "cl.media_play_state state={}",
+                        if playing { "playing" } else { "paused" }
+                    );
+                    // The first reading is not a resume: a song that starts
+                    // with the channel being set up is already described by
+                    // `MEDIA_INIT` and the samples that follow it.
+                    if had_reading {
+                        let message = if playing {
+                            MEDIA_RESUME_PLAY
+                        } else {
+                            MEDIA_PAUSE
+                        };
+                        self.send(message, &[]).await?;
+                    }
+                    let state = if playing {
+                        proto::MUSIC_RUNNING
+                    } else {
+                        proto::MUSIC_IDLE
+                    };
+                    let body = proto::module_status(proto::MUSIC_MODULE, state);
+                    self.send(MODULE_STATUS, &body).await?;
+                    self.status.with(|s| s.now_playing.playing = Some(playing));
+                }
+                return Ok(());
+            }
             Playing::Artwork(image) => {
                 // The car reads the song and its cover from one command-channel
                 // message, and the reference keeps a cover under 30 KB for it.
@@ -1785,6 +1910,43 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         );
         let body = proto::media_info(&self.track, self.art.as_deref().filter(|art| !art.is_empty()));
         self.send(MEDIA_INFO, &body).await
+    }
+
+    /// Tells the car where the song is.
+    ///
+    /// What the car draws its bar from is a position, so what it is given is the
+    /// one the phone reported plus the time since: between two reports the song
+    /// keeps playing, and a bar redrawn from the last reading alone would stand
+    /// still until the next. A paused song is told where it stopped, which is
+    /// the reading alone, and told it once — the number does not move, and the
+    /// car is not given the same position twice.
+    async fn send_progress(&mut self) -> Result<()> {
+        let Some(playhead) = self.playhead else {
+            return Ok(());
+        };
+        if self.track.is_silent() {
+            return Ok(());
+        }
+        let ms = position_at(playhead, Instant::now(), self.track.duration_s);
+        if self.progress_sent == Some(ms) {
+            return Ok(());
+        }
+        // The first one is a line: the media channel takes no reply, so a
+        // position written is the only evidence this side has that the song
+        // reached the panel's bar at all.
+        if self.progress_sent.is_none() {
+            tracing::info!(
+                "cl.media_progress elapsed_ms={ms} duration_s={}",
+                self.track.duration_s.unwrap_or(0)
+            );
+        }
+        self.progress_sent = Some(ms);
+        let body = proto::media_progress_bar(ms as i32);
+        self.send(MEDIA_PROGRESS_BAR, &body).await?;
+        // The page draws the bar the car was given, so what it is handed is the
+        // number that went out rather than one computed again for it.
+        self.status.with(|s| s.now_playing.progress_ms = Some(ms));
+        Ok(())
     }
 
     /// One thing the phone said about the route it is guiding along.
@@ -1936,6 +2098,26 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     }
 }
 
+/// Where the panel's bar belongs at `now`, from what the phone last said.
+///
+/// The phone's reading is where the song was when it said so, so what is told is
+/// that reading plus the time since while the song is moving, and the reading
+/// alone while it is not: a paused bar stays where it was put. A position past
+/// the length is a song that has finished rather than one gone on, so it is held
+/// there — the length being known only when the phone has said it.
+fn position_at(playhead: Playhead, now: Instant, length_s: Option<i32>) -> u32 {
+    let elapsed = if playhead.moving {
+        playhead.elapsed + now.saturating_duration_since(playhead.at)
+    } else {
+        playhead.elapsed
+    };
+    let ms = elapsed.as_millis().min(u128::from(u32::MAX)) as u32;
+    match length_s.filter(|seconds| *seconds > 0) {
+        Some(seconds) => ms.min((seconds as u32).saturating_mul(1_000)),
+        None => ms,
+    }
+}
+
 /// The fix as it is compared between reports: the clock fields cleared, because
 /// a car that has not moved reports the same position with a later timestamp,
 /// and only a change in what it says about the position is worth a line.
@@ -2026,6 +2208,7 @@ fn adopt_clock(epoch_ms: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::playing::Position;
     use crate::sink::{AudioCodec, MediaSink, StreamEvent, StreamId};
 
     /// One stream: a type the phone names it with, and the instance it opened.
@@ -2523,6 +2706,45 @@ mod tests {
         );
     }
 
+    /// The bar is the phone's reading plus the time since it, it stops where the
+    /// song does, and a paused song sits at that stop.
+    #[test]
+    fn the_bar_is_the_reading_plus_the_time_since() {
+        let at = Instant::now();
+        let moving = Playhead {
+            elapsed: Duration::from_millis(42_000),
+            at,
+            moving: true,
+        };
+        assert_eq!(
+            position_at(moving, at + Duration::from_millis(1_500), None),
+            43_500
+        );
+        // A paused song is where it stopped, however long ago that was.
+        assert_eq!(
+            position_at(
+                Playhead {
+                    moving: false,
+                    ..moving
+                },
+                at + Duration::from_secs(5),
+                None
+            ),
+            42_000
+        );
+        // A song that has run to its length is held there rather than drawn past
+        // the end of the panel's bar.
+        assert_eq!(
+            position_at(moving, at + Duration::from_secs(60), Some(45)),
+            45_000
+        );
+        // A length the phone did not really give is not a limit.
+        assert_eq!(
+            position_at(moving, at + Duration::from_secs(60), Some(0)),
+            102_000
+        );
+    }
+
     /// A rate above 30 is the car's to ask for. Nothing here scales or re-times
     /// anything, so agreeing to less than was asked hands the car a picture at
     /// half the rate its own panel was built around. `Car::handshake` is what
@@ -2896,6 +3118,86 @@ mod tests {
                     ..Track::default()
                 }));
             }
+            car.expect_silence(Duration::from_millis(300)).await;
+        });
+
+        run(
+            device,
+            &frames,
+            &cfg,
+            None,
+            &mut screen,
+            no_icon(),
+            EventSink::new(),
+            &mut carplay,
+            &no_tap(),
+            Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
+        )
+        .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    /// A pause and a resume are messages of their own on the media channel, and
+    /// the state of the module playing the song goes out on the command channel
+    /// with them. The first reading is not a resume, and a reading that repeats
+    /// the state is nothing at all.
+    #[tokio::test]
+    async fn the_car_is_told_when_the_song_stops_and_starts() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
+
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+        let sink = outlet.sink();
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.send(HU_INFO, &[]).await;
+            car.expect(MD_INFO).await;
+
+            // The song is already playing when the phone first says where it
+            // is: the module goes running, and the song starting is not a
+            // resume.
+            sink.playing(Playing::Position(Position {
+                elapsed_ms: 0,
+                playing: Some(true),
+            }));
+            let running = car.expect(MODULE_STATUS).await;
+            assert_eq!(
+                running.body,
+                proto::module_status(proto::MUSIC_MODULE, proto::MUSIC_RUNNING)
+            );
+
+            // Paused: the media channel is told, and the module goes idle.
+            sink.playing(Playing::Position(Position {
+                elapsed_ms: 42_000,
+                playing: Some(false),
+            }));
+            car.expect(MEDIA_PAUSE).await;
+            let idle = car.expect(MODULE_STATUS).await;
+            assert_eq!(
+                idle.body,
+                proto::module_status(proto::MUSIC_MODULE, proto::MUSIC_IDLE)
+            );
+
+            // And playing again is a resume.
+            sink.playing(Playing::Position(Position {
+                elapsed_ms: 42_000,
+                playing: Some(true),
+            }));
+            car.expect(MEDIA_RESUME_PLAY).await;
+            car.expect(MODULE_STATUS).await;
+
+            // A reading that says where the song is without saying whether it
+            // moved is not a change of play state either.
+            sink.playing(Playing::Position(Position {
+                elapsed_ms: 43_000,
+                playing: None,
+            }));
             car.expect_silence(Duration::from_millis(300)).await;
         });
 

@@ -63,6 +63,20 @@
   .line{padding:2px 0}
   .weui-cell_cover{align-items:flex-start}
   .cover{display:block;max-width:100%;max-height:200px;border-radius:6px;margin:2px 0 0 auto}
+  /* The bar the car was given: a track, a fill, and the position the fill sits
+     at out of the length of the song. It shares the value column with the rows
+     above it, so the bar lines up with the values rather than the labels — but
+     a track that took the whole column would end a few pixels from the label
+     and read as part of it, so it is held to a length of its own. */
+  .bar{display:flex;align-items:center;gap:10px;width:100%;max-width:200px;
+    margin-left:auto}
+  .bar .weui-progress{flex:1 1 auto;min-width:0}
+  /* The track is the panel's own background by default, which is the one thing
+     a track must not be. */
+  .bar .weui-progress__bar{height:4px;border-radius:2px;background-color:var(--weui-FG-3)}
+  .bar .weui-progress__inner-bar{border-radius:2px}
+  .bar-time{font-size:13px;color:var(--weui-FG-1);
+    font-variant-numeric:tabular-nums;white-space:nowrap}
   .v-ok{color:#07c160}
   .v-warn{color:#fa9d3b}
   .v-bad{color:#fa5151}
@@ -269,12 +283,13 @@ const DEVICE_ROWS = [
   ["软件版本", d => d.software],
 ];
 
+// The song's length is not a row of its own: the bar below it is written as
+// position out of that length, so the same number twice would say nothing more.
 const PLAYING_ROWS = [
   ["来源", d => d.source],
   ["歌曲", d => d.song],
   ["艺人 / 歌手", d => d.artist],
   ["专辑", d => d.album],
-  ["时长", d => clock(d.duration_s)],
 ];
 
 const GPS_ROWS = [
@@ -342,20 +357,102 @@ function fill(host, rows, blocks, data, up) {
 let playingKey = "";
 let coverShown = null;
 let coverImg = null;
+// The two rows that change while a song plays: what the car's bar was last told
+// and what it was last told the song is doing. They are made with the rest of
+// the section and then rewritten in place, because the song's own rows only
+// change when there is another song.
+let progressLine = null;
+let progressTrack = null;
+let progressFill = null;
+let progressTime = null;
+let stateLine = null;
 
 function renderPlaying(playing) {
   if (!playing) return;
   const key = [playing.source, playing.song, playing.artist, playing.album,
-               playing.duration_s, playing.cover ? playing.cover.id : ""].join("\u0000");
-  if (key === playingKey) return;
-  playingKey = key;
-
+               playing.cover ? playing.cover.id : ""].join("\u0000");
   const host = document.getElementById("playing");
-  host.textContent = "";
-  for (const [label, value] of PLAYING_ROWS) {
-    host.appendChild(cell(label, value(playing), null, false));
+  if (key !== playingKey) {
+    playingKey = key;
+    host.textContent = "";
+    stateLine = cell("状态", null, null, false);
+    host.appendChild(stateLine);
+    for (const [label, value] of PLAYING_ROWS) {
+      host.appendChild(cell(label, value(playing), null, false));
+    }
+    progressLine = progressRow();
+    progressTrack = progressLine.querySelector(".weui-progress");
+    progressFill = progressLine.querySelector(".weui-progress__inner-bar");
+    progressTime = progressLine.querySelector(".bar-time");
+    host.appendChild(progressLine);
+    host.appendChild(coverCell(playing.cover));
   }
-  host.appendChild(coverCell(playing.cover));
+  showProgress(playing);
+  showState(playing.playing);
+}
+
+// The bar is the car's. Nothing sent yet means the song is at its start — that
+// is the position the car was given — so the row is drawn at 0:00 rather than
+// left out: an absent row and a wrong one say the same, and this way the length
+// is on the page before the first sample goes out.
+function showProgress(playing) {
+  const ms = playing.progress_ms == null ? 0 : playing.progress_ms;
+  // Milliseconds from the car's channel, seconds from the song, and the page
+  // writes both as the minutes and seconds a person reads.
+  const length = playing.duration_s > 0 ? playing.duration_s * 1000 : null;
+  progressFill.style.width = length ? Math.min(100, ms / length * 100).toFixed(1) + "%" : "0%";
+  // A song of unknown length has no fraction to draw the fill at, so only the
+  // position is shown rather than a track that would be read as one.
+  progressTrack.style.display = length ? "" : "none";
+  progressTime.textContent = length
+    ? clock(ms / 1000) + " / " + clock(playing.duration_s)
+    : clock(ms / 1000);
+}
+
+function showState(playing) {
+  const ft = stateLine.querySelector(".weui-cell__ft");
+  ft.className = "weui-cell__ft";
+  if (playing === null || playing === undefined) {
+    ft.textContent = NONE;
+    ft.classList.add("none");
+    return;
+  }
+  ft.textContent = playing ? "播放中" : "已暂停";
+  if (playing) ft.classList.add("v-ok");
+}
+
+function progressRow() {
+  const row = document.createElement("div");
+  row.className = "weui-cell";
+
+  const bd = document.createElement("div");
+  bd.className = "weui-cell__bd";
+  const label = document.createElement("p");
+  label.textContent = "进度条";
+  bd.appendChild(label);
+
+  const ft = document.createElement("div");
+  ft.className = "weui-cell__ft";
+
+  const bar = document.createElement("div");
+  bar.className = "bar";
+  const track = document.createElement("div");
+  track.className = "weui-progress";
+  const rail = document.createElement("div");
+  rail.className = "weui-progress__bar";
+  const fill = document.createElement("div");
+  fill.className = "weui-progress__inner-bar";
+  rail.appendChild(fill);
+  track.appendChild(rail);
+  const time = document.createElement("span");
+  time.className = "bar-time";
+  bar.appendChild(track);
+  bar.appendChild(time);
+
+  ft.appendChild(bar);
+  row.appendChild(bd);
+  row.appendChild(ft);
+  return row;
 }
 
 function coverCell(cover) {

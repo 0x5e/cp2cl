@@ -43,7 +43,7 @@ use crate::artwork::{self, Fitted};
 use crate::carlife::proto;
 use crate::config::{bt_address, Config};
 use crate::navigation::Guidance;
-use crate::playing::{Playing, Track};
+use crate::playing::{Playing, Position, Track};
 use crate::sink::ClSink;
 use crate::web::Status;
 use crate::wireless::{parse_mac, short};
@@ -474,6 +474,12 @@ pub(crate) async fn run_bringup(
                         tracing::debug!("cp.now_playing {line}");
                     }
                     panel.playing(Playing::Track(track));
+                    // Where in the song it is rides on the same message but
+                    // goes to the car as a message of its own: see
+                    // `Playing::Position`.
+                    if let Some(position) = Position::from_iap2(&frame) {
+                        panel.playing(Playing::Position(position));
+                    }
                 }
                 // A song this side cannot read is one the panel is never told
                 // about, and nothing further down would say so.
