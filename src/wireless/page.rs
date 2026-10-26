@@ -45,7 +45,16 @@ struct Phone {
 }
 
 /// Pages every paired phone, again and again, until the caller stops the task.
-pub(super) async fn run(conn: Connection, adapter: String, handover: Arc<Handover>) {
+///
+/// `car` is whether the car still has a CarLife session, which is what the phone
+/// is being called back for: a phone woken for a session nobody reads starts a
+/// CarPlay that goes nowhere, and leaves it on the car's screen to be dismissed.
+pub(super) async fn run(
+    conn: Connection,
+    adapter: String,
+    handover: Arc<Handover>,
+    car: tokio::sync::watch::Receiver<bool>,
+) {
     // A page that took its time must not be followed by a burst of retries, which
     // is what a missed tick would otherwise produce.
     let mut round = tokio::time::interval(ROUND);
@@ -62,6 +71,14 @@ pub(super) async fn run(conn: Connection, adapter: String, handover: Arc<Handove
     let mut to_call: Option<Vec<String>> = None;
     loop {
         round.tick().await;
+        // The loop that spawns this task stops it as soon as the car goes, but
+        // the first round is due the moment it starts: without this, the round
+        // that began just before the car's session ended would still call the
+        // phone once. Checked rather than reported, because it can only be true
+        // for the one round — `linux` says the same thing as `bt_service_down`.
+        if !*car.borrow() {
+            continue;
+        }
         // The phone took its iAP2 session to Wi-Fi and asked us to drop
         // Bluetooth. Calling it back now would give it a second session and a
         // second `CarPlayStartSession`, which the one on Wi-Fi cannot survive —

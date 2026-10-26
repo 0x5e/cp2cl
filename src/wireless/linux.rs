@@ -99,6 +99,15 @@ pub async fn watch(
         // network is there has nothing to come back to.
         let ap = wait_for_access_point().await;
 
+        // That wait can last fifteen seconds, and the car's session can end
+        // inside it. Publishing a service then is a phone called back for a
+        // session that has already gone, so the question is asked again rather
+        // than answered by the wait that came before it.
+        if !*gate.borrow() {
+            tracing::info!("wireless.car_gone action=skip_publish");
+            continue;
+        }
+
         let (conn, mut incoming, held) =
             match livi_runtime::bt::start(&cfg.bt_adapter, &cfg.name, true).await {
                 Ok(started) => started,
@@ -147,6 +156,7 @@ pub async fn watch(
                 conn.clone(),
                 cfg.bt_adapter.clone(),
                 handover.clone(),
+                gate.clone(),
             ));
             // The car's session ending is checked between sessions and never
             // inside one: `run_session` has tasks of its own, and dropping it
