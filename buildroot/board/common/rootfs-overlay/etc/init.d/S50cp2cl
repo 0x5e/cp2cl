@@ -1,8 +1,9 @@
 #!/bin/sh
 #
-# cp2cl: what it needs is behind it — the two radios by `S10radio`, BlueZ by
-# `S40bluetoothd` — and what is still ahead of it, the access point, it reads out
-# of /etc/hostapd, which is a file rather than a daemon.
+# cp2cl: nothing has to be behind it. The two radios are modules that `S10radio`
+# loads and goes on, BlueZ is `S40bluetoothd`, and the access point is `S55ap`
+# after it — the program waits for the three itself and says in its log what it
+# was waiting for. What it reads out of /etc/hostapd is a file, not the daemon.
 #
 # The program has no settings file and needs no environment: every value it
 # takes from outside has a default in it, and the state it keeps — the identity

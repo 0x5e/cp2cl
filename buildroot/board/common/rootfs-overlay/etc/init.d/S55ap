@@ -4,11 +4,11 @@
 # comes back on.
 #
 # Its number puts it after the program, which is where the boot wants it: from
-# being run to beaconing is 3.4 seconds on this board, and nothing the program
-# needs is behind it. The program reads the access point out of /etc/hostapd —
-# the file, not this daemon — and names itself to the phone by the interface's
-# MAC rather than by an address, so an SSID that appears three seconds after the
-# bridge is an SSID that appears before any phone could have joined it.
+# being run to beaconing is 3.4 seconds on this board, and the program needs
+# none of that to start. It reads the access point out of /etc/hostapd — the
+# file, not this daemon — and names itself to the phone by the interface's MAC
+# rather than by an address; what it does wait for before publishing the iAP
+# service is the pid file written here.
 #
 # hostapd has to be beaconing before a client can ask dnsmasq for an address,
 # and that is a line order, so the two are one script.

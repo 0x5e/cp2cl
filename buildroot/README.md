@@ -178,6 +178,7 @@ the core; none is loaded on this chip.
 ### 3.3 Paths read
 
     /etc/hostapd/*.conf       interface=, ssid=, wpa_passphrase=, channel=
+    /run/hostapd.pid          written by S55ap once the access point is on air
     /proc/stat
     /proc/meminfo
     /proc/modules

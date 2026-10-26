@@ -6,6 +6,7 @@
 //! channel of sockets it produces — and calling a paired phone back, since a
 //! phone never returns to an accessory on its own: see `page`.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -66,6 +67,12 @@ pub async fn watch(
         }
     }
     tracing::info!("wireless.car_up action=publish_service");
+
+    // The access point is a daemon the boot starts after this program, so the
+    // network a phone is told to join may not be on air yet. It is named in the
+    // start session either way, and a phone that is paged before its network is
+    // there has nothing to come back to.
+    wait_for_access_point().await;
 
     let (conn, mut incoming, held) =
         match livi_runtime::bt::start(&cfg.bt_adapter, &cfg.name, true).await {
@@ -287,5 +294,49 @@ async fn bluetoothd_up(conn: &zbus::Connection) -> bool {
     match zbus::names::BusName::try_from(BLUEZ) {
         Ok(name) => dbus.name_has_owner(name).await.unwrap_or(false),
         Err(_) => false,
+    }
+}
+
+/// Where `hostapd` is told to write the pid of the daemon it forks, and the one
+/// thing on this system that says the access point is on air.
+const AP_PID: &str = "/run/hostapd.pid";
+
+/// How long the service waits for the access point. `S55ap` retries for ten
+/// seconds and hostapd needs 3.4 to beacon, so this covers a boot that ran it
+/// late; the usual case is that it is already up, because the car took longer.
+const AP_CEILING: Duration = Duration::from_secs(15);
+
+/// How often the pid file is looked for. The daemon is either there or about to
+/// be: this only decides how much of the ceiling is spent noticing.
+const AP_POLL: Duration = Duration::from_millis(200);
+
+/// Waits for the access point to be on air, or for the ceiling.
+///
+/// A pid file rather than something cleverer: `/run` is a tmpfs, so the file
+/// cannot outlive the boot that wrote it, and `S55ap` writes it on the attempt
+/// that worked.
+async fn wait_for_access_point() {
+    let started = Instant::now();
+    let mut said = false;
+    loop {
+        if Path::new(AP_PID).exists() {
+            tracing::info!(
+                "wireless.ap_ready after_ms={}",
+                started.elapsed().as_millis()
+            );
+            return;
+        }
+        if !said {
+            tracing::info!("wireless.ap_waiting pid_file={AP_PID}");
+            said = true;
+        }
+        if started.elapsed() >= AP_CEILING {
+            tracing::warn!(
+                "wireless.ap_absent after_ms={} consequence=phone_told_a_network_that_is_not_on_air",
+                started.elapsed().as_millis()
+            );
+            return;
+        }
+        sleep(AP_POLL).await;
     }
 }
