@@ -245,7 +245,7 @@ const CARPLAY_UP = d => !!(d.airplay && d.airplay.peer);
 const BOTH_UP = d => CARLIFE_UP(d.carlife) && CARPLAY_UP(d.carplay);
 
 const CARLIFE_ROWS = [
-  ["会话状态", d => bool(CARLIFE_UP(d), "已建立", "未建立"), d => CARLIFE_UP(d) ? "ok" : null],
+  ["状态", d => bool(CARLIFE_UP(d), "已连接", "未连接"), d => CARLIFE_UP(d) ? "ok" : null],
   ["CarLife 协议版本", d => d.protocol ? d.protocol.major + "." + d.protocol.minor : null],
   ["CUID", d => d.statistic && d.statistic.cuid],
   ["渠道号", d => d.statistic && channelLabel(d.statistic.channel)],
@@ -265,7 +265,7 @@ const CARLIFE_ROWS = [
 const CARLIFE_BLOCKS = [];
 
 const CARPLAY_ROWS = [
-  ["会话状态", d => bool(CARPLAY_UP(d), "已建立", "未建立"), d => CARPLAY_UP(d) ? "ok" : null],
+  ["状态", d => bool(CARPLAY_UP(d), "已连接", "未连接"), d => CARPLAY_UP(d) ? "ok" : null],
   ["接入方式", d => bool(d.wireless, "WiFi", "USB")],
   ["分辨率", d => d.screen ? size(d.screen) : null],
   ["视频编码", d => video(d.video)],
