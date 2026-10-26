@@ -11,8 +11,8 @@
 //! to talk to it; a car sends a string and takes it back only if it has been
 //! through that private key. Answering is therefore a matter of holding the key,
 //! which is the app's own, extracted from the APK, because Baidu does not hand
-//! that half out. It is built into the binary from `assets/authentication/` and
-//! `Signer` puts the challenge through it. A build that cannot carry it skips the
+//! that half out. It is a file the firmware installs in `crate::config::DATA_DIR`
+//! and `Signer` puts the challenge through it. A machine that has none skips the
 //! challenge instead: the head unit is left unauthenticated, asks again every half
 //! minute, and the streams run either way.
 //!
@@ -31,22 +31,23 @@ use rsa::pkcs8::DecodePrivateKey;
 use rsa::traits::PublicKeyParts;
 use rsa::RsaPrivateKey;
 
-/// The asset the phone's CarLife key is built from.
+/// The credential the phone's CarLife key is read from.
 ///
 /// Not a credential of ours: it is the CarLife app's own private key, extracted
 /// from the app, and the car accepts answers made with it because Baidu made the
 /// matching public half. Like the MFi pair, the name is fixed rather than
-/// configured: what it is called is not the operator's business.
-pub(crate) const KEY_FILE: &str = "authentication/carlife_md_rsa_private.pem";
+/// configured: what it is called is not the operator's business, and it is a name
+/// inside `crate::config::DATA_DIR` rather than a path.
+pub(crate) const KEY_FILE: &str = "carlife_md_rsa_private.pem";
 
 /// The CarLife version this device answers challenges as.
 ///
 /// A challenge is `A_B`: a random string and the lowest phone version the car
 /// will serve. The app compares `B` with its own version while it answers, and
 /// answers as a phone that is too old when it is the older of the two — see
-/// `answer_text`. What stands here is the version whose key
-/// `assets/authentication/` holds, so raising it is a matter of dropping in a
-/// newer key rather than of changing this line.
+/// `answer_text`. What stands here is the version whose key the firmware
+/// installs, so raising it is a matter of dropping in a newer key rather than of
+/// changing this line.
 const CLAIMED_VERSION: [u32; 3] = [8, 9, 0];
 
 /// The key that answers the car's challenge.
@@ -59,11 +60,30 @@ pub struct Signer {
 }
 
 impl Signer {
-    /// Reads the key out of `pem`, the text of `KEY_FILE` as it was built in.
+    /// The key `crate::config::DATA_DIR` was given, when it was given one.
     ///
-    /// Nothing here touches the disk: the key travels with the binary, the way
-    /// the icon and the page do. `None` is a key this cannot read, which is said
-    /// out loud and leaves the CarLife side unable to answer a challenge.
+    /// The firmware installs it there beside the identity the program writes, so
+    /// a board without one is a board whose build had no key to install. `None`
+    /// is said out loud and leaves the CarLife side unable to answer a challenge:
+    /// a supported way to run, so the line is a warning and the session goes on.
+    pub fn load() -> Option<Self> {
+        let path = crate::config::data_file(KEY_FILE);
+        match std::fs::read_to_string(&path) {
+            Ok(pem) => Self::from_pem(&pem),
+            Err(e) => {
+                tracing::warn!(
+                    "auth.key_missing file={} err={e:#} consequence=carlife_auth_skipped",
+                    path.display()
+                );
+                None
+            }
+        }
+    }
+
+    /// Reads the key out of `pem`, the text of `KEY_FILE` as it was installed.
+    ///
+    /// `None` is a key this cannot read, which is said out loud and leaves the
+    /// CarLife side unable to answer a challenge.
     pub fn from_pem(pem: &str) -> Option<Self> {
         let Some(der) = pem_body(pem) else {
             tracing::warn!("auth.key_unreadable reason=no_pem");
@@ -81,7 +101,7 @@ impl Signer {
             );
             return None;
         };
-        tracing::info!("auth.key_loaded bits={} source=built_in", key.size() * 8);
+        tracing::info!("auth.key_loaded bits={}", key.size() * 8);
         Some(Self { key })
     }
 
@@ -336,9 +356,9 @@ mod tests {
 
     /// The two halves the car will be answered with and checks with, when this
     /// machine has them: this is where the protocol leaves the fixtures behind and
-    /// meets the material under `assets/authentication/`, including whether the
-    /// file extracted from the app and the public half the report printed are
-    /// really one pair.
+    /// meets the material under `authentication/`, including whether the file
+    /// extracted from the app and the public half the report printed are really
+    /// one pair.
     ///
     /// A machine without them asserts nothing, because running without a key is a
     /// supported way to run.
@@ -346,7 +366,7 @@ mod tests {
     fn the_key_dropped_in_for_a_car_is_one_the_car_accepts() {
         use rsa::pkcs8::DecodePublicKey;
 
-        let dir = std::path::Path::new("assets/authentication");
+        let dir = std::path::Path::new("authentication");
         let private = dir.join("carlife_md_rsa_private.pem");
         let public = dir.join("carlife_md_rsa_public.pem");
         if !private.is_file() || !public.is_file() {

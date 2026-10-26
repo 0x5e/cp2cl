@@ -53,10 +53,10 @@ cargo build --release
 ./target/release/cp2cl
 ```
 
-Run it from anywhere: the credentials are compiled into the binary, and the
-working directory is not read at all. They come from `assets/authentication/` at
-build time — see [Credentials](#credentials). The board is built in a container
-instead, since it cannot build this itself — see
+Run it from anywhere: the working directory is not read at all, and the
+credentials are read by absolute path out of `/etc/cp2cl/`, which is also where
+the program keeps what it has to remember — see [Credentials](#credentials). The
+board is built in a container instead, since it cannot build this itself — see
 [Cross-compiling for the board](#cross-compiling-for-the-board).
 
 Then plug the phone in and unlock it. You should see:
@@ -201,10 +201,8 @@ Nothing sets it at the moment, so the car's own pixels are asked for as they are
 
 ## Credentials
 
-Two private keys and a certificate go into the build, and all three are read from
-`assets/authentication/` by a fixed name. `build.rs` puts every file under
-`assets/` into the binary, so a build takes whatever is in that directory at the
-time and the executable needs nothing beside it afterwards:
+Two private keys and a certificate, read once at startup out of `/etc/cp2cl/` by
+a fixed name — the same directory the program keeps its own pairing identity in:
 
 | File | What it is |
 |---|---|
@@ -212,12 +210,16 @@ time and the executable needs nothing beside it afterwards:
 | `certificate.p7b` | the matching MFi certificate |
 | `carlife_md_rsa_private.pem` | the CarLife app's own RSA key, which answers the car's challenge |
 
-None of them are ours to publish, so the directory is ignored by git and a fresh
-clone has none of it. That is a supported way to build: without the MFi pair the
-phone identifies us and then refuses to authenticate, and without the CarLife key
-the car's challenge goes unanswered. Both absences are logged rather than fatal,
-and everything else — the device, the streams, the status page — works without
-them.
+Nothing is compiled into the binary: the sources are in `authentication/` at the
+top of the checkout, and `buildroot/package/cp2cl` installs what is there into
+`/etc/cp2cl/` when the firmware is built, so replacing a key is a matter of
+replacing a file on the board. None of them are ours to publish, so the directory
+is ignored by git and a fresh clone has none of it. That is a supported way to
+build: without the MFi pair the phone identifies us and then refuses to
+authenticate, and without the CarLife key the car's challenge goes unanswered.
+Both absences are logged rather than fatal, and everything else — the device, the
+streams, the status page — works without them. A run from a checkout looks in the
+same place, so it needs the three files copied there or it runs without them.
 
 ## Environment
 
@@ -674,7 +676,7 @@ up, whether the device was composed, and what a head unit asked. See
 The car may ask this device to prove it is a phone, with a challenge only an
 actual phone can answer. That answer is made with the CarLife app's own private
 RSA key, which the car checks against Baidu's published half, so
-`assets/authentication/carlife_md_rsa_private.pem` is where the key goes; without
+`/etc/cp2cl/carlife_md_rsa_private.pem` is where the key goes; without
 it the challenge is reported and left unanswered rather than guessed at, the car
 asks again every half minute, and the session runs on. The other
 direction is ours to decide: the car names a channel number along with its

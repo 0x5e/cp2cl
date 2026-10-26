@@ -1,9 +1,10 @@
 target/
 Cargo.lock.orig
 
-# Credentials — private keys, never commit these. They are read at build time and
-# embedded, so a clone without them builds and runs, just without authentication.
-assets/authentication/
+# Credentials — private keys, never commit these. The cp2cl package installs them
+# into the firmware's /etc/cp2cl/ and the program reads them there, so a clone
+# without them builds and runs, just without authentication.
+authentication/
 *.pk8
 *.p7b
 *.p12

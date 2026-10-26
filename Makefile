@@ -12,7 +12,10 @@ RUN    := docker run --rm -u "$$(id -u):$$(id -g)" \
 # Buildroot is not in this repository; it is a container the image is built in,
 # because there is no Linux machine here and Buildroot does not run on macOS.
 # What lives in buildroot/ is the external tree: the boards, the kernel
-# fragments, and the one package, which is this crate.
+# fragments, and the one package, which is this crate. The checkout is mounted
+# whole rather than that one directory, because the package reaches outside it:
+# it installs the credentials from authentication/ into the image and reads the
+# version out of Cargo.toml, and both are one level up from the external tree.
 BR_IMAGE := cp2cl-buildroot
 BR_VOL   := cp2cl-buildroot-out
 BOARD    ?= nanopi_duo2
@@ -106,12 +109,11 @@ firmware: app buildroot-image
 	mkdir -p $(DIST)
 	docker volume create $(BR_VOL) >/dev/null
 	docker run --rm -u 0:0 -v $(BR_VOL):/build \
-		-v "$(CURDIR)/buildroot":/ext:ro \
-		-v "$(CURDIR)/$(DIST)":/dist:ro \
+		-v "$(CURDIR)":/src:ro \
 		-e BR2_DL_DIR=/build/dl \
 		$(BR_IMAGE) sh -c 'chown $(BR_UID):$(BR_UID) /build \
 			&& su -s /bin/sh builder -c "$(BR_FRESH) \
-				&& make -C /opt/buildroot O=/build BR2_EXTERNAL=/ext $(BOARD)_defconfig \
+				&& make -C /opt/buildroot O=/build BR2_EXTERNAL=/src/buildroot $(BOARD)_defconfig \
 				&& make -C /opt/buildroot O=/build -j$$(nproc) \
 				&& make -C /opt/buildroot O=/build cp2cl-rebuild \
 				&& make -C /opt/buildroot O=/build -j$$(nproc)"'

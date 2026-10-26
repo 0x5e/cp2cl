@@ -42,12 +42,18 @@ pub fn log_filter() -> LevelFilter {
     }
 }
 
-/// Where the program keeps what it has to remember: the identity it presents to
-/// the phone now, and its settings once there are any.
+/// Where the program keeps what it has to remember — the identity it presents to
+/// the phone now, its settings once there are any — and where it reads the
+/// credentials the firmware installs beside them.
 ///
 /// `/etc/cp2cl` rather than a home directory: this board has no user with one,
 /// and `/etc` is on the writable root, so what lands here outlives the boot — a
 /// new identity every ignition reads as a new accessory to the phone.
+///
+/// The credentials are files here rather than bytes in the binary, and this is
+/// the only place the path is written down: everything that reads them asks for
+/// one by name with `data_file`, and the firmware installs them into this same
+/// directory — see `buildroot/package/cp2cl`.
 pub const DATA_DIR: &str = "/etc/cp2cl";
 
 /// `DATA_DIR`, created if the first run has not made it yet.
@@ -55,6 +61,15 @@ pub fn data_dir() -> std::io::Result<PathBuf> {
     let dir = PathBuf::from(DATA_DIR);
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+/// One of the files that live in `DATA_DIR`, by its bare name.
+///
+/// Not created, only named: what is read here is put there by the build or by an
+/// earlier run, and a machine without the file is a machine that runs without
+/// it rather than one that gets a directory it did not ask for.
+pub fn data_file(name: &str) -> PathBuf {
+    Path::new(DATA_DIR).join(name)
 }
 
 /// What a machine with no controller to ask reports. Every caller wants

@@ -441,24 +441,39 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Local credentials when they are built in, a dead end with a clear message otherwise.
+/// The two halves of the MFi identity, by the names the firmware installs them
+/// under in `config::DATA_DIR`.
+const MFI_KEY: &str = "identity.pk8";
+const MFI_CERT: &str = "certificate.p7b";
+
+/// Local credentials when the data directory holds them, a dead end with a clear
+/// message otherwise.
 ///
 /// Wired CarPlay still runs the full MFi challenge, so without credentials the
 /// phone identifies us and then refuses to authenticate. Saying so up front
 /// beats the cryptic 0xAA04 that comes back later.
 fn mfi_signer() -> Result<Box<dyn AuthCoprocessor + Send>> {
-    let (Some(key), Some(cert)) = (
-        assets::get("authentication/identity.pk8"),
-        assets::get("authentication/certificate.p7b"),
-    ) else {
+    let read = |name: &str| {
+        let path = config::data_file(name);
+        std::fs::read(&path).map_err(|e| {
+            // A file that is not there is a build without credentials, which the
+            // line below says once for both halves. One that is there and cannot
+            // be read is a different thing, and this is the only place it is said.
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!("mfi.credential_unreadable file={} err={e:#}", path.display());
+            }
+            e
+        })
+    };
+    let (Ok(key), Ok(cert)) = (read(MFI_KEY), read(MFI_CERT)) else {
         tracing::warn!(
-            "mfi.credentials_missing consequence=phone_rejects \
-             want=\"identity.pk8 + certificate.p7b in assets/authentication\""
+            "mfi.credentials_missing dir={} consequence=phone_rejects",
+            config::DATA_DIR
         );
         return Ok(Box::new(NoCoprocessor));
     };
-    let signer = LocalCoprocessor::load(key, cert)
-        .context("the built-in MFi credentials could not be used")?;
+    let signer = LocalCoprocessor::load(&key, &cert)
+        .context("the MFi credentials in the data directory could not be used")?;
     tracing::info!(
         "mfi.credentials_loaded key_bytes={} cert_bytes={}",
         key.len(),

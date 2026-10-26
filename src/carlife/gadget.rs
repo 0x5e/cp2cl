@@ -28,7 +28,6 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::airplay::{EventSink, SharedChannel};
-use crate::assets;
 use crate::config::Config;
 use crate::web::Status;
 
@@ -104,25 +103,17 @@ where
 
     tracing::info!("usb.waiting_for_host");
 
-    // The key the car's challenge is answered with, built in beside the icon and
-    // the page. Read once rather than per session: it is one key, and a car
-    // plugged out and back in finds what the session before it had.
+    // The key the car's challenge is answered with, read out of the data
+    // directory the firmware installs it in. Once rather than per session: it is
+    // one key, and a car plugged out and back in finds what the session before it
+    // had.
     //
     // Without it the car is left unauthenticated rather than failed: the
     // challenge is skipped, the head unit asks again in half a minute and is
     // skipped again, and the streams run either way. The key is Baidu's and not
-    // every build is going to carry it, so this is said once here and never
+    // every build is going to install it, so this is said once here and never
     // again.
-    let auth = match assets::text(auth::KEY_FILE) {
-        Some(pem) => auth::Signer::from_pem(pem),
-        None => {
-            tracing::warn!(
-                "auth.key_missing file={} consequence=carlife_auth_skipped",
-                auth::KEY_FILE
-            );
-            None
-        }
-    };
+    let auth = auth::Signer::load();
 
     let (events_tx, mut events_rx) = mpsc::channel(4);
     // Kept back from the task below, which owns the device: what the controller
