@@ -19,6 +19,7 @@
 //! by `auth`; what that needs and what happens without it is documented there.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1013,8 +1014,9 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 }
             }
             // The car's own speed, which it reports on its own clock rather than
-            // on a request. Nothing here acts on it, so it is a line only when it
-            // is the first one.
+            // on a request. Nothing here acts on the number, so it is a line only
+            // when it is the first one; the stamp on it is the only real time
+            // this board ever hears, so that is acted on — see `adopt_clock`.
             HU_CAR_VELOCITY => {
                 let speed = proto::decode_car_speed(&message.body);
                 self.status.with(|s| s.carlife.speed = Some(speed.speed));
@@ -1026,6 +1028,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                         clock(speed.timestamp_ms)
                     );
                 }
+                adopt_clock(speed.timestamp_ms);
             }
             // The car's position, at the rate it reports at. Two consumers: the
             // page, and the phone, which takes a fix only as NMEA sentences and
@@ -1977,6 +1980,46 @@ fn clock(epoch_ms: u64) -> String {
         // timestamp at all; what the car did send is more use than a date made
         // up here to stand in for it.
         None => format!("{epoch_ms}ms"),
+    }
+}
+
+/// Whether the wall clock has been set from the car's stamp yet.
+///
+/// One is all there is: the board has no battery-backed clock, so it boots at
+/// 1970, and every report after the first carries the same clock read a second
+/// later rather than a better one.
+static CLOCK_TAKEN: AtomicBool = AtomicBool::new(false);
+
+/// What a stamp has to fall inside to be taken for a date, in milliseconds:
+/// 2020-01-01 to 2100-01-01. A car that has not set its own clock sends
+/// something near the epoch, and setting this board's clock there would date
+/// every file it writes for the rest of the run.
+const STAMP_FLOOR_MS: u64 = 1_577_836_800_000;
+const STAMP_CEILING_MS: u64 = 4_102_444_800_000;
+
+/// Sets the wall clock from a stamp the car put on one of its reports.
+///
+/// The first usable stamp is taken and the rest are ignored — the car repeats
+/// the same time once a second, and there is nothing to correct it against. A
+/// failure is reported once and not repeated: without the privilege to set the
+/// clock it fails every second the car reports.
+fn adopt_clock(epoch_ms: u64) {
+    if !(STAMP_FLOOR_MS..=STAMP_CEILING_MS).contains(&epoch_ms)
+        || CLOCK_TAKEN.swap(true, Ordering::Relaxed)
+    {
+        return;
+    }
+    let at = libc::timespec {
+        tv_sec: (epoch_ms / 1_000) as libc::time_t,
+        tv_nsec: (epoch_ms % 1_000 * 1_000_000) as libc::c_long,
+    };
+    // SAFETY: `at` is this function's own, and `CLOCK_REALTIME` is the clock
+    // `clock_settime` is defined for.
+    if unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &at) } == 0 {
+        tracing::info!("clock.adopted source=car clock={}", clock(epoch_ms));
+    } else {
+        let e = std::io::Error::last_os_error();
+        tracing::warn!("clock.adopt_failed clock={} err={e}", clock(epoch_ms));
     }
 }
 
