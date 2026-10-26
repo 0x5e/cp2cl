@@ -500,18 +500,21 @@ mounts, paths, ports — is `buildroot/README.md`, as a list of values. It is wh
 a rootfs other than this one has to satisfy.
 
 `hostapd.conf` is the one file the operator tunes: the interface, the SSID and
-the passphrase are this board's. Changing it is also how the network the phone is
-told to join is changed, and where on it we are — wireless CarPlay reads its own
-configuration out of `/etc/hostapd`, taking the file that names the interface
-`CP2CL_WIFI_IFACE` defaults to, so the two cannot drift apart. See
-[Wireless CarPlay](#wireless-carplay).
+the passphrase are this board's, and the first boot rewrites the SSID to what
+the board calls itself, so the network and the board are one name — what the
+file holds is what a board whose radio never appeared goes on air with. Changing
+it is also how the network the phone is told to join is changed, and where on it
+we are — wireless CarPlay reads its own configuration out of `/etc/hostapd`,
+taking the file that names the interface `CP2CL_WIFI_IFACE` defaults to, so the
+two cannot drift apart. See [Wireless CarPlay](#wireless-carplay).
 
-**The boot is five scripts and no service manager.**
+**The boot is six scripts and no service manager.**
 
 | Script | What it is |
 |---|---|
 | `S00diag` | writes what the boot had to say to `/var/log`, then samples the radio for two minutes |
-| `S10radio` | loads the Wi-Fi and Bluetooth modules, and waits for `wlan0` and `hci0` |
+| `S10radio` | loads the Wi-Fi and Bluetooth modules, and returns |
+| `S12name` | names the board after `wlan0`'s address and restarts, once, on the first boot |
 | `S50cp2cl` | the program, which sets no environment and reads no settings file |
 | `S50dropbear` | dropbear, for the console the image does not otherwise have |
 | `S55ap` | hostapd on `wlan0` at `192.168.4.1/24`, then dnsmasq for the leases |
@@ -569,11 +572,17 @@ status page shows.
 
 
 **The board is reached on its access point.** `192.168.4.1`, and nothing else: the
-program has no port of its own to log into. Join `nanopi-duo2` and log in:
+program has no port of its own to log into. Join the board's hostname —
+`CarPlayBox` and the last four characters of its `wlan0` address, as in
+`CarPlayBox-3F7B` — and log in:
 
 ```bash
 ssh root@192.168.4.1        # password: cp2cl
 ```
+
+That name is decided on the first boot of a card, which waits for the radio,
+writes it into `/etc/hostname` and the access point's file, and restarts once to
+apply both; every boot after that starts with it already there.
 
 That password is `BR2_TARGET_GENERIC_ROOT_PASSWD` in the board's defconfig, and it
 is the one line to change before a board leaves the bench. There is no serial

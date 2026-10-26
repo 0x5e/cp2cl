@@ -158,6 +158,9 @@ the core; none is loaded on this chip.
 
 ### 3.2 Paths written
 
+    /etc/hostname             S12name, first boot only
+    /etc/hosts                127.0.1.1, first boot only
+    /etc/hostapd/*.conf       ssid=, first boot only
     /etc/cp2cl/pairings.json
     /dev/usb-ffs/carlife
     /sys/devices/platform/soc/1c19000.usb/musb-hdrc.2.auto/mode    peripheral
@@ -197,7 +200,7 @@ the core; none is loaded on this chip.
 
 ### 3.5 Start order
 
-    S00diag  S10radio  S30dbus-daemon  S40bluetoothd  S50cp2cl  S55ap
+    S00diag  S10radio  S12name  S30dbus-daemon  S40bluetoothd  S50cp2cl  S55ap
 
 ### 3.6 Not needed
 

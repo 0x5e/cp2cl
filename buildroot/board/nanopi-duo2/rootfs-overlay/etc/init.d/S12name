@@ -1,0 +1,106 @@
+#!/bin/sh
+#
+# The name this board goes by: `CarPlayBox` and the last four characters of
+# wlan0's own address, e.g. `CarPlayBox-3F7B`.
+#
+# Two files carry a name and both are written here: /etc/hostname, which the boot
+# applies before any script runs, and the access point's configuration, whose
+# ssid= hostapd beacons. Everything else asks the kernel — the Bluetooth name,
+# the name the phone lists, the name the car is given, the page.
+#
+# The address cannot be had any earlier: the interface appears once brcmfmac has
+# taken its firmware, a second or two after the module was loaded. So the first
+# boot of a card pays that wait, writes the answer, and restarts — nothing after
+# this point would use the new name, since the kernel still holds the old one and
+# hostapd has not read its file yet. Every boot after that one finds the answer
+# already written and asks nothing.
+#
+# A board whose radio never appears keeps the plain prefix and boots on: a name
+# without a suffix is a worse name, not a reason not to start.
+
+IFACE=wlan0
+PREFIX=CarPlayBox
+HOSTNAME_FILE=/etc/hostname
+HOSTAPD_FILE=/etc/hostapd/hostapd.conf
+LOG=/var/log
+
+# 0.2 s a round, 10 s in all: the interface is there in under two, so this is
+# the ceiling for a card that is slow rather than a radio that is missing.
+ROUNDS=50
+
+# One line per boot, into the file S00diag opens. What is printed here has no
+# console to land on, and the boot this names is over by the time anyone reads it.
+say() {
+	[ -w "$LOG" ] && echo "name:    $*" >> "$LOG/boot.log"
+}
+
+start() {
+	current=$(cat "$HOSTNAME_FILE" 2>/dev/null)
+	case "$current" in
+	"$PREFIX"-*)
+		echo "Naming the board: $current (kept)"
+		say "$current"
+		return 0
+		;;
+	esac
+
+	i=0
+	while [ ! -r "/sys/class/net/$IFACE/address" ]; do
+		i=$((i + 1))
+		if [ "$i" -ge "$ROUNDS" ]; then
+			echo "Naming the board: no $IFACE after 10 s, staying $PREFIX"
+			say "$PREFIX radio_absent=true"
+			return 0
+		fi
+		sleep 0.2
+	done
+
+	hex=$(sed 's/://g' "/sys/class/net/$IFACE/address" 2>/dev/null)
+	case "$hex" in
+	????????????) ;;
+	*)
+		echo "Naming the board: $IFACE address unreadable, staying $PREFIX"
+		say "$PREFIX address_unreadable=true"
+		return 0
+		;;
+	esac
+	name="$PREFIX-$(printf %s "$hex" | tail -c 4 | tr 'a-f' 'A-F')"
+
+	echo "$name" > "$HOSTNAME_FILE"
+	# Read back before going any further: a name that did not reach the file is
+	# a name that is computed and then restarted into being computed again.
+	if [ "$(cat "$HOSTNAME_FILE" 2>/dev/null)" != "$name" ]; then
+		echo "Naming the board: could not write $HOSTNAME_FILE"
+		say "$name write_failed=true"
+		return 1
+	fi
+
+	# What this machine resolves itself as. Both files are read by the next boot,
+	# not by this one.
+	sed -i "s/^127\.0\.1\.1.*/127.0.1.1	$name/" /etc/hosts
+
+	# The network is named by the same value: hostapd beacons the ssid= in this
+	# file and the program hands the phone the same file, so leaving it behind
+	# would be two names for one board.
+	sed -i "s/^ssid=.*/ssid=$name/" "$HOSTAPD_FILE"
+
+	echo "Naming the board: $name, restarting"
+	say "$name"
+	# The kernel holds the old name and hostapd has not read its file, so
+	# nothing below this line would use the new one. `sync` first: this is the
+	# applet's own restart, with no rcK and no unmount behind it.
+	sync
+	reboot
+	# Only reached when the restart did not happen. The card has the answer, so
+	# the next boot is the one that applies it.
+	say "$name restart_failed=true"
+}
+
+case "$1" in
+	start) start ;;
+	stop|restart|reload) ;;
+	*)
+		echo "Usage: $0 {start}"
+		exit 1
+		;;
+esac
