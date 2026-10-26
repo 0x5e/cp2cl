@@ -24,9 +24,12 @@ use crate::session::{carry_artwork, Ended};
 use crate::sink::ClSink;
 use crate::web::Status;
 
-/// Keeps serving phones until the program stops. Nothing pushes "a phone just
-/// paired" from outside, so a session that ends puts us back to waiting for the
-/// same phone to come again.
+/// Keeps serving phones until the program stops, and publishes the service only
+/// while the car has a CarLife session of its own: a phone that finds it
+/// otherwise starts a CarPlay that nothing is reading — see `wait_car_up`.
+///
+/// Nothing pushes "a phone just paired" from outside, so a session that ends
+/// puts us back to waiting for the same phone to come again.
 pub async fn watch(
     cfg: Arc<Config>,
     auth: SharedCoprocessor,
@@ -65,137 +68,197 @@ pub async fn watch(
     if !*gate.borrow() {
         tracing::info!("wireless.waiting_for_car consequence=nothing_published");
     }
-    while !*gate.borrow() {
-        if gate.changed().await.is_err() {
-            return;
-        }
-    }
-    tracing::info!("wireless.car_up action=publish_service");
 
-    // The access point is a daemon the boot starts after this program, so the
-    // network a phone is told to join may not be on air yet. It is named in the
-    // start session either way, and a phone that is paged before its network is
-    // there has nothing to come back to.
-    wait_for_access_point().await;
-
-    let (conn, mut incoming, held) =
-        match livi_runtime::bt::start(&cfg.bt_adapter, &cfg.name, true).await {
-            Ok(started) => started,
-            Err(e) => {
-                tracing::error!(
-                    "wireless.bt_start_failed adapter={} err={e} hint=\"is bluetoothd running, \
-                     and is {} the adapter?\"",
-                    cfg.bt_adapter,
-                    cfg.bt_adapter
-                );
-                return;
-            }
-        };
-    // The D-Bus connection owns the registered profiles. Dropping it
-    // unregisters them, so it has to be kept alive for as long as we are
-    // listening — it is also what puts the controllers back at the end.
-    tracing::info!(
-        "wireless.bt_service_up adapter={} name={:?} action=pair_phone",
-        cfg.bt_adapter, cfg.name
-    );
-
-    // The controller has nothing to do once the phone has moved its session
-    // onto Wi-Fi, and every page it answers is a slice of the antenna the
-    // stream needed — see `power`. A task of its own, because the loop below
-    // sits inside a session for as long as the controller has to stay off.
-    let guard = tokio::spawn(power::guard(
-        conn.clone(),
-        cfg.bt_adapter.clone(),
-        handover.clone(),
-    ));
-
-    // The channel never closes while we hold the connection that owns the
-    // profiles, so being told to stop is the only way out of the loop — and the
-    // one moment the controllers have to be put back. Without the handler the
-    // default action still ends the process, only without the putting back.
+    // The channel never closes while a round holds the connection that owns the
+    // profiles, so being told to stop is the one way out of the loops below —
+    // and the moment the controllers have to be put back. Made once rather than
+    // per round; without the handler the default action still ends the process,
+    // only without the putting back.
     let mut stop = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .inspect_err(|e| tracing::warn!("wireless.signal_handler_missing err={e} consequence=no_restore"))
         .ok();
 
     loop {
-        // Only while nothing is on the link: a phone that is already coming in
-        // does not need calling, and one that is mid-session must not be paged
-        // again on top of it. And not at all while the phone has moved its iAP2
-        // session onto the CarPlay data stream — see `Handover`.
-        let paging = tokio::spawn(page::run(
+        // Nothing is published while the car has no session, and the profiles
+        // come out with it: BlueZ's own auto-connect follows whatever is
+        // registered, so a profile left up is a phone called back for a CarPlay
+        // nobody is reading.
+        if !wait_car_up(&mut gate).await {
+            return;
+        }
+        tracing::info!("wireless.car_up action=publish_service");
+
+        // The access point is a daemon the boot starts after this program, so
+        // the network a phone is told to join may not be on air yet. It is named
+        // in the start session either way, and a phone that is paged before its
+        // network is there has nothing to come back to.
+        wait_for_access_point().await;
+
+        let (conn, mut incoming, held) =
+            match livi_runtime::bt::start(&cfg.bt_adapter, &cfg.name, true).await {
+                Ok(started) => started,
+                Err(e) => {
+                    tracing::error!(
+                        "wireless.bt_start_failed adapter={} err={e} hint=\"is bluetoothd \
+                         running, and is {} the adapter?\"",
+                        cfg.bt_adapter,
+                        cfg.bt_adapter
+                    );
+                    return;
+                }
+            };
+        // The D-Bus connection owns the registered profiles. Dropping it
+        // unregisters them, so it has to be kept alive for as long as we are
+        // listening — it is also what puts the controllers back at the end.
+        tracing::info!(
+            "wireless.bt_service_up adapter={} name={:?} action=pair_phone",
+            cfg.bt_adapter, cfg.name
+        );
+
+        // The controller has nothing to do once the phone has moved its session
+        // onto Wi-Fi, and every page it answers is a slice of the antenna the
+        // stream needed — see `power`. A task of its own, because the loop below
+        // sits inside a session for as long as the controller has to stay off.
+        let guard = tokio::spawn(power::guard(
             conn.clone(),
             cfg.bt_adapter.clone(),
             handover.clone(),
         ));
-        let next = match &mut stop {
-            Some(sig) => tokio::select! {
-                next = incoming.recv() => next,
-                _ = sig.recv() => None,
-            },
-            None => incoming.recv().await,
-        };
-        paging.abort();
-        let Some(IncomingConn { fd, peer_mac }) = next else {
-            break;
-        };
-        let peer = short(&peer_mac);
-        tracing::info!("wireless.channel_opened peer={peer}");
-        // Over Bluetooth there is no serial to be had: the peer is an address
-        // and nothing more, so that is what the page is given.
-        status.with(|s| {
-            s.carplay.phone = Some(peer_mac.clone());
-            s.carplay.identified = false;
-            s.carplay.authenticated = false;
-            s.carplay.subscribed = false;
-            s.carplay.failed = None;
-        });
-        let link = LinkConfig {
-            max_outgoing: 4,
-            control_version: 2,
-            // The phone takes this as the largest packet it may send, and this
-            // link carries small iAP2 messages: 4096 is what it has been in use
-            // with. The cable and the tunnel keep the default, where a cover need
-            // not be cut into 4 KB pieces.
-            max_len: 4096,
-            ..LinkConfig::default()
-        };
-        // Over RFCOMM the phone speaks first, so we must not open with a
-        // negotiate of our own.
-        let (channel, artwork) = spawn_link(fd, link, false);
-        // The cover art is a file transfer of its own on the same link, and it
-        // goes to the car's panel the same way the song it belongs to does.
-        let carrying = tokio::spawn(carry_artwork(artwork, panel.clone()));
-        // Ending the session drops the descriptor, which is the only way a
-        // BlueZ channel ever closes; paging the phone again is what brings it
-        // back, and the loop above starts that over.
-        let ended = run_session(
-            &cfg,
-            auth.clone(),
-            channel,
-            airplay_port,
-            local_mac(&cfg),
-            &accessory_key,
-            &peer,
-            &restart,
-            &panel,
-            &status,
-            &vehicle,
-        )
-        .await;
-        carrying.abort();
-        tracing::info!("wireless.channel_closed peer={peer} action=page_again");
-        if let Ended::Restart = ended {
-            tracing::info!("wireless.waiting peer={peer} action=wait_channel");
+
+        loop {
+            // Only while nothing is on the link: a phone that is already coming
+            // in does not need calling, and one that is mid-session must not be
+            // paged again on top of it. And not at all while the phone has moved
+            // its iAP2 session onto the CarPlay data stream — see `Handover`.
+            let paging = tokio::spawn(page::run(
+                conn.clone(),
+                cfg.bt_adapter.clone(),
+                handover.clone(),
+            ));
+            // The car's session ending is checked between sessions and never
+            // inside one: `run_session` has tasks of its own, and dropping it
+            // half way leaves them behind.
+            let next = match &mut stop {
+                Some(sig) => tokio::select! {
+                    next = incoming.recv() => next,
+                    _ = sig.recv() => None,
+                    _ = wait_car_down(&mut gate) => None,
+                },
+                None => tokio::select! {
+                    next = incoming.recv() => next,
+                    _ = wait_car_down(&mut gate) => None,
+                },
+            };
+            paging.abort();
+            let Some(IncomingConn { fd, peer_mac }) = next else {
+                break;
+            };
+            let peer = short(&peer_mac);
+            tracing::info!("wireless.channel_opened peer={peer}");
+            // Over Bluetooth there is no serial to be had: the peer is an
+            // address and nothing more, so that is what the page is given.
+            status.with(|s| {
+                s.carplay.phone = Some(peer_mac.clone());
+                s.carplay.identified = false;
+                s.carplay.authenticated = false;
+                s.carplay.subscribed = false;
+                s.carplay.failed = None;
+            });
+            let link = LinkConfig {
+                max_outgoing: 4,
+                control_version: 2,
+                // The phone takes this as the largest packet it may send, and
+                // this link carries small iAP2 messages: 4096 is what it has
+                // been in use with. The cable and the tunnel keep the default,
+                // where a cover need not be cut into 4 KB pieces.
+                max_len: 4096,
+                ..LinkConfig::default()
+            };
+            // Over RFCOMM the phone speaks first, so we must not open with a
+            // negotiate of our own.
+            let (channel, artwork) = spawn_link(fd, link, false);
+            // The cover art is a file transfer of its own on the same link, and
+            // it goes to the car's panel the same way the song it belongs to
+            // does.
+            let carrying = tokio::spawn(carry_artwork(artwork, panel.clone()));
+            // Ending the session drops the descriptor, which is the only way a
+            // BlueZ channel ever closes; paging the phone again is what brings
+            // it back, and the loop above starts that over.
+            let ended = run_session(
+                &cfg,
+                auth.clone(),
+                channel,
+                airplay_port,
+                local_mac(&cfg),
+                &accessory_key,
+                &peer,
+                &restart,
+                &panel,
+                &status,
+                &vehicle,
+            )
+            .await;
+            carrying.abort();
+            tracing::info!("wireless.channel_closed peer={peer} action=page_again");
+            if let Ended::Restart = ended {
+                tracing::info!("wireless.waiting peer={peer} action=wait_channel");
+            }
+        }
+
+        // Nothing is listening any more: the profiles went with the channel, and
+        // the controllers go back to the name and discoverability they were
+        // found with. The power state is not among them — leaving it off costs
+        // nothing, because the next start powers the controller on as it always
+        // did.
+        guard.abort();
+        livi_runtime::bt::let_go(&conn, &cfg.bt_adapter, &held).await;
+        // A car whose session is still up ended this round for another reason —
+        // a signal, or a channel that closed and cannot be reopened — and the
+        // loops above have nothing left to do. One that is down gets the round
+        // it is owed, which starts by waiting for it to come back.
+        if *gate.borrow() {
+            tracing::info!(
+                "wireless.bt_service_down adapter={} state=restored",
+                cfg.bt_adapter
+            );
+            return;
+        }
+        tracing::info!(
+            "wireless.bt_service_down adapter={} reason=car_session_ended",
+            cfg.bt_adapter
+        );
+    }
+}
+
+/// Waits until the car has a CarLife session, and says whether it is still going
+/// to be told about one.
+///
+/// The CarPlay half exists only for as long as the car's session does, so this
+/// is the gate the service is published behind. `false` is the channel that
+/// carries the answer being gone, which is the program shutting down.
+async fn wait_car_up(gate: &mut tokio::sync::watch::Receiver<bool>) -> bool {
+    loop {
+        if *gate.borrow_and_update() {
+            return true;
+        }
+        if gate.changed().await.is_err() {
+            return false;
         }
     }
+}
 
-    // Nothing is listening any more: the profiles went with the channel, and the
-    // controllers go back to the name and discoverability they were found with.
-    // The power state is not among them — leaving it off costs nothing, because
-    // the next start powers the controller on as it always did.
-    guard.abort();
-    livi_runtime::bt::let_go(&conn, &cfg.bt_adapter, &held).await;
-    tracing::info!("wireless.bt_service_down adapter={} state=restored", cfg.bt_adapter);
+/// Waits until the car's CarLife session is over, which is the same condition
+/// seen from inside one: while it lasts there is a service to publish, and
+/// after it nothing to publish it for.
+async fn wait_car_down(gate: &mut tokio::sync::watch::Receiver<bool>) {
+    loop {
+        if !*gate.borrow_and_update() {
+            return;
+        }
+        if gate.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 /// This machine's Bluetooth address, which the phone checks against the one it
