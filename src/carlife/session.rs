@@ -421,7 +421,6 @@ where
         position_seen: false,
         last_fix: None,
         speed_seen: false,
-        last_speed: None,
         delivered: false,
         handed: None,
         // Nothing is assumed about the datum before the car has named one, and a
@@ -786,9 +785,6 @@ struct Session<'a, W> {
     /// `info` for the same reason a position is: it is the evidence that the
     /// subscription worked.
     speed_seen: bool,
-    /// The last speed the car reported. A car sitting still sends the same number
-    /// every second, and only a change of it is worth a line.
-    last_speed: Option<i32>,
     /// Whether a position has been handed to the phone at all, which is the
     /// other half of that evidence: the car spoke, and the phone was told.
     delivered: bool,
@@ -1018,7 +1014,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             }
             // The car's own speed, which it reports on its own clock rather than
             // on a request. Nothing here acts on it, so it is a line only when it
-            // says something the last one did not.
+            // is the first one.
             HU_CAR_VELOCITY => {
                 let speed = proto::decode_car_speed(&message.body);
                 self.status.with(|s| s.carlife.speed = Some(speed.speed));
@@ -1026,14 +1022,6 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     self.speed_seen = true;
                     tracing::info!(
                         "cl.car_speed_received speed_kmh={} clock={}",
-                        speed.speed,
-                        clock(speed.timestamp_ms)
-                    );
-                }
-                if self.last_speed != Some(speed.speed) {
-                    self.last_speed = Some(speed.speed);
-                    tracing::debug!(
-                        "cl.car_speed speed_kmh={} clock={}",
                         speed.speed,
                         clock(speed.timestamp_ms)
                     );
