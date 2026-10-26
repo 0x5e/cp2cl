@@ -45,6 +45,10 @@ pub async fn watch(
     // on the bus after both. Waited for here rather than in `main`, because this
     // is the only part of the program with any use for them.
     wait_for_radios(&cfg).await;
+    // The page was handed an address before there was a controller to ask, so
+    // it has the fallback one. What the phone is told is read per session and
+    // needs no help; this is the copy a person reads off the page.
+    status.with(|s| s.carplay.bt_mac = bt_address(&cfg.bt_adapter));
 
     if let Err(e) = ready(&cfg) {
         tracing::error!("wireless.ap_unusable err={e}");

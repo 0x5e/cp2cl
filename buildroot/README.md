@@ -187,6 +187,7 @@ the core; none is loaded on this chip.
     /sys/class/udc
     /sys/kernel/config/usb_gadget
     /sys/class/net/wlan0/address
+    /sys/class/bluetooth/hci0/address   read once the controller is there
 
 ### 3.4 Privileges
 

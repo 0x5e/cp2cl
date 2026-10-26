@@ -40,7 +40,7 @@ use tokio::task::JoinHandle;
 
 use super::crypto::{hkdf32, open_frames, SymKey};
 use super::event::EventSink;
-use crate::config::Config;
+use crate::config::{bt_address, Config};
 use crate::session::{carry_artwork, run_bringup, Ended};
 use crate::sink::ClSink;
 use crate::web::Status;
@@ -74,7 +74,6 @@ const PEER_WAIT: Duration = Duration::from_secs(15);
 pub(crate) struct Setup {
     pub cfg: Arc<Config>,
     pub auth: SharedCoprocessor,
-    pub bt_mac: [u8; 6],
     /// The AirPlay identity's public key, hex, which the start session names so
     /// the phone recognises the accessory on this stream as the one it paired
     /// with. Read once at startup from the pairing the receiver is already
@@ -145,7 +144,7 @@ impl Tunnel {
         let params = session_params(
             &setup.cfg,
             setup.airplay_port,
-            setup.bt_mac,
+            crate::wireless::parse_mac(&bt_address(&setup.cfg.bt_adapter)),
             &setup.accessory_key,
         )
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;

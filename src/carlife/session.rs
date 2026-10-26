@@ -34,7 +34,7 @@ use tokio::time::Instant;
 use super::{auth, frame, gps, proto};
 use crate::airplay::{info, EventSink, ScreenParams, SharedChannel};
 use crate::commands::{Command, TouchContact, PHONE_DROP, PHONE_HOOK_SWITCH, PHONE_MUTE};
-use crate::config::Config;
+use crate::config::{bt_address, Config};
 use crate::navigation::{turn_kind, Guidance};
 use crate::playing::{Playing, Track};
 use crate::sink::{ClOutlet, Media, Navi};
@@ -878,7 +878,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     model: self.cfg.name.clone(),
                     release: "10".into(),
                     sdk_int: 29,
-                    bt_address: self.cfg.bt_mac.clone(),
+                    bt_address: bt_address(&self.cfg.bt_adapter),
                 });
                 self.send(MD_INFO, &body).await?;
                 if !self.up {

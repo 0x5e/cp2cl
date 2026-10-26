@@ -41,7 +41,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::artwork::{self, Fitted};
 use crate::carlife::proto;
-use crate::config::Config;
+use crate::config::{bt_address, Config};
 use crate::navigation::Guidance;
 use crate::playing::{Playing, Track};
 use crate::sink::ClSink;
@@ -279,7 +279,7 @@ async fn attach(
         let identity = Identity {
             name: cfg.name.clone(),
             ssid: cfg.name.clone(),
-            bt_mac: parse_mac(&cfg.bt_mac),
+            bt_mac: parse_mac(&bt_address(&cfg.bt_adapter)),
             fuels: Fuels::default(),
         };
         // The session task owns both of these for as long as it runs, and a

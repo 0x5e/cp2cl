@@ -148,7 +148,7 @@ async fn main() -> Result<()> {
     status.with(|s| {
         s.carplay.wireless = cfg.wireless;
         s.carplay.name = cfg.name.clone();
-        s.carplay.bt_mac = cfg.bt_mac.clone();
+        s.carplay.bt_mac = config::bt_address(&cfg.bt_adapter);
     });
 
     // Bound before the streams are: a page that cannot be reached is worth
@@ -260,7 +260,6 @@ async fn main() -> Result<()> {
         Arc::new(airplay::tunnel::Setup {
             cfg: cfg.clone(),
             auth: auth.clone(),
-            bt_mac: wireless::parse_mac(&cfg.bt_mac),
             accessory_key: accessory_key.clone(),
             airplay_port,
             panel: panel.clone(),

@@ -68,6 +68,10 @@ const DEFAULT_NAME: &str = "cp2cl";
 /// A Bluetooth controller's own address, which is the only place one is written
 /// down — the phone checks it against the one it paired with, so a made-up value
 /// is rejected where it matters.
+///
+/// Read where it is used rather than carried in the configuration: the file
+/// appears when the controller is brought up, and a copy taken at startup is a
+/// copy of whatever there was before that — the fallback below.
 pub(crate) fn bt_address(adapter: &str) -> String {
     std::fs::read_to_string(format!("/sys/class/bluetooth/{adapter}/address"))
         .map(|s| s.trim().to_uppercase())
@@ -95,9 +99,6 @@ fn read_hostname(path: &Path) -> String {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// This machine's own Bluetooth address, which is also the identifier
-    /// `/info` reports — see `bt_address`.
-    pub bt_mac: String,
     /// What the accessory is called: the machine's hostname, which is what the
     /// phone lists it as — see `hostname`.
     pub name: String,
@@ -127,7 +128,6 @@ impl Config {
     pub fn from_env() -> Self {
         let bt_adapter = env_or("CP2CL_BT_ADAPTER", "hci0");
         Self {
-            bt_mac: bt_address(&bt_adapter),
             name: hostname(),
             // Wireless is what this is for: the board is reached as an
             // accessory over Bluetooth and Wi-Fi. `CP2CL_WIRELESS=0` is the way
