@@ -69,6 +69,8 @@ const MATCH_STATUS: u32 = 0x0001_0002;
 const MD_INFO: u32 = 0x0001_0004;
 const VIDEO_ENCODER_INIT_DONE: u32 = 0x0001_0008;
 const VIDEO_ENCODER_FRAME_RATE_CHANGE_DONE: u32 = 0x0001_000D;
+const SCREEN_ON: u32 = 0x0001_0018;
+const FOREGROUND: u32 = 0x0001_001B;
 const MODULE_STATUS: u32 = 0x0001_0026;
 const NAVI_NEXT_TURN_INFO: u32 = 0x0001_0030;
 const CAR_DATA_SUBSCRIBE: u32 = 0x0001_0031;
@@ -87,6 +89,7 @@ const MEDIA_STOP: u32 = 0x0003_0002;
 const MEDIA_PAUSE: u32 = 0x0003_0003;
 const MEDIA_RESUME_PLAY: u32 = 0x0003_0004;
 const MEDIA_DATA: u32 = 0x0003_0006;
+
 // The navigation prompt has a channel of its own, with the same three messages
 // in the same order. See the guide's §10.4 and CarLifeVehicleLib's
 // `CommonParams.java`.
@@ -402,6 +405,7 @@ where
         cfg,
         screen,
         channel,
+        car_channel: None,
         events,
         source,
         channel_touched: None,
@@ -750,6 +754,11 @@ struct Session<'a, W> {
     screen: ScreenReport<'a>,
     /// Where the channel number the car reports is written, for `/info` to read.
     channel: SharedChannel,
+    /// The same number, kept here until the car has been told what a phone makes
+    /// of it. The two are not the same moment: the number arrives with the
+    /// statistics and the verdict goes out after `MD_INFO`, which is the order a
+    /// phone sends them in.
+    car_channel: Option<String>,
     /// Where the car's touch and panel keys go.
     events: Arc<EventSink>,
     source: Source,
@@ -920,6 +929,11 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 self.send(MATCH_STATUS, &body).await?;
             }
             HU_INFO => {
+                // Everything a phone has to say about itself, in the order the
+                // reference app says it: that it is in front, then what it is,
+                // then that its screen is on. Nothing here depends on that
+                // order, but it is the one a real phone was logged sending.
+                self.send(FOREGROUND, &[]).await?;
                 let body = proto::device_info(&proto::DeviceInfo {
                     os: "Android".into(),
                     brand: self.cfg.name.clone(),
@@ -929,6 +943,24 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     bt_address: bt_address(&self.cfg.bt_adapter),
                 });
                 self.send(MD_INFO, &body).await?;
+                self.send(SCREEN_ON, &[]).await?;
+                // The car's channel number, judged — now and not when it
+                // arrived, because a phone answers the car's question about
+                // itself before it says what it makes of the car.
+                self.judge().await?;
+                // The car will not configure anything until it is asked, and it
+                // has a two-minute limit on sending the statistics it opened
+                // with, so the two questions follow them as closely as they can:
+                // its feature switches, and which of its own data it can report.
+                // The second is asked whether or not a route ever starts — the
+                // answer is a property of the car, and a fix is worth having
+                // either way.
+                self.send(FEATURE_CONFIG_REQUEST, &[]).await?;
+                self.send(CAR_DATA_SUBSCRIBE, &[]).await?;
+                // And the state of this device's own modules, which at this
+                // point is all four of them idle.
+                let body = proto::modules_at_rest();
+                self.send(MODULE_STATUS, &body).await?;
                 if !self.up {
                     self.up = true;
                     self.status.with(|s| s.carlife.session_up = true);
@@ -983,20 +1015,16 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                         self.panel.ppi
                     );
                 }
-                // The other half of the authentication: the car's channel number
-                // is what the phone judges it by, and the judgement is what this
-                // message answers with. A verdict either way is sent — the car is
-                // told what a phone makes of it rather than left waiting for an
-                // answer it may take as acceptance.
-                self.judge(info.channel).await?;
-                // The car will not configure anything until it is asked, and it
-                // has a two-minute limit on sending the statistics above.
-                self.send(FEATURE_CONFIG_REQUEST, &[]).await?;
-                // And the same question a phone asks right after that one: what
-                // vehicle data the car has. Nothing waits for a route to start —
-                // the answer is a property of the car, and a fix is worth having
-                // whether or not anything is being guided along it.
-                self.send(CAR_DATA_SUBSCRIBE, &[]).await?;
+                // The other half of the authentication is owed on this number,
+                // but not here: the verdict goes out after `MD_INFO`, which is
+                // where a phone answers the car's question about itself — see
+                // `HU_INFO`. A car that introduced itself first is answered as
+                // soon as its number arrives, so neither order leaves it
+                // waiting.
+                self.car_channel = Some(info.channel.to_string());
+                if self.up {
+                    self.judge().await?;
+                }
             }
             HU_FEATURE_CONFIG_RESPONSE => {
                 let configs = proto::decode_feature_configs(&message.body);
@@ -1005,7 +1033,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 }
                 self.status.with(|s| s.carlife.features = configs);
             }
-            // The car's answer to the question asked with the statistics: the
+            // The car's answer to the question asked as the session opened: the
             // modules it can report. Two of them are asked to start — the
             // position, which this bridge hands to the phone, and the speed,
             // which nothing here consumes. The other four are the phone's own
@@ -1388,14 +1416,24 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     /// The car's channel number, judged, and the car told what a phone makes of
     /// it. See `auth::channel_is_legal` for what the judgement is.
     ///
-    /// An answer is sent either way. A phone that does not accept a car is
-    /// expected to disconnect from it, and this device does not: the car is the
-    /// only way the phone's screen reaches a panel, and a channel number that is
-    /// not one the app serves is a reason to say so rather than to take the
-    /// picture away. The car is free to act on the verdict, which is the same
-    /// thing a real phone would be telling it.
-    async fn judge(&mut self, channel: &str) -> Result<()> {
-        let legal = auth::channel_is_legal(channel);
+    /// Called from `HU_INFO`, where the car learns who is answering and the
+    /// verdict follows `MD_INFO`; a car that introduced itself before it named a
+    /// channel has its number judged as soon as it arrives instead. A car that
+    /// named no number at all is not judged: there is nothing to have an opinion
+    /// about, and a verdict sent anyway would be an opinion about nothing.
+    ///
+    /// The verdict itself is sent whether the number is accepted or refused. A
+    /// phone that does not accept a car is expected to disconnect from it, and
+    /// this device does not: the car is the only way the phone's screen reaches a
+    /// panel, and a channel number that is not one the app serves is a reason to
+    /// say so rather than to take the picture away. The car is free to act on the
+    /// verdict, which is the same thing a real phone would be telling it.
+    async fn judge(&mut self) -> Result<()> {
+        let Some(channel) = self.car_channel.clone() else {
+            tracing::warn!("cl.channel_check result=unknown reason=no_statistics");
+            return Ok(());
+        };
+        let legal = auth::channel_is_legal(&channel);
         self.status.with(|s| s.carlife.channel_legal = Some(legal));
         if legal {
             tracing::info!("cl.channel_check channel={channel:?} result=legal");
@@ -2252,6 +2290,23 @@ mod tests {
             message
         }
 
+        /// The car naming its channel and then asking who is there, answered the
+        /// way a phone answers it: the verdict on that channel is one of the
+        /// seven, and it arrives after `MD_INFO` rather than before it.
+        async fn introduce(&mut self, channel: &str) -> frame::Message {
+            self.send(HU_STATISTIC_INFO, &statistics(channel)).await;
+            self.send(HU_INFO, &[]).await;
+
+            self.expect(FOREGROUND).await;
+            self.expect(MD_INFO).await;
+            self.expect(SCREEN_ON).await;
+            let verdict = self.expect(MD_AUTHEN_RESULT).await;
+            self.expect(FEATURE_CONFIG_REQUEST).await;
+            self.expect(CAR_DATA_SUBSCRIBE).await;
+            self.expect(MODULE_STATUS).await;
+            verdict
+        }
+
         /// Everything the car asks before it will start the encoder, answering
         /// on `channel`, with `served` expected back — which is what it asked
         /// for unless the channel table preconfigures the screen.
@@ -2267,13 +2322,7 @@ mod tests {
             self.send(HU_PROTOCOL_VERSION, &version).await;
             self.expect(MATCH_STATUS).await;
 
-            self.send(HU_INFO, &[]).await;
-            self.expect(MD_INFO).await;
-
-            self.send(HU_STATISTIC_INFO, &statistics(channel)).await;
-            self.expect(MD_AUTHEN_RESULT).await;
-            self.expect(FEATURE_CONFIG_REQUEST).await;
-            self.expect(CAR_DATA_SUBSCRIBE).await;
+            self.introduce(channel).await;
 
             self.send(HU_VIDEO_ENCODER_INIT, &proto::video_encoder_info(asked))
                 .await;
@@ -2411,8 +2460,7 @@ mod tests {
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
-            car.send(HU_STATISTIC_INFO, &statistics(&channel)).await;
-            let answer = car.expect(MD_AUTHEN_RESULT).await;
+            let answer = car.introduce(&channel).await;
             proto::decode_authen_result(&answer.body).expect("a boolean")
         });
 
@@ -2801,8 +2849,7 @@ mod tests {
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
-            car.send(HU_INFO, &[]).await;
-            car.expect(MD_INFO).await;
+            car.introduce("20062100").await;
 
             // The music: the stream opens, and then there is sound on it.
             sink.push(StreamEvent::AudioConfig {
@@ -2906,8 +2953,7 @@ mod tests {
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
-            car.send(HU_INFO, &[]).await;
-            car.expect(MD_INFO).await;
+            car.introduce("20062100").await;
 
             // The stream opens. A player set up over silence is one the car
             // holds open with nothing in it, so nothing is said yet.
@@ -2984,8 +3030,7 @@ mod tests {
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
-            car.send(HU_INFO, &[]).await;
-            car.expect(MD_INFO).await;
+            car.introduce("20062100").await;
 
             sink.push(StreamEvent::AudioConfig {
                 stream: stream(100, 6),
@@ -3058,8 +3103,7 @@ mod tests {
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
-            car.send(HU_INFO, &[]).await;
-            car.expect(MD_INFO).await;
+            car.introduce("20062100").await;
 
             // The phone names the song, and nothing else about it yet.
             sink.playing(Playing::Track(Track {
@@ -3156,8 +3200,7 @@ mod tests {
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
-            car.send(HU_INFO, &[]).await;
-            car.expect(MD_INFO).await;
+            car.introduce("20062100").await;
 
             // The song is already playing when the phone first says where it
             // is: the module goes running, and the song starting is not a
@@ -3234,8 +3277,7 @@ mod tests {
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
-            car.send(HU_INFO, &[]).await;
-            car.expect(MD_INFO).await;
+            car.introduce("20062100").await;
 
             // The cover arrives first, with no song to attach it to yet.
             sink.playing(Playing::Artwork(vec![0xff, 0xd8, 0xff]));
@@ -3295,8 +3337,7 @@ mod tests {
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
-            car.send(HU_INFO, &[]).await;
-            car.expect(MD_INFO).await;
+            car.introduce("20062100").await;
 
             let reeperbahn = Track {
                 song: Some("Reeperbahn".into()),
@@ -3371,8 +3412,7 @@ mod tests {
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
-            car.send(HU_INFO, &[]).await;
-            car.expect(MD_INFO).await;
+            car.introduce("20062100").await;
 
             sink.playing(Playing::Track(song.clone()));
             car.expect(MEDIA_INFO).await;
@@ -3436,8 +3476,7 @@ mod tests {
         let page = status.clone();
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
-            car.send(HU_INFO, &[]).await;
-            car.expect(MD_INFO).await;
+            car.introduce("20062100").await;
 
             sink.playing(Playing::Track(first.clone()));
             car.expect(MEDIA_INFO).await;
@@ -3494,8 +3533,7 @@ mod tests {
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
-            car.send(HU_INFO, &[]).await;
-            car.expect(MD_INFO).await;
+            car.introduce("20062100").await;
 
             sink.playing(Playing::Track(Track {
                 source: Some("Music".into()),
@@ -3558,8 +3596,7 @@ mod tests {
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
-            car.send(HU_INFO, &[]).await;
-            car.expect(MD_INFO).await;
+            car.introduce("20062100").await;
 
             // The title, and nothing else yet.
             sink.playing(Playing::Track(Track {
@@ -3649,8 +3686,7 @@ mod tests {
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
-            car.send(HU_INFO, &[]).await;
-            car.expect(MD_INFO).await;
+            car.introduce("20062100").await;
 
             let track = Track {
                 song: Some("Reeperbahn".into()),
@@ -3705,8 +3741,7 @@ mod tests {
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
-            car.send(HU_INFO, &[]).await;
-            car.expect(MD_INFO).await;
+            car.introduce("20062100").await;
 
             sink.push(StreamEvent::AudioConfig {
                 stream: stream(102, 1),
@@ -3772,8 +3807,7 @@ mod tests {
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
-            car.send(HU_INFO, &[]).await;
-            car.expect(MD_INFO).await;
+            car.introduce("20062100").await;
             car.subscribe(&[proto::DATA_TURN_BY_TURN]).await;
 
             // The phone describes a turn before it says which one is current,
@@ -3869,8 +3903,7 @@ mod tests {
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
-            car.send(HU_INFO, &[]).await;
-            car.expect(MD_INFO).await;
+            car.introduce("20062100").await;
 
             // A whole route, described and being guided, with nobody having
             // asked: a right turn onto the B27, 90 m away.
@@ -3931,8 +3964,7 @@ mod tests {
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
-            car.send(HU_INFO, &[]).await;
-            car.expect(MD_INFO).await;
+            car.introduce("20062100").await;
 
             // The two the guide names, in the order it names them: the simple
             // guidance is what this device produces, the assistant guide is not.
@@ -4004,16 +4036,7 @@ mod tests {
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
-            car.send(HU_INFO, &[]).await;
-            car.expect(MD_INFO).await;
-
-            // The question goes out next to the feature-config request, which is
-            // where a phone sends it.
-            car.send(HU_STATISTIC_INFO, &statistics("20062100")).await;
-            car.expect(MD_AUTHEN_RESULT).await;
-            car.expect(FEATURE_CONFIG_REQUEST).await;
-            car.expect(CAR_DATA_SUBSCRIBE).await;
-
+            car.introduce("20062100").await;
             // A car with a GPS in WGS84, and a speed it reports on its own.
             car.send(HU_CAR_DATA_SUBSCRIBE_DONE, &vehicle_list(&[(0, 1), (1, 0)]))
                 .await;
@@ -4096,12 +4119,7 @@ mod tests {
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
-            car.send(HU_INFO, &[]).await;
-            car.expect(MD_INFO).await;
-            car.send(HU_STATISTIC_INFO, &statistics("20062100")).await;
-            car.expect(MD_AUTHEN_RESULT).await;
-            car.expect(FEATURE_CONFIG_REQUEST).await;
-            car.expect(CAR_DATA_SUBSCRIBE).await;
+            car.introduce("20062100").await;
             // A car whose GPS is in WGS84, so nothing about the fix is moved.
             car.send(HU_CAR_DATA_SUBSCRIBE_DONE, &vehicle_list(&[(0, 1)]))
                 .await;
@@ -4149,12 +4167,7 @@ mod tests {
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
-            car.send(HU_INFO, &[]).await;
-            car.expect(MD_INFO).await;
-            car.send(HU_STATISTIC_INFO, &statistics("20062100")).await;
-            car.expect(MD_AUTHEN_RESULT).await;
-            car.expect(FEATURE_CONFIG_REQUEST).await;
-            car.expect(CAR_DATA_SUBSCRIBE).await;
+            car.introduce("20062100").await;
             car.send(HU_CAR_DATA_SUBSCRIBE_DONE, &vehicle_list(&[(0, 1)]))
                 .await;
             car.expect(CAR_DATA_SUBSCRIBE_START).await;
@@ -4201,12 +4214,7 @@ mod tests {
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
-            car.send(HU_INFO, &[]).await;
-            car.expect(MD_INFO).await;
-            car.send(HU_STATISTIC_INFO, &statistics("20062100")).await;
-            car.expect(MD_AUTHEN_RESULT).await;
-            car.expect(FEATURE_CONFIG_REQUEST).await;
-            car.expect(CAR_DATA_SUBSCRIBE).await;
+            car.introduce("20062100").await;
             car.send(HU_CAR_DATA_SUBSCRIBE_DONE, &vehicle_list(&[(0, 1)]))
                 .await;
             car.expect(CAR_DATA_SUBSCRIBE_START).await;
@@ -4252,8 +4260,7 @@ mod tests {
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
-            car.send(HU_INFO, &[]).await;
-            car.expect(MD_INFO).await;
+            car.introduce("20062100").await;
             car.subscribe(&[proto::DATA_TURN_BY_TURN]).await;
 
             // Leaving a motorway: iAP2's own type 8, which the car's list of
@@ -4309,8 +4316,7 @@ mod tests {
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
-            car.send(HU_INFO, &[]).await;
-            car.expect(MD_INFO).await;
+            car.introduce("20062100").await;
             car.subscribe(&[proto::DATA_TURN_BY_TURN]).await;
 
             sink.guidance(Guidance::about_a_turn(1, Some(2), Some("B27")));
@@ -4481,8 +4487,7 @@ mod tests {
             car.expect_silence(Duration::from_millis(500)).await;
 
             // Still there: the next question is answered as it would have been.
-            car.send(HU_INFO, &[]).await;
-            car.expect(MD_INFO).await;
+            car.introduce("20062100").await;
         });
 
         run(

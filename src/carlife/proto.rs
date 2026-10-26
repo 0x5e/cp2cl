@@ -327,25 +327,35 @@ pub fn media_info(track: &Track, album_art: Option<&[u8]>) -> Vec<u8> {
     out
 }
 
-/// `MSG_CMD_MODULE_STATUS` — the state of one of this device's own modules,
-/// which the car hears when it changes and not per message.
+/// `MSG_CMD_MODULE_STATUS` — the state of this device's own modules, which the
+/// car hears when it changes and not per message.
 ///
 /// The body is `CarlifeModuleStatusList`: a count and that many
 /// `CarlifeModuleStatus`, which is two required ints — which module, and what
-/// state it is in. One entry is written, because one module's state is all this
-/// device has to report. The guide's `ModuleId` numbers the phone's modules and
-/// `NaviState` the states navigation is in (guide §10.2, table in the
-/// command-channel list).
+/// state it is in. A change of one module's state is a list of one entry; what a
+/// session opens with is the whole list at rest. The guide's `ModuleId` numbers
+/// the phone's modules and `NaviState` the states navigation is in (guide §10.2,
+/// table in the command-channel list).
 pub fn module_status(module_id: i32, status_id: i32) -> Vec<u8> {
-    let mut entry = Vec::new();
-    put_int(&mut entry, 1, module_id);
-    put_int(&mut entry, 2, status_id);
+    module_statuses(&[(module_id, status_id)])
+}
 
+/// The same list, with one entry per module.
+pub fn module_statuses(states: &[(i32, i32)]) -> Vec<u8> {
     let mut out = Vec::new();
-    put_int(&mut out, 1, 1);
-    put_bytes(&mut out, 2, &entry);
+    put_int(&mut out, 1, states.len() as i32);
+    for (module_id, status_id) in states {
+        let mut entry = Vec::new();
+        put_int(&mut entry, 1, *module_id);
+        put_int(&mut entry, 2, *status_id);
+        put_bytes(&mut out, 2, &entry);
+    }
     out
 }
+
+/// `CARLIFE_PHONE_MODULE_ID`: the module a call rings on. Nothing here answers
+/// one, so its state is only ever the idle one — see `modules_at_rest`.
+pub const PHONE_MODULE: i32 = 1;
 
 /// `CARLIFE_NAVI_MODULE_ID`: the navigation module, the one module this device
 /// has a state of its own for.
@@ -354,6 +364,10 @@ pub const NAVI_MODULE: i32 = 2;
 /// `CARLIFE_MUSIC_MODULE_ID`: the module playing the song, whose state follows
 /// whether the song is moving.
 pub const MUSIC_MODULE: i32 = 3;
+
+/// `CARLIFE_VR_MODULE_ID`: the assistant's module, idle here for the same reason
+/// the phone's is — see `modules_at_rest`.
+pub const VR_MODULE: i32 = 4;
 
 /// `MusicState`. `IDLE` is a song that is not moving through its own time and
 /// `RUNNING` one that is — the same distinction the car's own pause and play
@@ -366,6 +380,25 @@ pub const MUSIC_RUNNING: i32 = 1;
 /// this side bridges has no way to say, so it is never sent.
 pub const NAVI_IDLE: i32 = 0;
 pub const NAVI_START: i32 = 1;
+
+/// `PhoneState.IDLE` and `VRState.IDLE`: the state the two modules above are in
+/// whenever this side has anything to say about them.
+pub const MODULE_IDLE: i32 = 0;
+
+/// The whole of what this device has to say about its own modules when a session
+/// opens: the phone, the navigation, the song and the assistant, all four idle,
+/// in one message rather than four.
+///
+/// The microphone is not in the list. Its state says where the voice is taken
+/// from, and nothing here has a microphone of its own to report one for.
+pub fn modules_at_rest() -> Vec<u8> {
+    module_statuses(&[
+        (PHONE_MODULE, MODULE_IDLE),
+        (NAVI_MODULE, NAVI_IDLE),
+        (MUSIC_MODULE, MUSIC_IDLE),
+        (VR_MODULE, MODULE_IDLE),
+    ])
+}
 
 /// `ActionType`: what a turn message does to the car's strip.
 pub const ACTION_SHOW: i32 = 1;
@@ -1119,6 +1152,39 @@ mod tests {
         assert_eq!(int_of(value, 1), Some(i64::from(NAVI_MODULE)));
         assert_eq!(int_of(value, 2), Some(i64::from(NAVI_START)));
         assert_eq!(fields.next_field(), None, "and nothing after it");
+    }
+
+    /// The list a session opens with is one message holding the four modules
+    /// this device has, each idle, and no microphone among them.
+    #[test]
+    fn the_modules_at_rest_are_the_four_this_device_has() {
+        let body = modules_at_rest();
+
+        let mut fields = Fields::new(&body);
+        assert_eq!(
+            fields.next_field(),
+            Some(Field::Varint {
+                number: 1,
+                value: 4
+            }),
+            "four entries"
+        );
+        let mut listed = Vec::new();
+        while let Some(Field::Bytes { number: 2, value }) = fields.next_field() {
+            listed.push((
+                int_of(value, 1).expect("a module") as i32,
+                int_of(value, 2).expect("a state") as i32,
+            ));
+        }
+        assert_eq!(
+            listed,
+            vec![
+                (PHONE_MODULE, MODULE_IDLE),
+                (NAVI_MODULE, NAVI_IDLE),
+                (MUSIC_MODULE, MUSIC_IDLE),
+                (VR_MODULE, MODULE_IDLE),
+            ]
+        );
     }
 
     /// The car's question about the subscribed data and this side's answer are
