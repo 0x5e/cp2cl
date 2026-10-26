@@ -122,8 +122,13 @@ async fn main() -> Result<()> {
             default(info);
         }));
     }
-    let (led, led_state) = tokio::sync::watch::channel(led::Phase::Off);
-    tokio::spawn(led::run(led_state, lights.clone()));
+    let (led, facts) = led::Signals::new();
+    tokio::spawn(led::run(facts, lights.clone()));
+    // A wired run needs neither radio, so there is nothing to wait for: the
+    // first state it can be in is the one after both of them are up.
+    if !cfg.wireless {
+        led.radios(true);
+    }
     tokio::spawn(button::watch());
     if let Some(lights) = &lights {
         // A wireless run already catches SIGTERM to put the Bluetooth
@@ -322,18 +327,10 @@ async fn main() -> Result<()> {
     // bridge, and both go away again when it does.
     let opening = carplay.clone();
     let nudge = restart.clone();
-    let led_car = led.clone();
-    let readiness = cfg.clone();
+    let signals = led.clone();
     let mut report = move |up: bool| {
         let _ = opening.send(up);
-        // Checked here rather than at startup: this is the moment the light
-        // would start to beat, and an access point or a controller that is not
-        // up is a phone that cannot arrive.
-        led_car.send_replace(if up && led::ready(&readiness) {
-            led::Phase::Waiting
-        } else {
-            led::Phase::Off
-        });
+        signals.carlife(up);
         if up {
             // The phone will not start CarPlay on its own — it has to be told
             // again — and a fresh iAP2 session is how it is told.
@@ -422,6 +419,7 @@ async fn main() -> Result<()> {
             status,
             vehicle,
             handover,
+            led,
         )
         .await;
     } else {

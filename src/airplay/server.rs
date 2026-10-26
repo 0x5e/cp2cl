@@ -30,7 +30,7 @@ use super::rtsp::{self, Request, Response, OCTET_CONTENT_TYPE, PAIRING_CONTENT_T
 use super::screen::{self, VideoReceiver};
 use super::tunnel;
 use crate::config::{bt_address, Config};
-use crate::led::Phase;
+use crate::led::{Carplay, Signals};
 use crate::sink::{AudioCodec, MediaSink, StreamEvent, StreamId};
 use crate::web::{Audio, Mic, Screen, Status};
 
@@ -337,10 +337,10 @@ pub struct Shared {
     /// Where the status page reads this half from. Reported to and never read
     /// back: see `crate::web::status`.
     pub status: Arc<Status>,
-    /// What the board's status light shows. Every phase of a connection is one
-    /// the light has a look for, and this is the only part of the bridge that
-    /// knows a phone is here at all.
-    pub led: watch::Sender<Phase>,
+    /// What the board's status light shows. How far a phone got is the one fact
+    /// in it that this side of the bridge is the only source of, and it is
+    /// reported rather than acted on: the light reads the whole answer.
+    pub led: Arc<Signals>,
     /// What a type 130 stream needs to become an iAP2 session. `None` on a wired
     /// run: there is no second transport to move the control channel to, so the
     /// stream is answered with a port nobody listens on, exactly as before.
@@ -383,7 +383,7 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                 let status = shared.status.clone();
                 tracing::info!("airplay.connected peer={peer}");
                 status.with(|s| s.carplay.airplay.peer = Some(peer.to_string()));
-                shared.led.send_replace(Phase::Connecting);
+                shared.led.carplay(Carplay::Connecting);
                 let serial = newest.fetch_add(1, Ordering::SeqCst) + 1;
                 let current = newest.clone();
                 let cfg = shared.cfg.clone();
@@ -457,10 +457,10 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                     // longer exists.
                     session.status.airplay_closed();
                     // The phone has gone. If the car went first, the light is
-                    // already out and has to stay out; otherwise it is back to
-                    // waiting for one.
-                    if matches!(*session.led.borrow(), Phase::Connecting | Phase::Linked) {
-                        session.led.send_replace(Phase::Waiting);
+                    // already down to waiting and has to stay there; otherwise
+                    // it is back to the car on its own.
+                    if matches!(session.led.phone(), Carplay::Connecting | Carplay::Linked) {
+                        session.led.carplay(Carplay::Idle);
                     }
                 });
             }
@@ -666,7 +666,7 @@ struct Session {
     status: Arc<Status>,
     /// What the board's status light is told, so that the connection this
     /// session is can be seen from across a room.
-    led: watch::Sender<Phase>,
+    led: Arc<Signals>,
 }
 
 /// Why a session stopped waiting for the phone to say something.
@@ -1500,7 +1500,7 @@ impl Session {
                         // goes steady here rather than at pair-verify, because
                         // a handshake that stalls would leave a phone that is
                         // not being mirrored looking connected.
-                        led.send_replace(Phase::Linked);
+                        led.carplay(Carplay::Linked);
                         Self::pump_video(socket, key, sink, status).await;
                     });
                     self.open_pump(

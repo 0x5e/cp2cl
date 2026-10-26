@@ -20,6 +20,7 @@ use tokio::time::sleep;
 
 use super::{page, parse_mac, power, radios_present, ready, run_session, short, Handover};
 use crate::config::{bt_address, Config};
+use crate::led::Signals;
 use crate::session::{carry_artwork, Ended};
 use crate::sink::ClSink;
 use crate::web::Status;
@@ -38,13 +39,17 @@ pub async fn watch(
     status: Arc<Status>,
     vehicle: Arc<Vehicle>,
     handover: Arc<Handover>,
+    led: Arc<Signals>,
 ) {
     // The boot loads the two modules and goes on, so neither radio is here when
     // this starts: an interface appears once brcmfmac has taken its firmware, a
     // controller once btbcm has pushed its patch, and bluetoothd claims its name
     // on the bus after both. Waited for here rather than in `main`, because this
     // is the only part of the program with any use for them.
-    wait_for_radios(&cfg).await;
+    // Kept rather than swallowed: the light's first two states are the same
+    // question asked from across a room, and they have to answer it with what
+    // was actually found rather than with "the loop did not hang".
+    let radios = wait_for_radios(&cfg).await;
     // The page was handed an address before there was a controller to ask, so
     // it has the fallback one. What the phone is told is read per session and
     // needs no help; this is the copy a person reads off the page.
@@ -76,7 +81,7 @@ pub async fn watch(
     // network a phone is told to join may not be on air yet. It is named in the
     // start session either way, and a phone that is paged before its network is
     // there has nothing to come back to.
-    wait_for_access_point().await;
+    let ap = wait_for_access_point().await;
 
     let (conn, mut incoming, held) =
         match livi_runtime::bt::start(&cfg.bt_adapter, &cfg.name, true).await {
@@ -91,6 +96,12 @@ pub async fn watch(
                 return;
             }
         };
+    // A phone can only come back to a board that has both halves: the radios
+    // it is paged on and the network it is told to join. Reported here rather
+    // than earlier because this is the first moment both answers are known and
+    // the profiles are actually published — a controller that is up without a
+    // service on it is a light beating for a phone nothing is listening for.
+    led.radios(radios && ap);
     // The D-Bus connection owns the registered profiles. Dropping it
     // unregisters them, so it has to be kept alive for as long as we are
     // listening — it is also what puts the controllers back at the end.
@@ -232,7 +243,10 @@ const BLUEZ: &str = "org.bluez";
 /// It gives up and goes on: the page, the receiver and the car's session are
 /// already running by now, and the wireless half says what it could not do in
 /// the line `radio.incomplete` rather than taking them down with it.
-async fn wait_for_radios(cfg: &Config) {
+///
+/// Answers whether all three were found, because the caller has to tell a run
+/// that waited for them from one that went on without them.
+async fn wait_for_radios(cfg: &Config) -> bool {
     let started = Instant::now();
     // The bus is a handshake, so it is had once and kept: what is asked of it
     // afterwards is a question about a name, not about the bus itself.
@@ -255,7 +269,7 @@ async fn wait_for_radios(cfg: &Config) {
                 cfg.bt_adapter,
                 started.elapsed().as_millis()
             );
-            return;
+            return true;
         }
         // Once per change rather than once per poll: the first round says what
         // the boot has not got round to yet, and the next says what is left.
@@ -268,7 +282,7 @@ async fn wait_for_radios(cfg: &Config) {
                 "radio.incomplete after_ms={} missing={missing} consequence=wireless_will_fail",
                 started.elapsed().as_millis()
             );
-            return;
+            return false;
         }
         sleep(RADIOS_POLL).await;
     }
@@ -319,7 +333,11 @@ const AP_POLL: Duration = Duration::from_millis(200);
 /// A pid file rather than something cleverer: `/run` is a tmpfs, so the file
 /// cannot outlive the boot that wrote it, and `S55ap` writes it on the attempt
 /// that worked.
-async fn wait_for_access_point() {
+///
+/// Answers whether the file was found: the interface is there long before the
+/// daemon is, and a phone told to join a network that is not on air is the
+/// difference between the light's first two states.
+async fn wait_for_access_point() -> bool {
     let started = Instant::now();
     let mut said = false;
     loop {
@@ -328,7 +346,7 @@ async fn wait_for_access_point() {
                 "wireless.ap_ready after_ms={}",
                 started.elapsed().as_millis()
             );
-            return;
+            return true;
         }
         if !said {
             tracing::info!("wireless.ap_waiting pid_file={AP_PID}");
@@ -339,7 +357,7 @@ async fn wait_for_access_point() {
                 "wireless.ap_absent after_ms={} consequence=phone_told_a_network_that_is_not_on_air",
                 started.elapsed().as_millis()
             );
-            return;
+            return false;
         }
         sleep(AP_POLL).await;
     }

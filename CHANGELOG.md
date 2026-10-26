@@ -18,6 +18,7 @@
 - 无线这一半在发布服务之前还等 `hostapd` 上线，判据是 `/run/hostapd.pid`，15 s 内没等到也照常发布并记一行，此前手机被叫醒时这条网络可能还没开始 beacon。
 - 首次开机等 `wlan0` 出现，把名字写进 `/etc/hostname`、`/etc/hosts` 与 `hostapd.conf` 之后重启一次，此后每次开机都读这份结果，不再等电台。
 - 首次开机等 `wlan0` 与写名字的这段时间里红灯亮 200 / 灭 200，名字写不下或电台不出现时退回常亮，此前从开机到程序接手一直是设备树的常亮。
+- 板上两颗灯改成五档（init / waiting / standby / connecting / linked），由电台是否就绪、车机会话是否建立、手机走到哪一步这三件事从高到低匹配，红灯从此只表示「还没有车可以交接」；waiting 与 standby 绿灯同为亮 500 / 灭 500，靠红灯区分。电台就绪的判据收紧到 `hostapd` 的 pid 文件与系统总线上的 `bluetoothd`，此前只看 `wlan0` 与 `hci0` 存不存在。
 - 证书与密钥改为运行时从 `/etc/cp2cl/` 读，与 `pairings.json` 同一个目录，固件由 cp2cl 包从仓库根目录的 `authentication/` 装入那三个文件，换密钥只换板上的文件，此前是编译时编进二进制、目录为 `assets/authentication/`。
 
 ### 修复

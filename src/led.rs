@@ -6,11 +6,17 @@
 //! `delay_on`/`delay_off`, which is why the patterns are rates here rather than
 //! a loop: nothing in this process wakes up to turn a light on or off.
 //!
+//! Nothing here decides *when* anything happens. The parts of the bridge that
+//! learn something send it as one of three facts — whether the radios are up,
+//! whether the car is talking to us, and how far a phone got — and the five
+//! states are read off those facts, highest first. That is what keeps a caller
+//! from having to know what the one above it says: a phone that connects while
+//! the car is still missing does not have to be careful about it.
+//!
 //! The red one means something about *this program* rather than about the
 //! board: the device tree lights it with `default-state = "on"`. It beats while
-//! the green one is out (no car, or nothing here for a phone to come back to),
-//! is put out while the green one is showing a phase — waiting, connecting,
-//! linked — and is lit when there is no program at all.
+//! there is nothing for a phone to come back to — no radios, or no car — and is
+//! put out once there is. It is lit when there is no program at all.
 
 use std::io;
 use std::path::PathBuf;
@@ -19,9 +25,6 @@ use std::sync::Arc;
 use tokio::signal::unix::{signal, Signal, SignalKind};
 use tokio::sync::watch;
 
-use crate::config::Config;
-use crate::wireless;
-
 /// The status LED, by the label the device tree gives it.
 const STATUS: &str = "/sys/class/leds/nanopi:green:status";
 
@@ -29,15 +32,17 @@ const STATUS: &str = "/sys/class/leds/nanopi:green:status";
 /// `default-state = "on"`, which is the state this module hands back on exit.
 const POWER: &str = "/sys/class/leds/nanopi:red:pwr";
 
-/// What the green light is saying: four states, one look each, so what a person
+/// What the green light is saying: five states, one look each, so what a person
 /// sees can be read without a log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
-    /// Put out, and the red one beating: no car, or nothing here for a phone to
-    /// come back to.
-    Off,
-    /// The car is up and no phone is connected: a slow beat.
+    /// Nothing for a phone to come back to: the interface, the controller or
+    /// the access point is missing. Green out, red beating.
+    Init,
+    /// Both radios are up and no car is: a slow beat, and the red one with it.
     Waiting,
+    /// The car is up and no phone is connected: a slow beat, red out.
+    Standby,
     /// A phone is on its way: a fast one.
     Connecting,
     /// CarPlay is up: steady.
@@ -47,8 +52,9 @@ pub enum Phase {
 impl Phase {
     fn name(self) -> &'static str {
         match self {
-            Phase::Off => "off",
+            Phase::Init => "init",
             Phase::Waiting => "waiting",
+            Phase::Standby => "standby",
             Phase::Connecting => "connecting",
             Phase::Linked => "linked",
         }
@@ -56,23 +62,72 @@ impl Phase {
 
     /// The two rates, in milliseconds on and off: a slow even beat to say
     /// "waiting", a fast one to say "connecting". Both are half on and half
-    /// off, so the tempo is the whole of the difference.
+    /// off, so the tempo is the whole of the difference. The two states that
+    /// share the slow beat are told apart by the red one.
     fn look(self) -> Look {
         match self {
-            Phase::Off => Look::Steady(false),
-            Phase::Waiting => Look::Blink { on: 500, off: 500 },
+            Phase::Init => Look::Steady(false),
+            Phase::Waiting | Phase::Standby => Look::Blink { on: 500, off: 500 },
             Phase::Connecting => Look::Blink { on: 200, off: 200 },
             Phase::Linked => Look::Steady(true),
         }
     }
 
-    /// What the red one says while this phase holds: a beat while the green one
-    /// is out, meaning nothing here is ready for a phone, and out while the
-    /// green one is saying something.
+    /// What the red one says while this phase holds: a beat until there is a
+    /// car to hand a phone's media to, and out once there is.
     fn power(self) -> Look {
         match self {
-            Phase::Off => Look::Blink { on: 500, off: 500 },
-            Phase::Waiting | Phase::Connecting | Phase::Linked => Look::Steady(false),
+            Phase::Init | Phase::Waiting => Look::Blink { on: 500, off: 500 },
+            Phase::Standby | Phase::Connecting | Phase::Linked => Look::Steady(false),
+        }
+    }
+}
+
+/// How far a phone has got, which is the last of the three facts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Carplay {
+    /// No phone, or none that has reached the receiver.
+    #[default]
+    Idle,
+    /// A phone has opened the receiver. Whether it will get anywhere is not
+    /// known yet.
+    Connecting,
+    /// The phone's screen is arriving.
+    Linked,
+}
+
+/// What the lights are told, and the whole of what decides what they show.
+///
+/// Three facts rather than one state, because a state is an answer to a
+/// question none of the reporting places can ask: the car's session says
+/// nothing about the radios, and the receiver says nothing about the car.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Facts {
+    /// Both radios are up: the interface, the controller, the daemon behind
+    /// them and the access point the phone is told to join.
+    pub radios: bool,
+    /// The car's session is up — the head unit has been given our device
+    /// information, which is past enumeration and past the point where the
+    /// cable alone would be enough.
+    pub carlife: bool,
+    pub carplay: Carplay,
+}
+
+impl Facts {
+    /// The state, read off the facts from the top down: the first one whose
+    /// conditions all hold is the one the lights show.
+    ///
+    /// Read rather than announced, so a fact that stops being true drops the
+    /// lights to the state it still satisfies without anyone working out which
+    /// one that is. A car unplugged while a phone is mirrored answers
+    /// `Waiting` because that is what is left, not because anybody said so.
+    fn phase(self) -> Phase {
+        match (self.radios, self.carlife, self.carplay) {
+            (true, true, Carplay::Linked) => Phase::Linked,
+            (true, true, Carplay::Connecting) => Phase::Connecting,
+            (true, true, Carplay::Idle) => Phase::Standby,
+            (true, false, _) => Phase::Waiting,
+            (false, _, _) => Phase::Init,
         }
     }
 }
@@ -94,38 +149,88 @@ impl Look {
     }
 }
 
+/// Where the three facts are reported, and the only handle the rest of the
+/// bridge has on them.
+///
+/// Held by whoever learns something rather than queried by the lights: a report
+/// is a few assignments, and every place that learns a fact is one that cannot
+/// wait for a sysfs write.
+pub struct Signals {
+    facts: watch::Sender<Facts>,
+}
+
+impl Signals {
+    /// The sender, and the receiver the light task reads.
+    pub fn new() -> (Arc<Self>, watch::Receiver<Facts>) {
+        let (facts, receiver) = watch::channel(Facts::default());
+        (Arc::new(Self { facts }), receiver)
+    }
+
+    /// Whether the radios are up. Sent once, when they are known to be, and
+    /// never taken back: nothing here watches a driver unload.
+    pub fn radios(&self, up: bool) {
+        self.facts.send_if_modified(|facts| {
+            let changed = facts.radios != up;
+            facts.radios = up;
+            changed
+        });
+    }
+
+    /// Whether the car's session is up.
+    pub fn carlife(&self, up: bool) {
+        self.facts.send_if_modified(|facts| {
+            let changed = facts.carlife != up;
+            facts.carlife = up;
+            changed
+        });
+    }
+
+    /// How far the phone has got.
+    pub fn carplay(&self, state: Carplay) {
+        self.facts.send_if_modified(|facts| {
+            let changed = facts.carplay != state;
+            facts.carplay = state;
+            changed
+        });
+    }
+
+    /// How far the phone has got, read back by the one caller that has to tell
+    /// a phone that has gone from one that never arrived.
+    pub fn phone(&self) -> Carplay {
+        self.facts.borrow().carplay
+    }
+}
+
 /// Drives both lights for as long as the program runs.
 ///
-/// Every part of the bridge that learns something the lights show sends a
-/// phase; this is the only place that writes it to the filesystem, because a
-/// sysfs write blocks and none of those places is one to wait in.
+/// The state is computed from the facts on arrival and written only when it
+/// differs from what the lights are already showing: a fact that changes
+/// without moving the state — a car going while no phone is here — is worth no
+/// sysfs write at all.
 ///
-/// The red one follows the same phase: beating while the green one is out, and
-/// out while the green one is saying something.
-pub async fn run(mut phase: watch::Receiver<Phase>, lights: Option<Arc<Lights>>) {
+/// This is the only place that writes them, because a sysfs write blocks and
+/// none of the places that report a fact is one to wait in.
+pub async fn run(mut facts: watch::Receiver<Facts>, lights: Option<Arc<Lights>>) {
     let status = Led::open(STATUS, "status");
-    // Written on the first pass rather than in `take`: the phase is what says
-    // what the red one does, and it is the same answer here as on every change
-    // after.
     let mut shown = None;
     loop {
-        let wanted = *phase.borrow_and_update();
-        if let Some(status) = &status {
-            match status.show(wanted.look()) {
-                Ok(()) => tracing::info!("led.phase light=status phase={}", wanted.name()),
-                Err(e) => tracing::warn!(
-                    "led.write_failed light=status phase={} err={e}",
-                    wanted.name()
-                ),
-            }
-        }
+        let wanted = facts.borrow_and_update().phase();
         if shown != Some(wanted) {
+            if let Some(status) = &status {
+                match status.show(wanted.look()) {
+                    Ok(()) => tracing::info!("led.phase light=status phase={}", wanted.name()),
+                    Err(e) => tracing::warn!(
+                        "led.write_failed light=status phase={} err={e}",
+                        wanted.name()
+                    ),
+                }
+            }
             if let Some(lights) = &lights {
                 lights.show_power(wanted);
             }
             shown = Some(wanted);
         }
-        if phase.changed().await.is_err() {
+        if facts.changed().await.is_err() {
             return;
         }
     }
@@ -145,8 +250,8 @@ pub struct Lights {
 }
 
 impl Lights {
-    /// Takes the lights: nothing is written until `run` has a phase to show,
-    /// because that phase is what decides the red one.
+    /// Takes the lights. Nothing is written until `run` has a state to show,
+    /// because the state is what decides both of them.
     pub fn take() -> Option<Self> {
         let power = Led::open(POWER, "power")?;
         let status = Led::open(STATUS, "status");
@@ -157,7 +262,7 @@ impl Lights {
     fn show_power(&self, phase: Phase) {
         let look = phase.power();
         match self.power.show(look) {
-            Ok(()) => tracing::info!("led.power state={}", look.state()),
+            Ok(()) => tracing::info!("led.power state={} phase={}", look.state(), phase.name()),
             Err(e) => tracing::warn!("led.write_failed light=power err={e}"),
         }
     }
@@ -227,22 +332,6 @@ async fn raised(signal: &mut Option<Signal>) {
     }
 }
 
-/// Whether there is anything for a phone to come back to: the interface the
-/// access point runs on, and the controller it is paged on.
-///
-/// A light that beats for a phone which cannot arrive is worse than no light at
-/// all, so a missing radio is a phase this program never leaves.
-pub fn ready(cfg: &Config) -> bool {
-    if !cfg.wireless {
-        return true;
-    }
-    let (wifi, bt) = wireless::radios_present(&cfg.wifi_iface, &cfg.bt_adapter);
-    if !(wifi && bt) {
-        tracing::warn!("led.not_ready wifi={wifi} bt={bt} consequence=no_heartbeat");
-    }
-    wifi && bt
-}
-
 struct Led {
     dir: PathBuf,
 }
@@ -288,6 +377,35 @@ impl Led {
 mod tests {
     use super::*;
 
+    /// The ladder, from the top down: each state is the one above it plus one
+    /// more fact, so anything that stops being true drops to the state it still
+    /// satisfies. A typo in the order would show a phone as connected while the
+    /// car it is feeding is unplugged, which is the one reading a person would
+    /// act on.
+    #[test]
+    fn the_state_is_the_highest_one_whose_facts_hold() {
+        let facts = |radios, carlife, carplay| Facts {
+            radios,
+            carlife,
+            carplay,
+        };
+        assert_eq!(facts(true, true, Carplay::Linked).phase(), Phase::Linked);
+        assert_eq!(
+            facts(true, true, Carplay::Connecting).phase(),
+            Phase::Connecting
+        );
+        assert_eq!(facts(true, true, Carplay::Idle).phase(), Phase::Standby);
+        // The car gone takes the phone's state with it: nothing is being handed
+        // to a head unit that is not there.
+        for carplay in [Carplay::Idle, Carplay::Connecting, Carplay::Linked] {
+            assert_eq!(facts(true, false, carplay).phase(), Phase::Waiting);
+        }
+        for carplay in [Carplay::Idle, Carplay::Linked] {
+            assert_eq!(facts(false, false, carplay).phase(), Phase::Init);
+        }
+        assert_eq!(facts(false, true, Carplay::Linked).phase(), Phase::Init);
+    }
+
     /// The rates are the requirement, and they are the one thing here that a
     /// typo would change without anything failing.
     #[test]
@@ -297,11 +415,13 @@ mod tests {
             Look::Steady(_) => (0, 0),
         };
         assert_eq!(blink(Phase::Waiting.look()), (500, 500));
+        assert_eq!(blink(Phase::Standby.look()), (500, 500));
         assert_eq!(blink(Phase::Connecting.look()), (200, 200));
-        assert_eq!(blink(Phase::Off.power()), (500, 500));
-        assert!(matches!(Phase::Off.look(), Look::Steady(false)));
+        assert_eq!(blink(Phase::Init.power()), (500, 500));
+        assert_eq!(blink(Phase::Waiting.power()), (500, 500));
+        assert!(matches!(Phase::Init.look(), Look::Steady(false)));
         assert!(matches!(Phase::Linked.look(), Look::Steady(true)));
-        for phase in [Phase::Waiting, Phase::Connecting, Phase::Linked] {
+        for phase in [Phase::Standby, Phase::Connecting, Phase::Linked] {
             assert!(matches!(phase.power(), Look::Steady(false)));
         }
     }
