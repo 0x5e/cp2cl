@@ -13,13 +13,14 @@
 //! linked — and is lit when there is no program at all.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::signal::unix::{signal, Signal, SignalKind};
 use tokio::sync::watch;
 
 use crate::config::Config;
+use crate::wireless;
 
 /// The status LED, by the label the device tree gives it.
 const STATUS: &str = "/sys/class/leds/nanopi:green:status";
@@ -226,24 +227,20 @@ async fn raised(signal: &mut Option<Signal>) {
     }
 }
 
-/// Whether there is anything for a phone to come back to: an access point on
-/// air and a Bluetooth controller up.
+/// Whether there is anything for a phone to come back to: the interface the
+/// access point runs on, and the controller it is paged on.
 ///
-/// Both are started by the init scripts before this program, so a missing one is
-/// a boot that failed rather than a race — and a light that beats for a phone
-/// which cannot arrive is worse than no light at all.
+/// A light that beats for a phone which cannot arrive is worse than no light at
+/// all, so a missing radio is a phase this program never leaves.
 pub fn ready(cfg: &Config) -> bool {
     if !cfg.wireless {
         return true;
     }
-    let ap = Path::new("/sys/class/net").join(&cfg.wifi_iface).exists();
-    let bt = Path::new("/sys/class/bluetooth")
-        .join(&cfg.bt_adapter)
-        .exists();
-    if !(ap && bt) {
-        tracing::warn!("led.not_ready wifi={ap} bt={bt} consequence=no_heartbeat");
+    let (wifi, bt) = wireless::radios_present(&cfg.wifi_iface, &cfg.bt_adapter);
+    if !(wifi && bt) {
+        tracing::warn!("led.not_ready wifi={wifi} bt={bt} consequence=no_heartbeat");
     }
-    ap && bt
+    wifi && bt
 }
 
 struct Led {

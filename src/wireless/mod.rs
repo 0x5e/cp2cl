@@ -38,6 +38,19 @@ mod power;
 
 pub use linux::watch;
 
+/// Whether the two radios this board needs have come up: an interface for the
+/// access point, and a Bluetooth controller.
+///
+/// Both appear when the driver behind them has finished taking its firmware,
+/// which is a second or two after the boot has loaded the module — "not there
+/// yet" is a state to wait in rather than a fault. Asked from two places, which
+/// is why it is here rather than in either of them.
+pub(crate) fn radios_present(iface: &str, adapter: &str) -> (bool, bool) {
+    let net = Path::new("/sys/class/net").join(iface).exists();
+    let bt = Path::new("/sys/class/bluetooth").join(adapter).exists();
+    (net, bt)
+}
+
 /// What the access point is on air with, for the bringup to ask about.
 ///
 /// `AskOnAir` is a bare `fn` — no argument, no captures — so there is nowhere to

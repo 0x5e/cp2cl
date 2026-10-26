@@ -7,6 +7,7 @@
 //! phone never returns to an accessory on its own: see `page`.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use iap2_link::LinkConfig;
 use livi_runtime::bt::IncomingConn;
@@ -14,8 +15,9 @@ use livi_runtime::driver::spawn_link;
 use livi_runtime::mfi_async::SharedCoprocessor;
 use livi_runtime::vehicle::Vehicle;
 use tokio::sync::broadcast;
+use tokio::time::sleep;
 
-use super::{page, parse_mac, power, ready, run_session, short, Handover};
+use super::{page, parse_mac, power, radios_present, ready, run_session, short, Handover};
 use crate::config::{bt_address, Config};
 use crate::session::{carry_artwork, Ended};
 use crate::sink::ClSink;
@@ -36,6 +38,13 @@ pub async fn watch(
     vehicle: Arc<Vehicle>,
     handover: Arc<Handover>,
 ) {
+    // The boot loads the two modules and goes on, so neither radio is here when
+    // this starts: an interface appears once brcmfmac has taken its firmware, a
+    // controller once btbcm has pushed its patch, and bluetoothd claims its name
+    // on the bus after both. Waited for here rather than in `main`, because this
+    // is the only part of the program with any use for them.
+    wait_for_radios(&cfg).await;
+
     if let Err(e) = ready(&cfg) {
         tracing::error!("wireless.ap_unusable err={e}");
         return;
@@ -185,4 +194,98 @@ pub async fn watch(
 /// that can have the real address.
 fn local_mac(cfg: &Config) -> [u8; 6] {
     parse_mac(&bt_address(&cfg.bt_adapter))
+}
+
+/// How long a wireless run waits for the radios before it goes on without them.
+/// Long enough for both drivers to take their firmware and for bluetoothd to
+/// claim its name; short enough that a board whose radio never comes up still
+/// has a page to say so on.
+const RADIOS_CEILING: Duration = Duration::from_secs(20);
+
+/// How often the question is asked again. Both drivers finish within a second
+/// of being loaded, so this is fine enough not to be the reason a start takes
+/// longer than it has to.
+const RADIOS_POLL: Duration = Duration::from_millis(200);
+
+/// The name bluetoothd takes on the system bus.
+const BLUEZ: &str = "org.bluez";
+
+/// Waits for the two radios and for BlueZ, because the boot no longer does.
+///
+/// Three things have to be true before a wireless run has anything to publish:
+/// the interface, the controller, and bluetoothd on the system bus. The first
+/// two are the kernel's half of it and the third is the half this program talks
+/// to — `bt::start` fails without it — and none of them is a fault when it is
+/// missing a moment after a module was loaded, so this waits rather than checks.
+///
+/// It gives up and goes on: the page, the receiver and the car's session are
+/// already running by now, and the wireless half says what it could not do in
+/// the line `radio.incomplete` rather than taking them down with it.
+async fn wait_for_radios(cfg: &Config) {
+    let started = Instant::now();
+    // The bus is a handshake, so it is had once and kept: what is asked of it
+    // afterwards is a question about a name, not about the bus itself.
+    let mut bus = None;
+    let mut said: Option<String> = None;
+    loop {
+        let (wifi, bt) = radios_present(&cfg.wifi_iface, &cfg.bt_adapter);
+        if bus.is_none() {
+            bus = zbus::Connection::system().await.ok();
+        }
+        let bluez = match &bus {
+            Some(conn) => bluetoothd_up(conn).await,
+            None => false,
+        };
+        let missing = missing(cfg, wifi, bt, bluez);
+        if missing.is_empty() {
+            tracing::info!(
+                "radio.ready iface={} adapter={} after_ms={}",
+                cfg.wifi_iface,
+                cfg.bt_adapter,
+                started.elapsed().as_millis()
+            );
+            return;
+        }
+        // Once per change rather than once per poll: the first round says what
+        // the boot has not got round to yet, and the next says what is left.
+        if said.as_deref() != Some(missing.as_str()) {
+            tracing::info!("radio.waiting missing={missing}");
+            said = Some(missing.clone());
+        }
+        if started.elapsed() >= RADIOS_CEILING {
+            tracing::warn!(
+                "radio.incomplete after_ms={} missing={missing} consequence=wireless_will_fail",
+                started.elapsed().as_millis()
+            );
+            return;
+        }
+        sleep(RADIOS_POLL).await;
+    }
+}
+
+/// What is not up yet, named as the log and the loop both want it.
+fn missing(cfg: &Config, wifi: bool, bt: bool, bluez: bool) -> String {
+    let mut missing = Vec::new();
+    if !wifi {
+        missing.push(cfg.wifi_iface.as_str());
+    }
+    if !bt {
+        missing.push(cfg.bt_adapter.as_str());
+    }
+    if !bluez {
+        missing.push("bluetoothd");
+    }
+    missing.join(",")
+}
+
+/// Whether BlueZ holds its name on the bus, which is the same question as
+/// whether bluetoothd is running.
+async fn bluetoothd_up(conn: &zbus::Connection) -> bool {
+    let Ok(dbus) = zbus::fdo::DBusProxy::new(conn).await else {
+        return false;
+    };
+    match zbus::names::BusName::try_from(BLUEZ) {
+        Ok(name) => dbus.name_has_owner(name).await.unwrap_or(false),
+        Err(_) => false,
+    }
 }
