@@ -24,6 +24,11 @@ HOSTNAME_FILE=/etc/hostname
 HOSTAPD_FILE=/etc/hostapd/hostapd.conf
 LOG=/var/log
 
+# The power light, by the label the device tree gives it. The program drives it
+# from the moment it starts; until then nothing does, and a steady red is what a
+# board with no program looks like.
+LED=/sys/class/leds/nanopi:red:pwr
+
 # 0.2 s a round, 10 s in all: the interface is there in under two, so this is
 # the ceiling for a card that is slow rather than a radio that is missing.
 ROUNDS=50
@@ -32,6 +37,24 @@ ROUNDS=50
 # console to land on, and the boot this names is over by the time anyone reads it.
 say() {
 	[ -w "$LOG" ] && echo "name:    $*" >> "$LOG/boot.log"
+}
+
+# A board that is working on something should not look like one that is not.
+# The rate is the fast end of what the program uses, so that a light beating at
+# 200 is this boot naming itself rather than the program saying anything.
+red_blink() {
+	[ -d "$LED" ] || return 0
+	echo timer > "$LED/trigger" 2>/dev/null || return 0
+	echo 200 > "$LED/delay_on" 2>/dev/null
+	echo 200 > "$LED/delay_off" 2>/dev/null
+}
+
+# Back to what the device tree gives it, which is what the program expects to
+# find: a trigger owns brightness, so it has to let go before the write lands.
+red_steady() {
+	[ -d "$LED" ] || return 0
+	echo none > "$LED/trigger" 2>/dev/null
+	echo 1 > "$LED/brightness" 2>/dev/null
 }
 
 start() {
@@ -44,12 +67,17 @@ start() {
 		;;
 	esac
 
+	# Everything below this line is a boot that has work to do and no program
+	# to show for it yet.
+	red_blink
+
 	i=0
 	while [ ! -r "/sys/class/net/$IFACE/address" ]; do
 		i=$((i + 1))
 		if [ "$i" -ge "$ROUNDS" ]; then
 			echo "Naming the board: no $IFACE after 10 s, staying $PREFIX"
 			say "$PREFIX radio_absent=true"
+			red_steady
 			return 0
 		fi
 		sleep 0.2
@@ -61,6 +89,7 @@ start() {
 	*)
 		echo "Naming the board: $IFACE address unreadable, staying $PREFIX"
 		say "$PREFIX address_unreadable=true"
+		red_steady
 		return 0
 		;;
 	esac
@@ -72,6 +101,7 @@ start() {
 	if [ "$(cat "$HOSTNAME_FILE" 2>/dev/null)" != "$name" ]; then
 		echo "Naming the board: could not write $HOSTNAME_FILE"
 		say "$name write_failed=true"
+		red_steady
 		return 1
 	fi
 
