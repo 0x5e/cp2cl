@@ -267,6 +267,22 @@ pub fn media_init(rate: u32, channels: u16) -> Vec<u8> {
     out
 }
 
+/// `MSG_CMD_MEDIA_PROGRESS_BAR` — where the panel's bar belongs in the song.
+///
+/// `CarlifeMediaProgressBar` is the position in milliseconds and an optional
+/// line of lyric. The lyric is left out: the phone this side bridges has none,
+/// and a field that says nothing is better absent than empty.
+///
+/// Milliseconds is what the phone's own app writes for every car but a handful
+/// of Hyundai and Kia channels, which it divides down to seconds
+/// (`MusicInfoSender.isSecondVehi`). This side has no such list and writes the
+/// unit the schema names.
+pub fn media_progress_bar(elapsed_ms: i32) -> Vec<u8> {
+    let mut out = Vec::new();
+    put_int(&mut out, 1, elapsed_ms);
+    out
+}
+
 /// The largest cover the car's media message may carry.
 ///
 /// The song and its cover travel in one command-channel message, whose body the
@@ -334,6 +350,16 @@ pub fn module_status(module_id: i32, status_id: i32) -> Vec<u8> {
 /// `CARLIFE_NAVI_MODULE_ID`: the navigation module, the one module this device
 /// has a state of its own for.
 pub const NAVI_MODULE: i32 = 2;
+
+/// `CARLIFE_MUSIC_MODULE_ID`: the module playing the song, whose state follows
+/// whether the song is moving.
+pub const MUSIC_MODULE: i32 = 3;
+
+/// `MusicState`. `IDLE` is a song that is not moving through its own time and
+/// `RUNNING` one that is — the same distinction the car's own pause and play
+/// messages carry.
+pub const MUSIC_IDLE: i32 = 0;
+pub const MUSIC_RUNNING: i32 = 1;
 
 /// `NaviState`. `IDLE` is a navigation that is not running and `START` one that
 /// is. The third, `STOP`, is a navigation the phone has ended — which the phone
@@ -686,6 +712,15 @@ mod tests {
         // Field by field, and nothing else: a body the car's parser cannot read
         // makes the message disappear rather than fail.
         assert_eq!(body, vec![0x08, 0xc4, 0xd8, 0x02, 0x10, 0x02, 0x18, 0x10]);
+    }
+
+    /// The bar's body is one required field: the position in milliseconds.
+    #[test]
+    fn the_progress_bar_body_is_the_position_and_nothing_else() {
+        let body = media_progress_bar(43_500);
+        assert_eq!(int_of(&body, 1), Some(43_500));
+        // Field 1, varint: 43 500 is 0x0000A9EC, in three varint bytes.
+        assert_eq!(body, vec![0x08, 0xec, 0xd3, 0x02]);
     }
 
     #[test]

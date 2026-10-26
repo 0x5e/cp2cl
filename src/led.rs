@@ -166,8 +166,9 @@ impl Signals {
         (Arc::new(Self { facts }), receiver)
     }
 
-    /// Whether the radios are up. Sent once, when they are known to be, and
-    /// never taken back: nothing here watches a driver unload.
+    /// Whether the radios are up. Sent from the place that publishes the
+    /// service, once for each car session, so a later answer can differ from an
+    /// earlier one.
     pub fn radios(&self, up: bool) {
         self.facts.send_if_modified(|facts| {
             let changed = facts.radios != up;

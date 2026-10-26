@@ -23,8 +23,12 @@
 //!
 //! The cover art is the fourth thing that is not a field: it is a file of its
 //! own, it names no song, and `Playing::Artwork` is how it is handed over.
+//!
+//! Where in the song it is playing is the fifth, and the car has a message of
+//! its own for it — `MSG_CMD_MEDIA_PROGRESS_BAR` — so it travels as
+//! `Playing::Position` rather than as another field of the song.
 
-use iap2_csm::messages::now_playing::NowPlayingUpdate;
+use iap2_csm::messages::now_playing::{NowPlayingUpdate, PlaybackStatus};
 use iap2_csm::CsmMessage;
 
 /// What is known about the song that is playing.
@@ -106,11 +110,54 @@ impl Track {
     }
 }
 
+/// Where in the song the phone says it is playing, which the car draws as a
+/// progress bar.
+///
+/// The phone reports this with the play state and with every change of it, and
+/// never on a clock: what it says is true at the moment it arrives, so what is
+/// handed on is the reading and the CarLife side adds the time since.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Position {
+    /// Milliseconds into the song when the phone said so.
+    pub elapsed_ms: u32,
+    /// Whether the song was moving through it, when the phone said so. A paused
+    /// song is at the same second a minute later, and a bar that moved for it
+    /// would be wrong.
+    ///
+    /// `None` when the message gave a position without a play state: that is a
+    /// message about where the song is and not about whether it moved, and the
+    /// song is still doing what the last one said.
+    pub playing: Option<bool>,
+}
+
+impl Position {
+    /// The playback half of the phone's `NowPlayingUpdate`, when it says where
+    /// the song is.
+    ///
+    /// `None` for a message about the song rather than about its playback: the
+    /// phone sends one of these for each attribute it changes, and a new title
+    /// is not a position.
+    pub fn from_iap2(frame: &[u8]) -> Option<Self> {
+        let update = NowPlayingUpdate::decode(frame).ok()?;
+        let play = update.playback_attributes?;
+        Some(Self {
+            elapsed_ms: play.elapsed_ms?,
+            // A drag is a song that is not moving through its own time, so it
+            // is not playing either: the bar follows the drag when it is over.
+            playing: play
+                .status
+                .map(|status| matches!(status, PlaybackStatus::Playing)),
+        })
+    }
+}
+
 /// One thing the phone said, on its way to the car.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Playing {
     /// What the phone said about the song, as far as it said it.
     Track(Track),
+    /// Where in it the song was playing.
+    Position(Position),
     /// The cover art, as the phone sent the file. It arrives after the update
     /// that named the song and names none itself, so it belongs to whichever
     /// song is newest — which is what the CarLife side holds it for.
@@ -241,5 +288,80 @@ mod tests {
             ..track
         };
         assert!(!track.is_silent());
+    }
+
+    /// Where the song is comes from the playback half of the same message, and
+    /// a message about the song alone carries none of it.
+    #[test]
+    fn a_position_is_read_from_the_playback_half() {
+        let playing = update(
+            None,
+            Some(PlaybackAttributes {
+                status: Some(PlaybackStatus::Playing),
+                elapsed_ms: Some(42_000),
+                app_name: None,
+                app_bundle_id: None,
+            }),
+        );
+        assert_eq!(
+            Position::from_iap2(&playing),
+            Some(Position {
+                elapsed_ms: 42_000,
+                playing: Some(true),
+            })
+        );
+
+        // A paused song has a position and is not moving through it.
+        let paused = update(
+            None,
+            Some(PlaybackAttributes {
+                status: Some(PlaybackStatus::Paused),
+                elapsed_ms: Some(42_000),
+                app_name: None,
+                app_bundle_id: None,
+            }),
+        );
+        assert_eq!(
+            Position::from_iap2(&paused).map(|p| p.playing),
+            Some(Some(false))
+        );
+
+        // A position with no play state says where the song is and not whether
+        // it moved, which is not the same as saying it stopped.
+        let placed = update(
+            None,
+            Some(PlaybackAttributes {
+                status: None,
+                elapsed_ms: Some(42_000),
+                app_name: None,
+                app_bundle_id: None,
+            }),
+        );
+        assert_eq!(
+            Position::from_iap2(&placed),
+            Some(Position {
+                elapsed_ms: 42_000,
+                playing: None,
+            })
+        );
+
+        // A song, and a play state with no position in it, are both silent
+        // about where the song is.
+        assert_eq!(
+            Position::from_iap2(&update(Some(item(Some("Stern"), None, None)), None)),
+            None
+        );
+        assert_eq!(
+            Position::from_iap2(&update(
+                None,
+                Some(PlaybackAttributes {
+                    status: Some(PlaybackStatus::Playing),
+                    elapsed_ms: None,
+                    app_name: Some("Music".into()),
+                    app_bundle_id: None,
+                }),
+            )),
+            None
+        );
     }
 }

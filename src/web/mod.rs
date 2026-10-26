@@ -440,6 +440,43 @@ mod tests {
         assert!(body["now_playing"]["duration_s"].is_null());
     }
 
+    /// The bar and the play state on the page are the ones the car was given.
+    /// A number worked out again for the page could differ from the one on the
+    /// wire, and then the page would be describing a bar that is not there.
+    #[test]
+    fn the_page_shows_the_bar_the_car_was_given() {
+        let status = Status::new();
+        assert!(status.json()["now_playing"]["progress_ms"].is_null());
+        assert!(status.json()["now_playing"]["playing"].is_null());
+
+        status.with(|s| {
+            s.now_playing.progress_ms = Some(20_000);
+            s.now_playing.playing = Some(true);
+        });
+        assert_eq!(status.json()["now_playing"]["progress_ms"], 20_000);
+        assert_eq!(status.json()["now_playing"]["playing"], true);
+
+        // A new session starts having told the car nothing at all.
+        status.now_playing_cleared();
+        assert!(status.json()["now_playing"]["progress_ms"].is_null());
+        assert!(status.json()["now_playing"]["playing"].is_null());
+
+        assert!(
+            page_text().contains("playing.progress_ms"),
+            "the bar is drawn from the position the car was given"
+        );
+        // Before a position is sent the row is still drawn, at the start of the
+        // song, so the length is on the page from the moment there is a song.
+        assert!(
+            !page_text().contains("progressLine.style.display"),
+            "the bar is never taken out of the page"
+        );
+        assert!(
+            page_text().contains("播放中"),
+            "and the state is shown as one"
+        );
+    }
+
     /// A cover is served until another replaces it, and it is named by what is
     /// in it: the same picture twice costs the page one fetch, a different one
     /// never reuses the name, and an empty one is no picture at all.
