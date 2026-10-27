@@ -139,11 +139,15 @@ enum Look {
 }
 
 impl Look {
-    /// How the log names it.
+    /// How the log names it: the two rates by their tempo, because the tempo is
+    /// the whole of what tells one beat from the other. A rate nothing here asks
+    /// for is not guessed at.
     fn state(self) -> &'static str {
         match self {
             Look::Steady(true) => "on",
             Look::Steady(false) => "off",
+            Look::Blink { on: 500, off: 500 } => "slow_blink",
+            Look::Blink { on: 200, off: 200 } => "fast_blink",
             Look::Blink { .. } => "blink",
         }
     }
@@ -212,27 +216,42 @@ impl Signals {
 /// This is the only place that writes them, because a sysfs write blocks and
 /// none of the places that report a fact is one to wait in.
 pub async fn run(mut facts: watch::Receiver<Facts>, lights: Option<Arc<Lights>>) {
-    let status = Led::open(STATUS, "status");
+    let green = Led::open(STATUS, "green");
     let mut shown = None;
     loop {
         let wanted = facts.borrow_and_update().phase();
         if shown != Some(wanted) {
-            if let Some(status) = &status {
-                match status.show(wanted.look()) {
-                    Ok(()) => tracing::info!("led.phase light=status phase={}", wanted.name()),
-                    Err(e) => tracing::warn!(
-                        "led.write_failed light=status phase={} err={e}",
-                        wanted.name()
-                    ),
-                }
-            }
-            if let Some(lights) = &lights {
-                lights.show_power(wanted);
-            }
             shown = Some(wanted);
+            // Both are written before the line, so what it says is what the
+            // board shows rather than what was asked of it.
+            let green = paint(green.as_ref(), "green", wanted.look());
+            let red = match &lights {
+                Some(lights) => paint(Some(&lights.power), "red", wanted.power()),
+                None => "absent",
+            };
+            tracing::info!("led.phase phase={} green={green} red={red}", wanted.name());
         }
         if facts.changed().await.is_err() {
             return;
+        }
+    }
+}
+
+/// Writes one light and names what it shows: the look that was asked for,
+/// `absent` when this image has no such light, `failed` when the write did not
+/// take. The error gets a line of its own, since it is the part that says why.
+fn paint(led: Option<&Led>, light: &str, look: Look) -> &'static str {
+    let Some(led) = led else {
+        return "absent";
+    };
+    match led.show(look) {
+        Ok(()) => look.state(),
+        Err(e) => {
+            tracing::warn!(
+                "led.write_failed light={light} look={} err={e}",
+                look.state()
+            );
+            "failed"
         }
     }
 }
@@ -254,18 +273,9 @@ impl Lights {
     /// Takes the lights. Nothing is written until `run` has a state to show,
     /// because the state is what decides both of them.
     pub fn take() -> Option<Self> {
-        let power = Led::open(POWER, "power")?;
-        let status = Led::open(STATUS, "status");
+        let power = Led::open(POWER, "red")?;
+        let status = Led::open(STATUS, "green");
         Some(Self { power, status })
-    }
-
-    /// Beating or put out, which is the whole of what the red light says.
-    fn show_power(&self, phase: Phase) {
-        let look = phase.power();
-        match self.power.show(look) {
-            Ok(()) => tracing::info!("led.power state={} phase={}", look.state(), phase.name()),
-            Err(e) => tracing::warn!("led.write_failed light=power err={e}"),
-        }
     }
 
     /// Puts them back, which is what "the program is gone" looks like. There is
@@ -425,5 +435,19 @@ mod tests {
         for phase in [Phase::Standby, Phase::Connecting, Phase::Linked] {
             assert!(matches!(phase.power(), Look::Steady(false)));
         }
+    }
+
+    /// The four names the one line carries. The two beats are read off their
+    /// rate, so that a tempo a person can see in the room is a word in the log.
+    #[test]
+    fn a_look_is_named_for_the_log_by_its_rate() {
+        assert_eq!(Look::Steady(true).state(), "on");
+        assert_eq!(Look::Steady(false).state(), "off");
+        assert_eq!(Phase::Standby.look().state(), "slow_blink");
+        assert_eq!(Phase::Connecting.look().state(), "fast_blink");
+        assert_eq!(Phase::Init.power().state(), "slow_blink");
+        assert_eq!(Phase::Linked.power().state(), "off");
+        // A rate nothing asks for is not rounded to the nearest name.
+        assert_eq!(Look::Blink { on: 100, off: 900 }.state(), "blink");
     }
 }
