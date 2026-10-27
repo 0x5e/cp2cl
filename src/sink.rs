@@ -473,12 +473,12 @@ impl ClSink {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 if !no_reader.swap(true, Ordering::Relaxed) {
-                    tracing::warn!("cl.outlet_dropped channel={channel} reason=no_reader");
+                    tracing::warn!("carlife.outlet_dropped channel={channel} reason=no_reader");
                 }
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 if !behind.swap(true, Ordering::Relaxed) {
-                    tracing::warn!("cl.outlet_backlog_dropped channel={channel}");
+                    tracing::warn!("carlife.outlet_backlog_dropped channel={channel}");
                 }
             }
         }
@@ -526,7 +526,7 @@ impl ClSink {
         if self.playing.try_send(item).is_err()
             && !self.playing_dropped.swap(true, Ordering::Relaxed)
         {
-            tracing::warn!("cl.media_dropped reason=no_reader");
+            tracing::warn!("carlife.media_dropped reason=no_reader");
         }
     }
 
@@ -540,7 +540,7 @@ impl ClSink {
         if self.guidance.try_send(item).is_err()
             && !self.guidance_dropped.swap(true, Ordering::Relaxed)
         {
-            tracing::warn!("cl.navi_dropped reason=no_reader");
+            tracing::warn!("carlife.navi_dropped reason=no_reader");
         }
     }
 }
@@ -597,7 +597,7 @@ impl MediaSink for ClSink {
                     });
                 }
                 Role::Other => {
-                    tracing::debug!("cl.audio_unbridged name={name:?}");
+                    tracing::debug!("carlife.audio_unbridged name={name:?}");
                 }
             },
             StreamEvent::AudioPacket {

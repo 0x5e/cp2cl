@@ -18,6 +18,7 @@
 //! The car's authentication challenge is answered, and the car is judged in turn,
 //! by `auth`; what that needs and what happens without it is documented there.
 
+use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -32,7 +33,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::Instant;
 
-use super::{auth, frame, gps, proto};
+use super::{auth, frame, gps, names, proto};
 use crate::airplay::{info, EventSink, ScreenParams, SharedChannel};
 use crate::commands::{Command, TouchContact, PHONE_DROP, PHONE_HOOK_SWITCH, PHONE_MUTE};
 use crate::config::{bt_address, Config};
@@ -54,6 +55,7 @@ const HU_CAR_VELOCITY: u32 = 0x0001_800F;
 const HU_CAR_GPS: u32 = 0x0001_8010;
 const HU_GO_TO_FOREGROUND: u32 = 0x0001_8025;
 const HU_STATISTIC_INFO: u32 = 0x0001_8027;
+const HU_MODULE_CONTROL: u32 = 0x0001_8028;
 const HU_CAR_DATA_SUBSCRIBE_DONE: u32 = 0x0001_8032;
 const HU_DATA_SUBSCRIBE: u32 = 0x0001_8043;
 const HU_DATA_SUBSCRIBE_START: u32 = 0x0001_8045;
@@ -201,24 +203,24 @@ impl Frames {
                 let units = access_units(&bytes);
                 if units.is_empty() {
                     tracing::warn!(
-                        "cl.video_source_empty file={path:?} action=heartbeat_only"
+                        "carlife.video_source_empty file={path:?} action=heartbeat_only"
                     );
                     return Self::None;
                 }
                 tracing::info!(
-                    "cl.video_source file={path:?} bytes={} access_units={}",
+                    "carlife.video_source file={path:?} bytes={} access_units={}",
                     bytes.len(),
                     units.len()
                 );
                 Self::Cycle(units)
             }
             Ok(_) => {
-                tracing::warn!("cl.video_source_empty file={path:?} action=heartbeat_only");
+                tracing::warn!("carlife.video_source_empty file={path:?} action=heartbeat_only");
                 Self::None
             }
             Err(e) => {
                 tracing::warn!(
-                    "cl.video_source_unreadable file={path:?} err={e} action=heartbeat_only"
+                    "carlife.video_source_unreadable file={path:?} err={e} action=heartbeat_only"
                 );
                 Self::None
             }
@@ -362,7 +364,7 @@ where
                 Source::Live,
             ),
             None => {
-                tracing::warn!("cl.video_source_taken action=heartbeat_only");
+                tracing::warn!("carlife.video_source_taken action=heartbeat_only");
                 (None, None, None, None, None, Source::None)
             }
         },
@@ -609,7 +611,7 @@ where
     session.take_back_from_phone();
     if session.up {
         carplay(false);
-        tracing::info!("cl.session_over action=close_carplay");
+        tracing::info!("carlife.session_over action=close_carplay");
     }
     // A session that has ended is not one that is running, and the page has to
     // say so: an encoder left "running" after the car has gone is the one thing
@@ -678,6 +680,46 @@ fn command_for(key: i32) -> Option<Command> {
         KEY_MUTE => Command::Telephony(PHONE_MUTE),
         _ => return None,
     })
+}
+
+/// What the car's `MSG_CMD_MODULE_CONTROL` asks the CarPlay side to do.
+///
+/// The media HID device carries play and pause and nothing else: a phone has no
+/// way to be told to stop a navigation or an assistant. So the song is the one
+/// module with a command behind it, and the rest are `None` — reported by the
+/// caller rather than acted on.
+fn command_for_control(control: proto::ModuleControl) -> Option<Command> {
+    match (control.module, control.state) {
+        (proto::MUSIC_MODULE, proto::MUSIC_IDLE) => Some(Command::Pause),
+        (proto::MUSIC_MODULE, proto::MUSIC_RUNNING) => Some(Command::Play),
+        _ => None,
+    }
+}
+
+/// What a control became, as the log names it.
+fn action_name(command: Option<Command>) -> &'static str {
+    match command {
+        Some(Command::Play) => "play",
+        Some(Command::Pause) => "pause",
+        _ => "none",
+    }
+}
+
+/// A list of CarLife data modules as indexed fields, `moduleID_0=0(turn_by_turn)`
+/// and one more for each in the list.
+///
+/// The three messages of the family carry the same list, so one reader writes
+/// them all.
+fn listed(modules: &[i32]) -> String {
+    let mut out = String::new();
+    for (index, module) in modules.iter().enumerate() {
+        let _ = write!(
+            out,
+            " moduleID_{index}={module}({})",
+            names::carlife_data(*module)
+        );
+    }
+    out
 }
 
 /// The next access unit from the CarPlay side, or never if there is no CarPlay
@@ -893,7 +935,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         // tell a head from the bytes around it.
         let body = &chunk.body[..chunk.body.len().min(64)];
         tracing::debug!(
-            "cl.frame channel={} bytes={} body={:02x?}",
+            "carlife.frame channel={} bytes={} body={:02x?}",
             chunk.channel,
             chunk.body.len(),
             body
@@ -908,13 +950,13 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             return Ok(());
         }
         let Some(message) = frame::decode(frame::CMD, &chunk.body) else {
-            tracing::warn!("cl.command_dropped reason=decode_failed");
+            tracing::warn!("carlife.command_dropped reason=decode_failed");
             return Ok(());
         };
         if !frame::from_car(message.service_type) {
             tracing::debug!(
-                "cl.message_ignored type={:#010x} reason=direction_bit_clear",
-                message.service_type
+                "carlife.msg.ignored service_type={} reason=direction_bit_clear",
+                names::ServiceType(message.service_type)
             );
             return Ok(());
         }
@@ -922,13 +964,28 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         match message.service_type {
             HU_PROTOCOL_VERSION => {
                 let (major, minor) = proto::decode_protocol_version(&message.body);
-                tracing::info!("cl.version version={major}.{minor}");
+                tracing::info!(
+                    "carlife.msg.recv service_type={} majorVersion={major} minorVersion={minor}",
+                    names::ServiceType(HU_PROTOCOL_VERSION)
+                );
                 self.status
                     .with(|s| s.carlife.protocol = Some((major, minor)));
                 let body = proto::protocol_version_match_status(proto::MATCH);
                 self.send(MATCH_STATUS, &body).await?;
             }
             HU_INFO => {
+                let info = proto::decode_hu_info(&message.body);
+                tracing::info!(
+                    "carlife.msg.recv service_type={} os={:?} manufacturer={:?} model={:?} \
+                     release={:?} btaddress={:?} btname={:?}",
+                    names::ServiceType(HU_INFO),
+                    info.os,
+                    info.manufacturer,
+                    info.model,
+                    info.release,
+                    info.bt_address,
+                    info.bt_name
+                );
                 // Everything a phone has to say about itself, in the order the
                 // reference app says it: that it is in front, then what it is,
                 // then that its screen is on. Nothing here depends on that
@@ -964,7 +1021,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 if !self.up {
                     self.up = true;
                     self.status.with(|s| s.carlife.session_up = true);
-                    tracing::info!("cl.session_up");
+                    tracing::info!("carlife.session_up");
                     carplay(true);
                 }
             }
@@ -973,8 +1030,10 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // `connect_time` is reported as-is: the field is an int32 and
                 // neither the guide nor the head-unit library says in what unit.
                 tracing::info!(
-                    "cl.car_info cuid={:?} version={:?} build={} channel={:?} connections={} \
-                     connected={} connect_time={}",
+                    "carlife.msg.recv service_type={} cuid={:?} versionName={:?} \
+                     versionCode={} channel={:?} connectCount={} connectSuccessCount={} \
+                     connectTime={}",
+                    names::ServiceType(HU_STATISTIC_INFO),
                     info.cuid,
                     info.version_name,
                     info.version_code,
@@ -1008,7 +1067,8 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 self.panel = info::panel(Some(info.channel));
                 if let Some(preset) = self.panel.preset {
                     tracing::info!(
-                        "cl.panel_preset width={} height={} fps={} ppi={} source=channel_map",
+                        "carlife.panel_preset width={} height={} frameRate={} ppi={} \
+                         source=channel_map",
                         preset.width,
                         preset.height,
                         preset.fps,
@@ -1028,9 +1088,18 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             }
             HU_FEATURE_CONFIG_RESPONSE => {
                 let configs = proto::decode_feature_configs(&message.body);
+                // One line for the answer, with the car's own keys: the message
+                // is a map, and a map read a key per line is a message nobody
+                // can see the shape of.
+                let mut said = format!(
+                    "carlife.msg.recv service_type={} cnt={}",
+                    names::ServiceType(HU_FEATURE_CONFIG_RESPONSE),
+                    configs.len()
+                );
                 for (key, value) in &configs {
-                    tracing::info!("cl.setting key={key} value={value:?}");
+                    let _ = write!(said, " {key}={value}");
                 }
+                tracing::info!("{said}");
                 self.status.with(|s| s.carlife.features = configs);
             }
             // The car's answer to the question asked as the session opened: the
@@ -1040,53 +1109,61 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             // navigation's business and nothing here reads them.
             HU_CAR_DATA_SUBSCRIBE_DONE => {
                 let offered = proto::decode_vehicle_infos(&message.body);
-                let modules: Vec<i32> = offered.iter().map(|info| info.module).collect();
+                // What is asked for back: the position when the car named a
+                // datum this side can hand on, the speed whether or not it did —
+                // nothing here consumes the speed, but a car that reports only
+                // what it was asked for would send none at all, and this is the
+                // ask a phone makes.
                 let gps = offered.iter().find(|info| info.module == proto::CAR_DATA_GPS);
-                match gps {
-                    // The flag is the coordinate system, and a phone only takes a
-                    // GPS module in one of the two it knows — so a car naming a
-                    // third is not asked for the reports it would refuse anyway.
-                    Some(info) if matches!(info.flag, 1 | 2) => {
-                        tracing::info!(
-                            "cl.car_data_offered modules={modules:?} action=subscribe \
-                             module={} flag={}",
-                            proto::CAR_DATA_GPS,
-                            info.flag
-                        );
-                        // What every report after this one is in: 1 is WGS84, 2
-                        // is the datum Chinese maps are drawn in.
-                        self.gcj02 = info.flag == 2;
-                        let body = proto::car_data_subscribe_start(
-                            proto::CAR_DATA_GPS,
+                let asked = gps.map_or(true, |info| matches!(info.flag, 1 | 2));
+                let mut said = format!(
+                    "carlife.msg.recv service_type={} cnt={}",
+                    names::ServiceType(HU_CAR_DATA_SUBSCRIBE_DONE),
+                    offered.len()
+                );
+                for (index, info) in offered.iter().enumerate() {
+                    let _ = write!(
+                        said,
+                        " moduleID_{index}={}({})",
+                        info.module,
+                        names::car_data(info.module)
+                    );
+                    // The flag is a coordinate system on the position module and
+                    // an opaque one everywhere else, so it is only named there.
+                    if info.module == proto::CAR_DATA_GPS {
+                        let _ = write!(
+                            said,
+                            " flag_{index}={}({})",
                             info.flag,
-                            0,
+                            names::coordinate_system(info.flag)
                         );
-                        self.send(CAR_DATA_SUBSCRIBE_START, &body).await?;
+                    } else {
+                        let _ = write!(said, " flag_{index}={}", info.flag);
                     }
-                    Some(info) => tracing::warn!(
-                        "cl.car_data_offered modules={modules:?} action=none \
-                         reason=coordinate_system flag={}",
-                        info.flag
-                    ),
-                    None => {
-                        tracing::info!("cl.car_data_offered modules={modules:?} action=none")
-                    }
+                    let _ = write!(said, " frequency_{index}={}", info.frequency);
                 }
-                // The speed is asked for as well. Nothing here consumes it — the
-                // phone's own navigation is the only reader the protocol has for
-                // one — but a car that reports only what it was asked for would
-                // send none at all, and this is the ask the phone makes. Its flag
-                // is not a coordinate system, so it is only handed back.
+                if asked {
+                    tracing::info!("{said} action=subscribe");
+                } else {
+                    // A phone only takes a GPS module in one of the two datums it
+                    // knows, so a car naming a third is not asked for the reports
+                    // it would refuse anyway.
+                    tracing::warn!("{said} action=none reason=coordinate_system");
+                }
+                // What every report after this one is in: 1 is WGS84, 2 is the
+                // datum Chinese maps are drawn in.
+                if let Some(info) = gps.filter(|info| matches!(info.flag, 1 | 2)) {
+                    self.gcj02 = info.flag == 2;
+                    let body =
+                        proto::car_data_subscribe_start(proto::CAR_DATA_GPS, info.flag, 0);
+                    self.send(CAR_DATA_SUBSCRIBE_START, &body).await?;
+                }
+                // The speed's flag is not a coordinate system, so it is only
+                // handed back as it came.
                 if let Some(info) = offered
                     .iter()
                     .find(|info| info.module == proto::CAR_DATA_VELOCITY)
                 {
-                    tracing::info!(
-                        "cl.car_data_offered modules={modules:?} action=subscribe \
-                         module={} flag={}",
-                        proto::CAR_DATA_VELOCITY,
-                        info.flag
-                    );
                     let body =
                         proto::car_data_subscribe_start(proto::CAR_DATA_VELOCITY, info.flag, 0);
                     self.send(CAR_DATA_SUBSCRIBE_START, &body).await?;
@@ -1102,7 +1179,8 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 if !self.speed_seen {
                     self.speed_seen = true;
                     tracing::info!(
-                        "cl.car_speed_received speed_kmh={} clock={}",
+                        "carlife.msg.recv service_type={} speed={} timeStamp={}",
+                        names::ServiceType(HU_CAR_VELOCITY),
                         speed.speed,
                         clock(speed.timestamp_ms)
                     );
@@ -1119,8 +1197,9 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 if !self.position_seen {
                     self.position_seen = true;
                     tracing::info!(
-                        "cl.car_gps_received antenna={} latitude={latitude:.6} \
-                         longitude={longitude:.6} clock={}",
+                        "carlife.msg.recv service_type={} antennaState={} latitude={latitude:.6} \
+                         longitude={longitude:.6} timeStamp={}",
+                        names::ServiceType(HU_CAR_GPS),
                         fix.antenna_state,
                         clock(fix.timestamp_ms)
                     );
@@ -1129,8 +1208,10 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 if self.last_fix != Some(report) {
                     self.last_fix = Some(report);
                     tracing::debug!(
-                        "cl.car_gps antenna={} latitude={latitude:.6} longitude={longitude:.6} \
-                         height={} speed={} heading={} accuracy_m={} clock={}",
+                        "carlife.msg.recv service_type={} antennaState={} latitude={latitude:.6} \
+                         longitude={longitude:.6} height={} speed={} heading={} \
+                         horPosError={} timeStamp={}",
+                        names::ServiceType(HU_CAR_GPS),
                         fix.antenna_state,
                         fix.height,
                         fix.speed,
@@ -1153,13 +1234,23 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 let passed = proto::decode_authen_result(&message.body).unwrap_or(false);
                 self.status.with(|s| s.carlife.accepted = Some(passed));
                 if passed {
-                    tracing::info!("cl.auth_result result=accepted");
+                    tracing::info!(
+                        "carlife.msg.recv service_type={} authenResult=true",
+                        names::ServiceType(HU_AUTHEN_RESULT)
+                    );
                 } else if self.auth.is_none() {
                     // The answer to a challenge that was skipped, which is
                     // nothing the operator was not already told at startup.
-                    tracing::debug!("cl.auth_result result=rejected reason=no_key");
+                    tracing::debug!(
+                        "carlife.msg.recv service_type={} authenResult=false reason=no_key",
+                        names::ServiceType(HU_AUTHEN_RESULT)
+                    );
                 } else {
-                    tracing::warn!("cl.auth_result result=rejected consequence=disconnect");
+                    tracing::warn!(
+                        "carlife.msg.recv service_type={} authenResult=false \
+                         consequence=disconnect",
+                        names::ServiceType(HU_AUTHEN_RESULT)
+                    );
                 }
             }
             HU_VIDEO_ENCODER_INIT => {
@@ -1189,8 +1280,9 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // said, so nothing past this point has to ask which it was.
                 let in_force = self.preset_in_place_of(named);
                 tracing::info!(
-                    "cl.geometry_asked width={} height={} fps={} served_width={} \
-                     served_height={} served_fps={} source={}",
+                    "carlife.msg.recv service_type={} width={} height={} frameRate={} \
+                     served_width={} served_height={} served_frameRate={} source={}",
+                    names::ServiceType(HU_VIDEO_ENCODER_INIT),
                     asked.width,
                     asked.height,
                     asked.frame_rate,
@@ -1239,7 +1331,10 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 );
             }
             HU_VIDEO_ENCODER_START => {
-                tracing::info!("cl.encoder state=started");
+                tracing::info!(
+                    "carlife.msg.recv service_type={}",
+                    names::ServiceType(HU_VIDEO_ENCODER_START)
+                );
                 let now = Instant::now();
                 self.started_at = Some(now);
                 self.status.with(|s| s.carlife.encoding = true);
@@ -1253,7 +1348,10 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 self.send(FOREGROUND, &[]).await?;
             }
             HU_VIDEO_ENCODER_PAUSE | HU_VIDEO_ENCODER_RESET => {
-                tracing::info!("cl.encoder state=stopped");
+                tracing::info!(
+                    "carlife.msg.recv service_type={}",
+                    names::ServiceType(message.service_type)
+                );
                 self.started_at = None;
                 self.status.with(|s| s.carlife.encoding = false);
             }
@@ -1268,7 +1366,10 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     MIN_FPS..=MAX_FPS if self.panel.preset.is_none() => asked,
                     _ => current,
                 };
-                tracing::info!("cl.frame_rate asked={asked} agreed={accepted}");
+                tracing::info!(
+                    "carlife.msg.recv service_type={} frameRate={asked} served_frameRate={accepted}",
+                    names::ServiceType(HU_VIDEO_ENCODER_FRAME_RATE_CHANGE)
+                );
                 if let Some(screen) = self.screen_in_force.as_mut() {
                     screen.frame_rate = accepted;
                 }
@@ -1289,7 +1390,10 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // There is no window here to bring forward, so the honest reply
                 // is sent at once rather than after the five seconds the guide
                 // gives a device that is actually switching.
-                tracing::debug!("cl.foreground");
+                tracing::debug!(
+                    "carlife.msg.recv service_type={}",
+                    names::ServiceType(HU_GO_TO_FOREGROUND)
+                );
                 self.send(GO_TO_FOREGROUND_RESPONSE, &[]).await?;
             }
             // The car asking whether this device can tell it about a route. The
@@ -1297,7 +1401,12 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             // to do with it — so it is told exactly what this side has.
             HU_DATA_SUBSCRIBE => {
                 let asked = proto::decode_data_subscribe(&message.body);
-                tracing::info!("cl.car_data_query modules={asked:?}");
+                tracing::info!(
+                    "carlife.msg.recv service_type={} cnt={}{}",
+                    names::ServiceType(HU_DATA_SUBSCRIBE),
+                    asked.len(),
+                    listed(&asked)
+                );
                 let answer: Vec<(i32, bool)> = asked
                     .iter()
                     .map(|module| (*module, *module == proto::DATA_TURN_BY_TURN))
@@ -1312,8 +1421,11 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 let asked = proto::decode_data_subscribe(&message.body);
                 let wanted = message.service_type == HU_DATA_SUBSCRIBE_START;
                 tracing::info!(
-                    "cl.car_data_subscription action={} modules={asked:?}",
-                    if wanted { "send" } else { "stop" }
+                    "carlife.msg.recv service_type={} cnt={}{} action={}",
+                    names::ServiceType(message.service_type),
+                    asked.len(),
+                    listed(&asked),
+                    if wanted { "subscribe" } else { "unsubscribe" }
                 );
                 if asked.contains(&proto::DATA_TURN_BY_TURN) {
                     self.subscribed = wanted;
@@ -1323,12 +1435,42 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // stopped asking is owed the strip taken down.
                 self.publish_hud().await?;
             }
+            // The car taking the audio into its own hands: it asks for one of
+            // the phone's modules to be stopped, paused or resumed. Only the song
+            // has a CarPlay command behind it — the media HID device has play and
+            // pause keys — so a navigation or an assistant the car wants stopped
+            // is reported and left running rather than guessed at.
+            HU_MODULE_CONTROL => {
+                let control = proto::decode_module_control(&message.body);
+                let command = command_for_control(control);
+                tracing::info!(
+                    "carlife.msg.recv service_type={} moduleID={}({}) statusID={}({}) action={}",
+                    names::ServiceType(HU_MODULE_CONTROL),
+                    control.module,
+                    names::module(control.module),
+                    control.state,
+                    names::module_state(control.module, control.state),
+                    action_name(command),
+                );
+                if let Some(command) = command {
+                    if let Err(e) = self.events.dispatch(command).await {
+                        tracing::warn!("carlife.input_send_failed err={e}");
+                    }
+                }
+            }
             HU_ERROR_CODE => {
                 self.status
                     .with(|s| s.carlife.error_bytes = Some(message.body.len()));
-                tracing::warn!("cl.error_report bytes={}", message.body.len());
+                tracing::warn!(
+                    "carlife.msg.recv service_type={} bytes={}",
+                    names::ServiceType(HU_ERROR_CODE),
+                    message.body.len()
+                );
             }
-            other => tracing::debug!("cl.message_ignored type={other:#010x}"),
+            other => tracing::debug!(
+                "carlife.msg.ignored service_type={}",
+                names::ServiceType(other)
+            ),
         }
         Ok(())
     }
@@ -1353,7 +1495,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         self.handed = Some(*fix);
         if !self.delivered {
             self.delivered = true;
-            tracing::info!("cl.car_gps_handed sentences={}", block.lines().count());
+            tracing::info!("carlife.car_gps_handed sentences={}", block.lines().count());
         }
     }
 
@@ -1370,7 +1512,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         // What went out had a clock, so the sentences that take it back have one.
         if let Some(block) = gps::no_fix(&at) {
             self.push_location(&block);
-            tracing::info!("cl.car_gps_withdrawn");
+            tracing::info!("carlife.car_gps_withdrawn");
         }
     }
 
@@ -1400,7 +1542,9 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         });
         let Some(key) = self.auth.as_ref() else {
             tracing::debug!(
-                "cl.challenge result=skipped reason=no_key challenge={challenge:?}"
+                "carlife.msg.recv service_type={} randomValue={challenge:?} action=none \
+                 reason=no_key",
+                names::ServiceType(HU_AUTHEN_REQUEST)
             );
             return Ok(());
         };
@@ -1408,7 +1552,9 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             return Ok(());
         };
         tracing::info!(
-            "cl.challenge result=answered chars={} challenge={challenge:?}",
+            "carlife.msg.recv service_type={} randomValue={challenge:?} action=answered \
+             encryptValue_chars={}",
+            names::ServiceType(HU_AUTHEN_REQUEST),
             value.len()
         );
         self.status
@@ -1434,15 +1580,22 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     /// verdict, which is the same thing a real phone would be telling it.
     async fn judge(&mut self) -> Result<()> {
         let Some(channel) = self.car_channel.clone() else {
-            tracing::warn!("cl.channel_check result=unknown reason=no_statistics");
+            // Nothing to have an opinion about, so nothing is sent either.
+            tracing::warn!("carlife.channel_check result=skipped reason=no_statistics");
             return Ok(());
         };
         let legal = auth::channel_is_legal(&channel);
         self.status.with(|s| s.carlife.channel_legal = Some(legal));
         if legal {
-            tracing::info!("cl.channel_check channel={channel:?} result=legal");
+            tracing::info!(
+                "carlife.msg.send service_type={} channel={channel:?} authenResult=true",
+                names::ServiceType(MD_AUTHEN_RESULT)
+            );
         } else {
-            tracing::warn!("cl.channel_check channel={channel:?} result=illegal");
+            tracing::warn!(
+                "carlife.msg.send service_type={} channel={channel:?} authenResult=false",
+                names::ServiceType(MD_AUTHEN_RESULT)
+            );
         }
         let body = proto::authen_result(legal);
         self.send(MD_AUTHEN_RESULT, &body).await
@@ -1458,39 +1611,55 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     async fn other_channel(&mut self, chunk: frame::Chunk) {
         if chunk.channel != frame::TOUCH {
             tracing::debug!(
-                "cl.chunk_ignored channel={} bytes={}",
+                "carlife.chunk_ignored channel={} bytes={}",
                 chunk.channel,
                 chunk.body.len()
             );
             return;
         }
         let Some(message) = frame::decode(frame::TOUCH, &chunk.body) else {
-            tracing::warn!("cl.touch_dropped reason=decode_failed");
+            tracing::warn!("carlife.command_dropped channel=touch reason=decode_failed");
             return;
         };
         let command = match message.service_type {
             TOUCH_ACTION => match proto::decode_touch_action(&message.body) {
                 Some(touch) => Some(self.touch(touch)),
                 None => {
-                    tracing::warn!("cl.touch_dropped reason=missing_fields");
+                    tracing::warn!(
+                        "carlife.msg.recv service_type={} action=none reason=missing_fields",
+                        names::ServiceType(TOUCH_ACTION)
+                    );
                     None
                 }
             },
             TOUCH_HARD_KEY => match proto::decode_hard_key(&message.body) {
                 Some(key) => {
                     let command = command_for(key);
+                    // Only a key with nothing behind it is a line: a key that
+                    // became a command is followed by what that command did.
                     if command.is_none() {
-                        tracing::debug!("cl.key_ignored key={key:#04x}");
+                        tracing::debug!(
+                            "carlife.msg.recv service_type={} keycode={:#04x}({}) action=none",
+                            names::ServiceType(TOUCH_HARD_KEY),
+                            key,
+                            names::keycode(key)
+                        );
                     }
                     command
                 }
                 None => {
-                    tracing::warn!("cl.key_dropped reason=missing_field");
+                    tracing::warn!(
+                        "carlife.msg.recv service_type={} action=none reason=missing_field",
+                        names::ServiceType(TOUCH_HARD_KEY)
+                    );
                     None
                 }
             },
             other => {
-                tracing::debug!("cl.touch_ignored type={other:#010x}");
+                tracing::debug!(
+                    "carlife.msg.ignored service_type={}",
+                    names::ServiceType(other)
+                );
                 None
             }
         };
@@ -1500,7 +1669,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         // Failures are the phone's to have: a press that arrives before the event
         // channel is up is dropped by the sink with a line of its own.
         if let Err(e) = self.events.dispatch(command).await {
-            tracing::warn!("cl.input_send_failed err={e}");
+            tracing::warn!("carlife.input_send_failed err={e}");
         }
     }
 
@@ -1662,7 +1831,11 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 if self.media_format == Some((rate, channels)) {
                     return Ok(());
                 }
-                tracing::info!("cl.audio_ready channel=media rate_hz={rate} channels={channels}");
+                tracing::info!(
+                    "carlife.msg.send service_type={} sampleRate={rate} channelConfig={channels} \
+                     sampleFormat=16",
+                    names::ServiceType(MEDIA_INIT)
+                );
                 self.media_format = Some((rate, channels));
                 self.status
                     .with(|s| s.carlife.media = Some((rate, channels)));
@@ -1680,7 +1853,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 if !self.media_streaming {
                     self.media_streaming = true;
                     tracing::info!(
-                        "cl.media_streaming ts_ms={timestamp_ms} bytes={}",
+                        "carlife.media_streaming timeStamp={timestamp_ms} bytes={}",
                         data.len()
                     );
                 }
@@ -1715,7 +1888,6 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // car builds one from the INIT it is sent, and two of them for
                 // one voice is the kind of thing that is only heard, not seen.
                 self.close_navi().await?;
-                tracing::info!("cl.audio_ready channel=navi rate_hz={rate} channels={channels}");
                 self.navi_format = Some((rate, channels));
                 Ok(())
             }
@@ -1729,6 +1901,11 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 if !self.navi_open {
                     let (rate, channels) = self.navi_format.unwrap_or((16_000, 1));
                     self.navi_open = true;
+                    tracing::info!(
+                        "carlife.msg.send service_type={} sampleRate={rate} \
+                         channelConfig={channels} sampleFormat=16",
+                        names::ServiceType(NAVI_TTS_INIT)
+                    );
                     self.send(NAVI_TTS_INIT, &proto::media_init(rate, channels))
                         .await?;
                 }
@@ -1750,7 +1927,10 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             return Ok(());
         }
         self.navi_open = false;
-        tracing::debug!("cl.prompt state=over");
+        tracing::debug!(
+            "carlife.msg.send service_type={}",
+            names::ServiceType(NAVI_TTS_END)
+        );
         self.send(NAVI_TTS_END, &[]).await
     }
 
@@ -1813,7 +1993,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // and what one costs across a pause or a drag — is not
                 // something this side can know any other way.
                 tracing::debug!(
-                    "cl.media_position elapsed_ms={} playing={moving} stated={}",
+                    "carlife.media_position elapsed={} playing={moving} stated={}",
                     position.elapsed_ms,
                     position.playing.is_some()
                 );
@@ -1826,9 +2006,18 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     if playing == was_moving {
                         return Ok(());
                     }
+                    let state = if playing {
+                        proto::MUSIC_RUNNING
+                    } else {
+                        proto::MUSIC_IDLE
+                    };
                     tracing::info!(
-                        "cl.media_play_state state={}",
-                        if playing { "playing" } else { "paused" }
+                        "carlife.msg.send service_type={} cnt=1 moduleID_0={}({}) \
+                         statusID_0={state}({})",
+                        names::ServiceType(MODULE_STATUS),
+                        proto::MUSIC_MODULE,
+                        names::module(proto::MUSIC_MODULE),
+                        names::module_state(proto::MUSIC_MODULE, state)
                     );
                     // The first reading is not a resume: a song that starts
                     // with the channel being set up is already described by
@@ -1841,11 +2030,6 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                         };
                         self.send(message, &[]).await?;
                     }
-                    let state = if playing {
-                        proto::MUSIC_RUNNING
-                    } else {
-                        proto::MUSIC_IDLE
-                    };
                     let body = proto::module_status(proto::MUSIC_MODULE, state);
                     self.send(MODULE_STATUS, &body).await?;
                     self.status.with(|s| s.now_playing.playing = Some(playing));
@@ -1862,7 +2046,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // one the car can take.
                 if image.len() > proto::MAX_ART {
                     tracing::warn!(
-                        "cl.media_cover_dropped bytes={} cap_bytes={}",
+                        "carlife.media_cover_dropped bytes={} cap_bytes={}",
                         image.len(),
                         proto::MAX_ART
                     );
@@ -1877,7 +2061,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     return Ok(());
                 }
                 if image.is_empty() {
-                    tracing::debug!("cl.media_cover_empty action=send_without_cover");
+                    tracing::debug!("carlife.media_cover_empty action=send_without_cover");
                 }
                 self.art = Some(image);
                 // The page draws it as soon as it is here rather than when the
@@ -1941,13 +2125,11 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         // `debug` rather than `info`: an app that puts its lyrics in the title
         // has the phone sending a new one per line, so this is per-event detail
         // however much it looks like one line per song.
-        let cover = self
-            .art
-            .as_ref()
-            .map_or(0.0, |art| art.len() as f64 / 1024.0);
+        let cover = self.art.as_ref().map_or(0.0, |art| art.len() as f64 / 1024.0);
         tracing::debug!(
-            "cl.media_info song={song:?} artist={artist:?} album={album:?} duration_s={} \
-             source={source:?} cover_kb={cover:.1}",
+            "carlife.msg.send service_type={} source={source:?} song={song:?} artist={artist:?} \
+             album={album:?} albumArt_kb={cover:.1} duration={}",
+            names::ServiceType(MEDIA_INFO),
             self.track.duration_s.unwrap_or(0)
         );
         let body = proto::media_info(&self.track, self.art.as_deref().filter(|art| !art.is_empty()));
@@ -1978,7 +2160,8 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         // reached the panel's bar at all.
         if self.progress_sent.is_none() {
             tracing::info!(
-                "cl.media_progress elapsed_ms={ms} duration_s={}",
+                "carlife.msg.send service_type={} progressBar={ms} duration={}",
+                names::ServiceType(MEDIA_PROGRESS_BAR),
                 self.track.duration_s.unwrap_or(0)
             );
         }
@@ -2023,8 +2206,11 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             if self.navi != Some(state) {
                 self.navi = Some(state);
                 tracing::info!(
-                    "cl.navi state={}",
-                    if running { "running" } else { "idle" }
+                    "carlife.msg.send service_type={} cnt=1 moduleID_0={}({}) statusID_0={state}({})",
+                    names::ServiceType(MODULE_STATUS),
+                    proto::NAVI_MODULE,
+                    names::module(proto::NAVI_MODULE),
+                    names::module_state(proto::NAVI_MODULE, state)
                 );
                 let body = proto::module_status(proto::NAVI_MODULE, state);
                 self.send(MODULE_STATUS, &body).await?;
@@ -2056,10 +2242,15 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             _ => "hide",
         };
         if action == proto::ACTION_HIDE {
-            tracing::info!("cl.navi_turn action={action_name}");
+            tracing::info!(
+                "carlife.msg.send service_type={} action={action}({action_name})",
+                names::ServiceType(NAVI_NEXT_TURN_INFO)
+            );
         } else {
             tracing::info!(
-                "cl.navi_turn action={action_name} kind={:?} road={:?} remain_m={:?}",
+                "carlife.msg.send service_type={} action={action}({action_name}) naviTurn={:?} \
+                 roadName={:?} remaindistance={:?}",
+                names::ServiceType(NAVI_NEXT_TURN_INFO),
                 turn.kind.map(|k| format!("0x{k:02X}")),
                 turn.road,
                 turn.remain_m
@@ -2128,7 +2319,8 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         let cap = frame::max_body(channel);
         if body.len() > cap as usize {
             tracing::warn!(
-                "cl.message_dropped type={service_type:#010x} bytes={} cap_bytes={cap}",
+                "carlife.msg.send service_type={} action=dropped bytes={} cap_bytes={cap}",
+                names::ServiceType(service_type),
                 body.len()
             );
             return Ok(());
@@ -2252,6 +2444,8 @@ mod tests {
     use super::*;
     use crate::playing::Position;
     use crate::sink::{AudioCodec, MediaSink, StreamEvent, StreamId};
+    use std::sync::{Arc, Mutex};
+    use tokio::io::DuplexStream;
 
     /// One stream: a type the phone names it with, and the instance it opened.
     fn stream(stream_type: u8, connection_id: i64) -> StreamId {
@@ -2260,8 +2454,53 @@ mod tests {
             connection_id,
         }
     }
-    use std::sync::{Arc, Mutex};
-    use tokio::io::DuplexStream;
+
+    /// The car's control of a module, as the two fields it is.
+    fn control(module: i32, state: i32) -> proto::ModuleControl {
+        proto::ModuleControl { module, state }
+    }
+
+    #[test]
+    fn the_cars_control_of_a_module_reaches_carplay_as_the_command_it_has() {
+        // The media HID device has play and pause, so the song is the one
+        // module a control turns into something the phone is sent.
+        assert_eq!(
+            command_for_control(control(proto::MUSIC_MODULE, proto::MUSIC_IDLE)),
+            Some(Command::Pause)
+        );
+        assert_eq!(
+            command_for_control(control(proto::MUSIC_MODULE, proto::MUSIC_RUNNING)),
+            Some(Command::Play)
+        );
+        // A navigation or an assistant the car asks to stop has no command
+        // behind it: it is reported and left running rather than guessed at.
+        assert_eq!(
+            command_for_control(control(proto::NAVI_MODULE, proto::NAVI_IDLE)),
+            None
+        );
+        assert_eq!(
+            command_for_control(control(proto::VR_MODULE, proto::MODULE_IDLE)),
+            None
+        );
+    }
+
+    #[test]
+    fn the_action_a_control_became_is_named_for_the_log() {
+        assert_eq!(action_name(Some(Command::Pause)), "pause");
+        assert_eq!(action_name(Some(Command::Play)), "play");
+        assert_eq!(action_name(None), "none");
+    }
+
+    #[test]
+    fn a_list_of_carlife_data_modules_is_one_line_of_indexed_fields() {
+        // The same list the question, the start and the stop all carry.
+        assert_eq!(
+            listed(&[0, 1]),
+            " moduleID_0=0(turn_by_turn) moduleID_1=1(assistant_guide)"
+        );
+        assert_eq!(listed(&[9]), " moduleID_0=9(UNKNOWN)");
+        assert_eq!(listed(&[]), "");
+    }
 
     /// The other end of the pipe: enough of a car to walk the conversation, and
     /// no more. Everything it sends is what the reference sends.

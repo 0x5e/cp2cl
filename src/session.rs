@@ -177,7 +177,7 @@ pub async fn watch(
         let current: Vec<String> = phones.iter().map(|p| p.id.clone()).collect();
         match &busy {
             Some(id) if !current.contains(id) => {
-                tracing::info!("cp.unplugged phone={}", short(id));
+                tracing::info!("carplay.unplugged phone={}", short(id));
                 // Nothing about a phone that has gone is still true, and the
                 // page is where that has to show: a session left standing after
                 // the cable is out is the page's most convincing lie.
@@ -195,7 +195,7 @@ pub async fn watch(
         }
         if busy.is_none() {
             if let Some(phone) = phones.into_iter().next() {
-                tracing::info!("cp.attached phone={} transport=usb", short(&phone.id));
+                tracing::info!("carplay.attached phone={} transport=usb", short(&phone.id));
                 status.with(|s| {
                     s.carplay.phone = Some(phone.id.clone());
                     s.carplay.identified = false;
@@ -218,7 +218,7 @@ pub async fn watch(
                 {
                     Ok(_) => busy = Some(phone.id.clone()),
                     Err(e) => tracing::warn!(
-                        "cp.attach_failed phone={} err={e}",
+                        "carplay.attach_failed phone={} err={e}",
                         short(&phone.id)
                     ),
                 }
@@ -265,16 +265,16 @@ async fn attach(
     let av_iface = match &ncm {
         Ok(ncm) => Some(ncm.ifname.clone()),
         Err(e) => {
-            tracing::warn!("cp.ncm_missing err={e} action=kernel_interface");
+            tracing::warn!("carplay.ncm_missing err={e} action=kernel_interface");
             av_interface().await
         }
     };
-    tracing::info!("cp.av_interface name={av_iface:?}");
+    tracing::info!("carplay.av_interface name={av_iface:?}");
     status.with(|s| s.carplay.av_iface = av_iface.clone());
 
     loop {
         let tunnel = carkit(&mux).await?;
-        tracing::info!("cp.carkit_up phone={} action=start_iap2", short(&phone.id));
+        tracing::info!("carplay.carkit_up phone={} action=start_iap2", short(&phone.id));
 
         let identity = Identity {
             name: cfg.name.clone(),
@@ -363,7 +363,7 @@ async fn attach(
         match ended {
             Ended::Restart => {
                 tracing::info!(
-                    "cp.restart phone={} action=reopen_carkit",
+                    "carplay.restart phone={} action=reopen_carkit",
                     short(&phone.id)
                 );
                 tokio::time::sleep(RESTART_PAUSE).await;
@@ -471,7 +471,7 @@ pub(crate) async fn run_bringup(
                 // seconds, and at `info` that is most of the log.
                 Some(track) => {
                     if let Some(line) = said(&track) {
-                        tracing::debug!("cp.now_playing {line}");
+                        tracing::debug!("carplay.now_playing {line}");
                     }
                     panel.playing(Playing::Track(track));
                     // Where in the song it is rides on the same message but
@@ -484,7 +484,7 @@ pub(crate) async fn run_bringup(
                 // A song this side cannot read is one the panel is never told
                 // about, and nothing further down would say so.
                 None => tracing::warn!(
-                    "cp.now_playing_dropped bytes={} reason=decode_failed",
+                    "carplay.now_playing_dropped bytes={} reason=decode_failed",
                     frame.len()
                 ),
             },
@@ -569,7 +569,7 @@ pub(crate) async fn carry_artwork(mut artwork: ArtworkRx, panel: Arc<ClSink>) {
                 let Ok(fitted) =
                     tokio::task::spawn_blocking(move || artwork::fit(&image, budget)).await
                 else {
-                    tracing::warn!("cp.cover_dropped reason=compression_aborted");
+                    tracing::warn!("carplay.cover_dropped reason=compression_aborted");
                     continue;
                 };
                 report_cover(&fitted, seen.0, started.elapsed());
@@ -598,7 +598,7 @@ pub(crate) async fn carry_artwork(mut artwork: ArtworkRx, panel: Arc<ClSink>) {
 fn report_cover(fitted: &Fitted, bytes: usize, took: Duration) {
     let ms = took.as_millis();
     match fitted {
-        Fitted::AsIs(_) => tracing::debug!("cp.cover_fit bytes={bytes} action=passthrough"),
+        Fitted::AsIs(_) => tracing::debug!("carplay.cover_fit bytes={bytes} action=passthrough"),
         Fitted::Shrunk {
             bytes: out,
             kind,
@@ -614,7 +614,7 @@ fn report_cover(fitted: &Fitted, bytes: usize, took: Duration) {
                 format!(" orientation={orientation}")
             };
             tracing::info!(
-                "cp.cover_fitted src={kind} in_bytes={bytes} in_width={} in_height={} \
+                "carplay.cover_fitted src={kind} in_bytes={bytes} in_width={} in_height={} \
                  out_bytes={} width={} height={} quality={quality} tries={tries}{turned} ms={ms}",
                 src_size.0,
                 src_size.1,
@@ -625,14 +625,14 @@ fn report_cover(fitted: &Fitted, bytes: usize, took: Duration) {
         }
         Fitted::GaveUp { why, best, tries } => match best {
             Some(best) => tracing::warn!(
-                "cp.cover_dropped in_bytes={bytes} reason={why:?} best_bytes={} width={} \
+                "carplay.cover_dropped in_bytes={bytes} reason={why:?} best_bytes={} width={} \
                  height={} quality={} tries={tries} ms={ms}",
                 best.bytes,
                 best.size.0,
                 best.size.1,
                 best.quality
             ),
-            None => tracing::warn!("cp.cover_dropped in_bytes={bytes} reason={why:?} ms={ms}"),
+            None => tracing::warn!("carplay.cover_dropped in_bytes={bytes} reason={why:?} ms={ms}"),
         },
     }
 }

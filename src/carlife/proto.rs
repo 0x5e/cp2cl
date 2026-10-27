@@ -490,6 +490,50 @@ pub const CAR_DATA_VELOCITY: i32 = 1;
 
 // --------------------------------------------------------- what comes down ---
 
+/// `MSG_CMD_HU_INFO`: what the car says about itself.
+///
+/// The same `CarlifeDeviceInfo` we send in `MSG_CMD_MD_INFO`, filled in on the
+/// head unit's side. The field numbers are not the same set: the car's `os` is
+/// 1 like ours, but its make is `manufacturer` at 13 where ours is `brand` at
+/// 4, and its Bluetooth pair is at 23 and 24. Nothing here acts on any of it —
+/// it is reported, and that is all.
+#[derive(Debug, Default, Clone)]
+pub struct HuInfo<'a> {
+    pub os: &'a str,
+    pub manufacturer: &'a str,
+    pub model: &'a str,
+    pub release: &'a str,
+    pub bt_address: &'a str,
+    pub bt_name: &'a str,
+}
+
+pub fn decode_hu_info(body: &[u8]) -> HuInfo<'_> {
+    HuInfo {
+        os: str_of(body, 1).unwrap_or_default(),
+        manufacturer: str_of(body, 13).unwrap_or_default(),
+        model: str_of(body, 14).unwrap_or_default(),
+        release: str_of(body, 19).unwrap_or_default(),
+        bt_address: str_of(body, 23).unwrap_or_default(),
+        bt_name: str_of(body, 24).unwrap_or_default(),
+    }
+}
+
+/// The car's `MSG_CMD_MODULE_CONTROL`: which of this device's modules it wants
+/// changed, and to what state. The two fields are the same pair
+/// `MSG_CMD_MODULE_STATUS` reports in, read as a request rather than as news.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ModuleControl {
+    pub module: i32,
+    pub state: i32,
+}
+
+pub fn decode_module_control(body: &[u8]) -> ModuleControl {
+    ModuleControl {
+        module: int_of(body, 1).unwrap_or(0) as i32,
+        state: int_of(body, 2).unwrap_or(0) as i32,
+    }
+}
+
 pub fn decode_protocol_version(body: &[u8]) -> (i32, i32) {
     (
         int_of(body, 1).unwrap_or(0) as i32,
@@ -785,6 +829,56 @@ mod tests {
             ..DeviceInfo::default()
         });
         assert_eq!(int_of(&body, 21), None);
+    }
+
+    #[test]
+    fn the_cars_own_info_is_read_at_the_field_numbers_the_car_uses() {
+        // The head unit's half of `CarlifeDeviceInfo`: `manufacturer` at 13
+        // rather than our `brand` at 4, which is the one pair that would read
+        // as an empty string if the two halves were taken for the same set.
+        let mut body = Vec::new();
+        put_str(&mut body, 1, "Linux");
+        put_str(&mut body, 13, "Bosch");
+        put_str(&mut body, 14, "HU-1");
+        put_str(&mut body, 19, "1.2.3");
+        put_str(&mut body, 23, "AA:BB:CC:DD:EE:FF");
+        put_str(&mut body, 24, "HU-BT");
+
+        let info = decode_hu_info(&body);
+        assert_eq!(info.os, "Linux");
+        assert_eq!(info.manufacturer, "Bosch");
+        assert_eq!(info.model, "HU-1");
+        assert_eq!(info.release, "1.2.3");
+        assert_eq!(info.bt_address, "AA:BB:CC:DD:EE:FF");
+        assert_eq!(info.bt_name, "HU-BT");
+    }
+
+    #[test]
+    fn a_car_that_leaves_its_info_out_reads_as_empty_strings() {
+        let info = decode_hu_info(&[]);
+        assert_eq!(info.os, "");
+        assert_eq!(info.manufacturer, "");
+        assert_eq!(info.model, "");
+    }
+
+    #[test]
+    fn the_cars_module_control_is_the_pair_a_status_reports() {
+        // The one message, not the list: the control names a single module and
+        // the state it wants, where a status report carries a count and entries.
+        let mut body = Vec::new();
+        put_int(&mut body, 1, MUSIC_MODULE);
+        put_int(&mut body, 2, MUSIC_IDLE);
+
+        assert_eq!(
+            decode_module_control(&body),
+            ModuleControl {
+                module: MUSIC_MODULE,
+                state: MUSIC_IDLE,
+            }
+        );
+        // A body that names neither is read as zeros rather than refused: the
+        // caller is the one that knows what an unknown pair means.
+        assert_eq!(decode_module_control(&[]), ModuleControl::default());
     }
 
     #[test]

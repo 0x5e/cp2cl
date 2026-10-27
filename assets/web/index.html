@@ -596,7 +596,7 @@ function logRow(text) {
   stamp.textContent = found[1];
   const level = document.createElement("span");
   level.className = "lv " + LEVELS[found[2]];
-  level.textContent = " " + found[2].padStart(5) + " ";
+  level.textContent = " " + found[2].padEnd(5) + " ";
   const rest = document.createElement("span");
   rest.textContent = found[3];
   row.appendChild(stamp);
