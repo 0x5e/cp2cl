@@ -72,11 +72,12 @@ fn uptime() -> Duration {
 /// `carlife.msg.recv` and the line reads `[carlife] msg.recv`.
 pub struct Line;
 
-/// The column is as wide as the longest area name, `wireless`, so that the tab
-/// after it always reaches the same stop. A tab on its own does not do that: a
-/// name whose bracket ends exactly on one of the eight-column stops jumps a
-/// whole stop, which is what `[airplay]` does once the stamp has grown to four
-/// digits — eight columns to the right of everything else.
+/// The column is a fixed width, one wider than the longest area name
+/// (`carplay`), so that the tab after it always reaches the same stop. A tab on
+/// its own does not do that: a name whose bracket ends exactly on one of the
+/// eight-column stops jumps a whole stop, which is what `[carplay]` does once
+/// the stamp has grown to four digits — eight columns to the right of
+/// everything else.
 const AREA_WIDTH: usize = 8;
 
 impl<S, N> FormatEvent<S, N> for Line
@@ -449,12 +450,15 @@ mod tests {
     #[test]
     fn the_area_is_the_first_segment_of_the_event_name() {
         assert_eq!(area_of("carlife.encoder state=started"), Some("carlife"));
-        assert_eq!(area_of("usb.control_request request=51"), Some("usb"));
-        assert_eq!(area_of("process.started name=cp2cl"), Some("process"));
+        assert_eq!(area_of("usb.msg.recv request=51"), Some("usb"));
+        assert_eq!(area_of("main.started name=cp2cl"), Some("main"));
         assert_eq!(
             area_of("carlife.msg.recv service_type=0x00018003"),
             Some("carlife")
         );
+        // A sub-area under the column: the column is still the first segment,
+        // and the line keeps the rest of the name.
+        assert_eq!(area_of("carplay.audio.stream_ready stream=1"), Some("carplay"));
     }
 
     #[test]
@@ -468,8 +472,8 @@ mod tests {
     #[test]
     fn a_line_is_the_stamp_the_level_the_column_and_the_event_name() {
         let text = plain(&render("carlife.encoder state=started"));
-        // `[carlife]` padded out to the eight columns `[wireless]` needs, then
-        // the tab, and the event name without the area the column already has.
+        // `[carlife]` padded out to the column's width, then the tab, and the
+        // event name without the area the column already has.
         assert!(
             text.ends_with(" INFO  [carlife] \tencoder state=started\n"),
             "{text:?}"
@@ -478,14 +482,16 @@ mod tests {
 
     #[test]
     fn the_event_name_starts_in_the_same_column_whatever_the_area() {
-        let short = expand(&plain(&render("carlife.encoder state=started")));
-        let long = expand(&plain(&render("airplay.held reason=car_session_not_up")));
+        // A short name, which the column pads out, and the longest one, which
+        // it does not.
+        let short = expand(&plain(&render("usb.msg.recv request=51")));
+        let long = expand(&plain(&render("carplay.airplay.held reason=car_session_not_up")));
         // Measured from the bracket, since the stamp is as wide as the uptime
         // makes it and both lines need not have been written in the same second.
         let column = |line: &str, name: &str| {
             line.find(name).unwrap() - line.find('[').unwrap()
         };
-        assert_eq!(column(&short, "encoder"), column(&long, "held"));
+        assert_eq!(column(&short, "msg"), column(&long, "airplay"));
     }
 
     #[test]

@@ -226,12 +226,12 @@ pub(crate) async fn run_session(
     let params = match session_params(cfg, airplay_port, bt_mac, accessory_key) {
         Ok(found) => found,
         Err(e) => {
-            tracing::error!("wireless.ap_unusable err={e}");
+            tracing::error!("wifi.ap_unusable err={e}");
             return Ended::Finished;
         }
     };
     tracing::info!(
-        "wireless.ap ssid={:?} channel={} iface={} config={} pk_len={}",
+        "wifi.ap ssid={:?} channel={} iface={} config={} pk_len={}",
         params.ssid,
         params.channel,
         cfg.wifi_iface,
@@ -264,8 +264,8 @@ pub(crate) async fn run_session(
     });
 
     let ended = run_bringup(
-        "wireless",
         peer,
+        "bt",
         airplay_port,
         Some(ssid.as_str()),
         rx,
@@ -282,7 +282,7 @@ pub(crate) async fn run_session(
     let _ = accessory.await;
 
     if let Ended::Restart = ended {
-        tracing::info!("wireless.restart peer={peer} action=drop_link");
+        tracing::info!("carplay.restart peer={peer} action=drop_link");
     }
     ended
 }

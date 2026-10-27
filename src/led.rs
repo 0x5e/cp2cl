@@ -315,10 +315,10 @@ pub async fn stopper(lights: Arc<Lights>, catch_term: bool) {
     let mut quit = arm(SignalKind::quit(), "quit");
 
     tokio::select! {
-        () = raised(&mut term) => tracing::info!("process.stopped signal=term"),
-        () = raised(&mut int) => tracing::info!("process.stopped signal=int"),
-        () = raised(&mut hup) => tracing::info!("process.stopped signal=hup"),
-        () = raised(&mut quit) => tracing::info!("process.stopped signal=quit"),
+        () = raised(&mut term) => tracing::info!("main.stopped signal=term"),
+        () = raised(&mut int) => tracing::info!("main.stopped signal=int"),
+        () = raised(&mut hup) => tracing::info!("main.stopped signal=hup"),
+        () = raised(&mut quit) => tracing::info!("main.stopped signal=quit"),
     }
     lights.restore();
     std::process::exit(0);

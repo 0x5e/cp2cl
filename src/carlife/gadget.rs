@@ -255,6 +255,8 @@ async fn control_loop(
 ///
 /// Every request is reported, understood or not: which ones a given head unit
 /// sends is not settled, and a line per request is the cheapest way to find out.
+/// A request and whatever its data stage carries are one exchange, so they are
+/// one line — the data is read first and reported on the line that requests it.
 /// The data stage of a request that has one is always read, whatever the request
 /// is, because a device that ignores it leaves the host waiting.
 async fn answer(
@@ -265,15 +267,6 @@ async fn answer(
     status: &Status,
 ) -> Result<Answered> {
     let setup = desc::Setup::decode(raw).ok_or_else(|| anyhow!("a setup event with no setup packet"))?;
-    tracing::info!(
-        "usb.control_request request={} direction={} type={:#04x} value={} index={} length={}",
-        setup.request,
-        setup.direction(),
-        setup.request_type,
-        setup.value,
-        setup.index,
-        setup.length
-    );
 
     match setup.accessory() {
         // "What version of the accessory protocol do you speak?"
@@ -284,18 +277,15 @@ async fn answer(
             // transfer that this is the answer to.
             ep0.flush().await?;
             status.with(|s| s.carlife.aoa_version = Some(desc::AOA_VERSION));
-            tracing::info!("usb.aoa_version version={}", desc::AOA_VERSION);
+            exchange(&setup, format_args!("version={}", desc::AOA_VERSION));
             Ok(Answered::Nothing)
         }
         // One of the six strings the host wants the device to call itself.
         Some(desc::Accessory::Identify { index }) => {
             let mut text = vec![0u8; setup.length as usize];
             ep0.read_exact(&mut text).await?;
-            tracing::info!(
-                "usb.ident index={index} text={:?}",
-                String::from_utf8_lossy(&text)
-            );
             let text = String::from_utf8_lossy(&text).into_owned();
+            exchange(&setup, format_args!("text={text:?}"));
             // The six are the car's own CarLife application naming itself, and
             // they are worth keeping: they are the only description of the head
             // unit anything here ever sees. They go to the page and no further —
@@ -314,11 +304,12 @@ async fn answer(
             // it. See `complete`.
             complete(ep0).await?;
             if identity.is_accessory() {
-                tracing::info!("usb.accessory_switch result=already_accessory");
+                exchange(&setup, format_args!("result=already_accessory"));
                 return Ok(Answered::Nothing);
             }
             switch(usb, identity).await?;
             describe_identity(status, identity);
+            exchange(&setup, format_args!("result=ok identity={:?}", identity.describe()));
             Ok(Answered::Switched)
         }
         // Not one of the three. Where it carries data, the data is still read.
@@ -326,10 +317,9 @@ async fn answer(
             if setup.direction() == "out" && setup.length > 0 {
                 let mut dropped = vec![0u8; setup.length as usize];
                 ep0.read_exact(&mut dropped).await?;
-                tracing::info!(
-                    "usb.control_ignored request={} bytes_dropped={}",
-                    setup.request,
-                    setup.length
+                exchange(
+                    &setup,
+                    format_args!("result=ignored bytes_dropped={}", setup.length),
                 );
             } else if setup.direction() == "in" {
                 // Nothing to send, and an unanswered request leaves the host
@@ -338,14 +328,36 @@ async fn answer(
                 // answer USB has for a request a device does not implement.
                 let mut refused = [0u8; 1];
                 let _ = ep0.read(&mut refused).await;
-                tracing::info!("usb.control_ignored request={} action=refuse", setup.request);
+                exchange(&setup, format_args!("result=refused"));
             } else {
                 complete(ep0).await?;
-                tracing::info!("usb.control_ignored request={} action=ignore", setup.request);
+                exchange(&setup, format_args!("result=ignored"));
             }
             Ok(Answered::Nothing)
         }
     }
+}
+
+/// Reports one control exchange, once.
+///
+/// The direction bit says which way the data stage goes, and that is the whole
+/// of the name: data arriving is a receive, data going out is a send, the same
+/// two words the CarLife lines use. What came of it ends the same line, so a
+/// request and its data stage are never two lines that have to be read
+/// together.
+fn exchange(setup: &desc::Setup, outcome: std::fmt::Arguments<'_>) {
+    let name = match setup.direction() {
+        "in" => "usb.msg.send",
+        _ => "usb.msg.recv",
+    };
+    tracing::info!(
+        "{name} request={} type={:#04x} value={} index={} length={} {outcome}",
+        setup.request,
+        setup.request_type,
+        setup.value,
+        setup.index,
+        setup.length,
+    );
 }
 
 /// Ends a control request that carries no data.
@@ -371,7 +383,8 @@ async fn complete(ep0: &mut tokio::fs::File) -> Result<()> {
 /// an accessory, which is the only way it can see a device it did not enumerate:
 /// off the bus, new numbers, back on. The request itself is ended before any of
 /// that, and `usb` holds the device off the bus long enough for the host to see
-/// it go.
+/// it go. Nothing is reported here: the exchange that asked for it reports the
+/// identity it came back with.
 async fn switch(usb: &Usb, identity: &mut desc::Identity) -> Result<()> {
     tokio::time::sleep(SETTLE).await;
 
@@ -379,7 +392,6 @@ async fn switch(usb: &Usb, identity: &mut desc::Identity) -> Result<()> {
     usb.reidentify(&accessory)
         .await
         .context("switching the device to its accessory form")?;
-    tracing::info!("usb.accessory_switch result=ok identity={}", accessory.describe());
     *identity = accessory;
     Ok(())
 }

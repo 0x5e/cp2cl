@@ -83,24 +83,24 @@ async fn main() -> Result<()> {
         )
         .init();
     if let Some(reason) = unnoticed {
-        tracing::warn!("logging.copy_unavailable path={} err={reason}", logging::PATH);
+        tracing::warn!("main.copy_unavailable path={} err={reason}", logging::PATH);
     }
 
     let cfg = Arc::new(Config::from_env());
 
-    tracing::info!("process.started name=cp2cl");
+    tracing::info!("main.started name=cp2cl");
     // Which build this run is, said once and at the top: every question about a
     // log begins with "which build was that", and the answer is not in the lines
     // that follow. It is the same string the page shows, from the same place.
-    tracing::info!("process.version software={:?}", web::device::SOFTWARE);
+    tracing::info!("main.version software={:?}", web::device::SOFTWARE);
 
     // The settings this run was handed, because "why is nothing happening" is
     // nearly always one of them. The two halves of the program log different
-    // things — a wired run never says `wireless.*`, and a wireless run waits for
+    // things — a wired run never says `bt.*`, and a wireless run waits for
     // the car before it says anything at all — so a log that does not name its
     // own mode is one that cannot be read.
     tracing::info!(
-        "process.config wireless={} wifi_iface={} bt_adapter={}",
+        "main.config wireless={} wifi_iface={} bt_adapter={}",
         cfg.wireless,
         cfg.wifi_iface,
         cfg.bt_adapter
@@ -240,7 +240,7 @@ async fn main() -> Result<()> {
     // Worth saying out loud: nothing here draws a picture, and what the phone is
     // asked to render is the car's own screen — so nothing is rendered until a
     // car has said what that screen is.
-    tracing::info!("bridge.ready sink=carlife screen_source=car");
+    tracing::info!("main.bridge.ready sink=carlife screen_source=car");
 
     let pairings = Arc::new(Mutex::new(Pairings::load_or_create()?));
     // The half of the pairing identity the phone is told: the key it was given
@@ -281,7 +281,7 @@ async fn main() -> Result<()> {
     // and nothing is accepted until there is a head unit on the other end.
     let (carplay, gate) = tokio::sync::watch::channel(false);
     tracing::debug!(
-        "bridge.carplay_side state={}",
+        "main.bridge.carplay_side state={}",
         if *carplay.borrow() { "open" } else { "shut" }
     );
 
@@ -290,7 +290,7 @@ async fn main() -> Result<()> {
     // has anything to advertise. Whether anything is accepted on it is the
     // gate's business.
     tracing::info!(
-        "airplay.receiver port={airplay_port} state={}",
+        "carplay.airplay.receiver port={airplay_port} state={}",
         if *carplay.borrow() {
             "listening"
         } else {
@@ -366,13 +366,13 @@ async fn main() -> Result<()> {
             if (*slot).unwrap_or_default() == wanted {
                 return;
             }
-            tracing::info!("screen.named width={width} height={height} fps={fps}");
+            tracing::info!("carplay.video.screen_named width={width} height={height} fps={fps}");
             *slot = Some(wanted);
             drop(slot);
             let _ = nudge.send(());
         }
     };
-    tracing::info!("bridge.carlife_up carplay_side=waiting");
+    tracing::info!("main.bridge.carlife_up carplay_side=waiting");
     // In the background, because the two sides are each other's condition: this
     // task is what opens the gate, and the watcher below is the only thing that
     // acts on it. Waiting for `serve` to return here would leave nobody to
@@ -401,8 +401,8 @@ async fn main() -> Result<()> {
             // `{e:#}` and not `{e}`: the outer message says what we were doing
             // and the causes under it hold the errno, which is the part that
             // says why.
-            tracing::error!("bridge.carlife_stopped err={e:#}");
-            tracing::warn!("bridge.degraded mode=carplay_only");
+            tracing::error!("main.bridge.carlife_stopped err={e:#}");
+            tracing::warn!("main.bridge.degraded mode=carplay_only");
             let _ = alone.send(true);
         }
     });
@@ -458,14 +458,14 @@ fn mfi_signer() -> Result<Box<dyn AuthCoprocessor + Send>> {
             // line below says once for both halves. One that is there and cannot
             // be read is a different thing, and this is the only place it is said.
             if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!("mfi.credential_unreadable file={} err={e:#}", path.display());
+                tracing::warn!("carplay.mfi.credential_unreadable file={} err={e:#}", path.display());
             }
             e
         })
     };
     let (Ok(key), Ok(cert)) = (read(MFI_KEY), read(MFI_CERT)) else {
         tracing::warn!(
-            "mfi.credentials_missing dir={} consequence=phone_rejects",
+            "carplay.mfi.credentials_missing dir={} consequence=phone_rejects",
             config::DATA_DIR
         );
         return Ok(Box::new(NoCoprocessor));
@@ -473,7 +473,7 @@ fn mfi_signer() -> Result<Box<dyn AuthCoprocessor + Send>> {
     let signer = LocalCoprocessor::load(&key, &cert)
         .context("the MFi credentials in the data directory could not be used")?;
     tracing::info!(
-        "mfi.credentials_loaded key_bytes={} cert_bytes={}",
+        "carplay.mfi.credentials_loaded key_bytes={} cert_bytes={}",
         key.len(),
         cert.len()
     );

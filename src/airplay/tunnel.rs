@@ -44,7 +44,7 @@ use crate::config::{bt_address, Config};
 use crate::session::{carry_artwork, run_bringup, Ended};
 use crate::sink::ClSink;
 use crate::web::Status;
-use crate::wireless::{session_params, Handover, SessionParams};
+use crate::wireless::{session_params, short, Handover, SessionParams};
 
 /// The DataStream the phone names when it means the iAP2 channel. Type 130 is
 /// not enough on its own: video settings and video overlay ask for the same
@@ -167,7 +167,7 @@ impl Tunnel {
             connected.clone(),
         ));
         tracing::info!(
-            "airplay.iap_tunnel_ready seed={seed} data_port={port} ssid={:?} channel={} config={} \
+            "carplay.airplay.iap_tunnel_ready seed={seed} data_port={port} ssid={:?} channel={} config={} \
              pk_len={}",
             params.ssid,
             params.channel,
@@ -255,10 +255,12 @@ impl Tunnel {
             setup.airplay_port,
         );
         let events = tokio::spawn(async move {
-            // The area is `tunnel` so the log says which of the two iAP2
-            // sessions a line belongs to: during the handover both are running.
+            // The same phone the Bluetooth leg named: over Bluetooth there is no
+            // serial to be had, and the address recorded there is what both
+            // links print for it.
+            let phone = status.phone().unwrap_or_default();
             let ended = run_bringup(
-                "tunnel",
+                &short(&phone),
                 "wifi",
                 airplay_port,
                 Some(ssid.as_str()),
@@ -269,12 +271,12 @@ impl Tunnel {
             )
             .await;
             match ended {
-                Ended::Restart => tracing::info!("tunnel.iap2_ended reason=render_changed"),
-                Ended::Finished => tracing::info!("tunnel.iap2_ended"),
+                Ended::Restart => tracing::info!("carplay.iap2.ended reason=render_changed"),
+                Ended::Finished => tracing::info!("carplay.iap2.ended"),
             }
         });
 
-        tracing::info!("tunnel.iap2_started data_port={}", self.port);
+        tracing::info!("carplay.iap2.started data_port={}", self.port);
         self.link = Some(Link {
             pump,
             accessory,
@@ -300,7 +302,7 @@ impl Drop for Tunnel {
         // longer reachable on Wi-Fi and has to be paged back onto Bluetooth —
         // whether or not it ever got as far as asking for the link to go.
         self.setup.handover.clear();
-        tracing::info!("tunnel.closed data_port={}", self.port);
+        tracing::info!("carplay.iap2.closed data_port={}", self.port);
     }
 }
 
@@ -325,11 +327,11 @@ async fn accept_loop(
         let (socket, peer) = match listener.accept().await {
             Ok(found) => found,
             Err(e) => {
-                tracing::warn!("tunnel.accept_failed err={e}");
+                tracing::warn!("carplay.iap2.accept_failed err={e}");
                 return;
             }
         };
-        tracing::info!("tunnel.connected peer={peer}");
+        tracing::info!("carplay.iap2.connected peer={peer}");
         // The phone only sends `disableBluetooth` once this is carrying iAP2, so
         // this is the moment Bluetooth has to stop paging — and the moment the
         // link may say anything, because the phone is listening now.
@@ -354,7 +356,7 @@ async fn read_stream(mut socket: TcpStream, key: SymKey, to_link: mpsc::Unbounde
             Ok(0) => break,
             Ok(n) => n,
             Err(e) => {
-                tracing::warn!("tunnel.read_failed err={e}");
+                tracing::warn!("carplay.iap2.read_failed err={e}");
                 break;
             }
         };
@@ -363,12 +365,12 @@ async fn read_stream(mut socket: TcpStream, key: SymKey, to_link: mpsc::Unbounde
         // the end of the stream rather than the start of every later frame
         // opening into garbage.
         if let Err(e) = open_frames(&key, &mut counter, &mut sealed, &mut plain) {
-            tracing::warn!("tunnel.decrypt_failed err={e}");
+            tracing::warn!("carplay.iap2.decrypt_failed err={e}");
             return;
         }
         let mut bodies = Vec::new();
         if let Err(size) = take_packages(&mut plain, &mut bodies) {
-            tracing::warn!("tunnel.package_implausible size={size}");
+            tracing::warn!("carplay.iap2.package_implausible size={size}");
             return;
         }
         for body in bodies {
@@ -377,7 +379,7 @@ async fn read_stream(mut socket: TcpStream, key: SymKey, to_link: mpsc::Unbounde
             }
         }
     }
-    tracing::info!("tunnel.disconnected");
+    tracing::info!("carplay.iap2.disconnected");
 }
 
 /// Splits whole packages off the front of `plain`, keeping the iAP2 ones.
@@ -438,7 +440,7 @@ async fn pump(
                             .is_err()
                         {
                             tracing::warn!(
-                                "tunnel.peer_absent wait_s={} action=send_anyway",
+                                "carplay.iap2.peer_absent wait_s={} action=send_anyway",
                                 PEER_WAIT.as_secs()
                             );
                         }
@@ -447,12 +449,12 @@ async fn pump(
                     // frames out of them, and a frame split across two messages
                     // is no different from one split across two reads.
                     if let Err(e) = events.send_iap(buf[..n].to_vec()).await {
-                        tracing::warn!("tunnel.event_send_failed err={e}");
+                        tracing::warn!("carplay.iap2.event_send_failed err={e}");
                         break;
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("tunnel.link_read_failed err={e}");
+                    tracing::warn!("carplay.iap2.link_read_failed err={e}");
                     break;
                 }
             }
@@ -462,7 +464,7 @@ async fn pump(
         _ = into_link => {}
         _ = out_of_link => {}
     }
-    tracing::info!("tunnel.pump_ended");
+    tracing::info!("carplay.iap2.pump_ended");
 }
 
 #[cfg(test)]

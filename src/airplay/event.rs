@@ -76,7 +76,7 @@ impl EventSink {
         // the switch to Wi-Fi, and every report after that would be dropped.
         let was = std::mem::replace(&mut *self.counter.lock().await, 0);
         if was != 0 {
-            tracing::info!("event.channel_opened write_ctr_reset_from={was}");
+            tracing::info!("carplay.event.channel_opened write_ctr_reset_from={was}");
         }
         let id = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         *self.writer.lock().await = Some((id, writer));
@@ -86,12 +86,12 @@ impl EventSink {
     pub async fn dispatch(self: &Arc<Self>, cmd: Command) -> std::io::Result<()> {
         let key = self.key.lock().await.clone();
         let Some(key) = key else {
-            tracing::warn!("event.press_ignored reason=not_paired");
+            tracing::warn!("carplay.event.press_ignored reason=not_paired");
             return Ok(());
         };
         let mut guard = self.writer.lock().await;
         let Some((_, writer)) = guard.as_mut() else {
-            tracing::warn!("event.press_ignored reason=no_channel");
+            tracing::warn!("carplay.event.press_ignored reason=no_channel");
             return Ok(());
         };
         let mut counter = self.counter.lock().await;
@@ -196,7 +196,7 @@ pub(crate) async fn pump_events(
             Ok(0) => break,
             Ok(n) => n,
             Err(e) => {
-                ended("event", "read", &e);
+                ended("carplay.event", "read", &e);
                 break;
             }
         };
@@ -204,7 +204,7 @@ pub(crate) async fn pump_events(
 
         // Same framing as the control channel: [2B length][ciphertext][tag].
         if let Err(e) = open_frames(&read_key, &mut ctr, &mut enc, &mut plain) {
-            tracing::error!("event.frame_open_failed err={e}");
+            tracing::error!("carplay.event.frame_open_failed err={e}");
             break;
         }
 
@@ -215,24 +215,24 @@ pub(crate) async fn pump_events(
             // back — a loop that drowns the log in identical lines.
             if req.method.starts_with("RTSP/") || req.method.starts_with("HTTP/") {
                 if req.path != "200" {
-                    tracing::warn!("event.response_unexpected path={} version={}", req.path, req.version);
+                    tracing::warn!("carplay.event.response_unexpected path={} version={}", req.path, req.version);
                 }
                 continue;
             }
             tracing::info!(
-                "event.request method={} path={} bytes={}",
+                "carplay.event.request method={} path={} bytes={}",
                 req.method,
                 req.path,
                 req.body.len()
             );
             if let Err(e) = sink.reply(req.cseq()).await {
-                tracing::error!("event.reply_failed err={e}");
+                tracing::error!("carplay.event.reply_failed err={e}");
                 break;
             }
         }
     }
     sink.detach_writer(id).await;
-    tracing::info!("event.channel_closed");
+    tracing::info!("carplay.event.channel_closed");
 }
 
 pub struct EventChannel<W> {
@@ -302,7 +302,7 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
         // screen the car was answered with. `CP2CL_LOG_LEVEL=debug` brings the
         // keys and the wheel back.
         if !matches!(cmd, Command::Touch(_)) {
-            tracing::debug!("event.sending cmd={cmd:?}");
+            tracing::debug!("carplay.event.sending cmd={cmd:?}");
         }
 
         match cmd {

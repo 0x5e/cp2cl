@@ -59,7 +59,7 @@ pub async fn watch(
     status.with(|s| s.carplay.bt_mac = bt_address(&cfg.bt_adapter));
 
     if let Err(e) = ready(&cfg) {
-        tracing::error!("wireless.ap_unusable err={e}");
+        tracing::error!("wifi.ap_unusable err={e}");
         return;
     }
 
@@ -71,7 +71,7 @@ pub async fn watch(
     // takes to turn up: a log that stops here looks like a run that failed
     // rather than one that is waiting.
     if !*gate.borrow() {
-        tracing::info!("wireless.waiting_for_car consequence=nothing_published");
+        tracing::info!("bt.waiting_for_car consequence=nothing_published");
     }
 
     // The channel never closes while a round holds the connection that owns the
@@ -80,7 +80,7 @@ pub async fn watch(
     // per round; without the handler the default action still ends the process,
     // only without the putting back.
     let mut stop = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .inspect_err(|e| tracing::warn!("wireless.signal_handler_missing err={e} consequence=no_restore"))
+        .inspect_err(|e| tracing::warn!("main.signal_handler_missing err={e} consequence=no_restore"))
         .ok();
 
     loop {
@@ -91,7 +91,7 @@ pub async fn watch(
         if !wait_car_up(&mut gate).await {
             return;
         }
-        tracing::info!("wireless.car_up action=publish_service");
+        tracing::info!("bt.car_up action=publish_service");
 
         // The access point is a daemon the boot starts after this program, so
         // the network a phone is told to join may not be on air yet. It is named
@@ -104,7 +104,7 @@ pub async fn watch(
         // session that has already gone, so the question is asked again rather
         // than answered by the wait that came before it.
         if !*gate.borrow() {
-            tracing::info!("wireless.car_gone action=skip_publish");
+            tracing::info!("bt.car_gone action=skip_publish");
             continue;
         }
 
@@ -113,7 +113,7 @@ pub async fn watch(
                 Ok(started) => started,
                 Err(e) => {
                     tracing::error!(
-                        "wireless.bt_start_failed adapter={} err={e} hint=\"is bluetoothd \
+                        "bt.start_failed adapter={} err={e} hint=\"is bluetoothd \
                          running, and is {} the adapter?\"",
                         cfg.bt_adapter,
                         cfg.bt_adapter
@@ -133,7 +133,7 @@ pub async fn watch(
         // unregisters them, so it has to be kept alive for as long as we are
         // listening — it is also what puts the controllers back at the end.
         tracing::info!(
-            "wireless.bt_service_up adapter={} name={:?} action=pair_phone",
+            "bt.service_up adapter={} name={:?} action=pair_phone",
             cfg.bt_adapter, cfg.name
         );
 
@@ -177,7 +177,7 @@ pub async fn watch(
                 break;
             };
             let peer = short(&peer_mac);
-            tracing::info!("wireless.channel_opened peer={peer}");
+            tracing::info!("bt.channel_opened peer={peer}");
             // Over Bluetooth there is no serial to be had: the peer is an
             // address and nothing more, so that is what the page is given.
             status.with(|s| {
@@ -222,9 +222,9 @@ pub async fn watch(
             )
             .await;
             carrying.abort();
-            tracing::info!("wireless.channel_closed peer={peer} action=page_again");
+            tracing::info!("bt.channel_closed peer={peer} action=page_again");
             if let Ended::Restart = ended {
-                tracing::info!("wireless.waiting peer={peer} action=wait_channel");
+                tracing::info!("bt.waiting peer={peer} action=wait_channel");
             }
         }
 
@@ -241,13 +241,13 @@ pub async fn watch(
         // it is owed, which starts by waiting for it to come back.
         if *gate.borrow() {
             tracing::info!(
-                "wireless.bt_service_down adapter={} state=restored",
+                "bt.service_down adapter={} state=restored",
                 cfg.bt_adapter
             );
             return;
         }
         tracing::info!(
-            "wireless.bt_service_down adapter={} reason=car_session_ended",
+            "bt.service_down adapter={} reason=car_session_ended",
             cfg.bt_adapter
         );
     }
@@ -317,7 +317,7 @@ const BLUEZ: &str = "org.bluez";
 ///
 /// It gives up and goes on: the page, the receiver and the car's session are
 /// already running by now, and the wireless half says what it could not do in
-/// the line `radio.incomplete` rather than taking them down with it.
+/// the line `main.radios_incomplete` rather than taking them down with it.
 ///
 /// Answers whether all three were found, because the caller has to tell a run
 /// that waited for them from one that went on without them.
@@ -338,23 +338,20 @@ async fn wait_for_radios(cfg: &Config) -> bool {
         };
         let missing = missing(cfg, wifi, bt, bluez);
         if missing.is_empty() {
-            tracing::info!(
-                "radio.ready iface={} adapter={} after_ms={}",
-                cfg.wifi_iface,
-                cfg.bt_adapter,
-                started.elapsed().as_millis()
-            );
+            let after_ms = started.elapsed().as_millis();
+            tracing::info!("wifi.ready iface={} after_ms={after_ms}", cfg.wifi_iface);
+            tracing::info!("bt.ready adapter={} after_ms={after_ms}", cfg.bt_adapter);
             return true;
         }
         // Once per change rather than once per poll: the first round says what
         // the boot has not got round to yet, and the next says what is left.
         if said.as_deref() != Some(missing.as_str()) {
-            tracing::info!("radio.waiting missing={missing}");
+            tracing::info!("main.radios_waiting missing={missing}");
             said = Some(missing.clone());
         }
         if started.elapsed() >= RADIOS_CEILING {
             tracing::warn!(
-                "radio.incomplete after_ms={} missing={missing} consequence=wireless_will_fail",
+                "main.radios_incomplete after_ms={} missing={missing} consequence=wireless_will_fail",
                 started.elapsed().as_millis()
             );
             return false;
@@ -418,18 +415,18 @@ async fn wait_for_access_point() -> bool {
     loop {
         if Path::new(AP_PID).exists() {
             tracing::info!(
-                "wireless.ap_ready after_ms={}",
+                "wifi.ap_ready after_ms={}",
                 started.elapsed().as_millis()
             );
             return true;
         }
         if !said {
-            tracing::info!("wireless.ap_waiting pid_file={AP_PID}");
+            tracing::info!("wifi.ap_waiting pid_file={AP_PID}");
             said = true;
         }
         if started.elapsed() >= AP_CEILING {
             tracing::warn!(
-                "wireless.ap_absent after_ms={} consequence=phone_told_a_network_that_is_not_on_air",
+                "wifi.ap_absent after_ms={} consequence=phone_told_a_network_that_is_not_on_air",
                 started.elapsed().as_millis()
             );
             return false;

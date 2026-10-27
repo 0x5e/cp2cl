@@ -3,7 +3,7 @@
 //! Publishing the iAP service makes this machine findable; it does not make the
 //! phone come. An iPhone does not reconnect to a wireless CarPlay accessory by
 //! itself — the accessory pages it — and nothing we call does that for us, so
-//! without this the log stops at `wireless.bt_service_up` and stays there until
+//! without this the log stops at `bt.service_up` and stays there until
 //! someone taps the machine in the phone's Bluetooth settings.
 //!
 //! The page is the phone's own iAP2 service: BlueZ dials the channel the phone's
@@ -86,18 +86,18 @@ pub(super) async fn run(
         if handover.live() {
             if !held {
                 held = true;
-                tracing::info!("wireless.page_held reason=handover");
+                tracing::info!("bt.page_held reason=handover");
             }
             continue;
         }
         if held {
             held = false;
-            tracing::info!("wireless.page_resumed reason=handover_cleared");
+            tracing::info!("bt.page_resumed reason=handover_cleared");
         }
         let phones = match paired(&conn, &adapter).await {
             Ok(phones) => phones,
             Err(e) => {
-                tracing::debug!("wireless.paired_list_failed err={e}");
+                tracing::debug!("bt.paired_list_failed err={e}");
                 continue;
             }
         };
@@ -105,7 +105,7 @@ pub(super) async fn run(
         waiting.retain(|mac, _| phones.iter().any(|p| &p.mac == mac));
         let macs: Vec<String> = phones.iter().map(|p| p.mac.clone()).collect();
         if to_call.as_ref() != Some(&macs) {
-            tracing::info!("wireless.paired_phones count={} macs={macs:?}", macs.len());
+            tracing::info!("bt.paired_phones count={} macs={macs:?}", macs.len());
             to_call = Some(macs);
         }
         for Phone { path, mac, connected } in phones {
@@ -122,7 +122,7 @@ pub(super) async fn run(
                 continue;
             }
             waiting.remove(&mac);
-            tracing::info!("wireless.stale_peer mac={mac} idle_s={STALE_SECS} action=drop");
+            tracing::info!("bt.stale_peer mac={mac} idle_s={STALE_SECS} action=drop");
             let _ = tokio::time::timeout(ANSWER, disconnect(&conn, &path)).await;
         }
     }
@@ -132,9 +132,9 @@ pub(super) async fn run(
 /// again, and says what came of it.
 async fn call(conn: &Connection, path: &str, mac: &str) {
     match tokio::time::timeout(ANSWER, page(conn, path)).await {
-        Ok(Ok(())) => tracing::info!("wireless.page_answered mac={mac}"),
-        Ok(Err(e)) => tracing::debug!("wireless.page_unanswered mac={mac} err={e}"),
-        Err(_) => tracing::debug!("wireless.page_deferred mac={mac} reason=timeout"),
+        Ok(Ok(())) => tracing::info!("bt.page_answered mac={mac}"),
+        Ok(Err(e)) => tracing::debug!("bt.page_unanswered mac={mac} err={e}"),
+        Err(_) => tracing::debug!("bt.page_deferred mac={mac} reason=timeout"),
     }
 }
 

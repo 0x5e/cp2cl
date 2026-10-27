@@ -61,6 +61,17 @@ impl Status {
         snapshot.json()
     }
 
+    /// The phone the current session belongs to, as the link that found it
+    /// named it: a serial on the cable, an address over Bluetooth.
+    ///
+    /// Read by the tunnel, which has no identity of its own to print: it is the
+    /// same phone, and the link that carried the first half of the session is
+    /// the one that knows who it is.
+    pub fn phone(&self) -> Option<String> {
+        let snapshot = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        snapshot.carplay.phone.clone()
+    }
+
     /// The cover the car was last given, for the page to draw.
     ///
     /// Handed over whole, with the name it is served under, because the two

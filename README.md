@@ -63,13 +63,13 @@ Then plug the phone in and unlock it. You should see:
 
 ```
 [carplay] 	attached phone=000081301A46 transport=usb
-[carplay] 	identified peer=000081301A46
-[carplay] 	mfi_passed peer=000081301A46
-[carplay] 	carplay_start_sent peer=000081301A46 airplay=192.168.20.1:52843
-[airplay] 	connected peer=192.168.20.3:53412
-[pairing] 	verified
-[airplay] 	info_answered width=1280 height=720 fps=30 codec=avc1
-[video]   	stream_attached
+[carplay] 	iap2.identified peer=000081301A46 transport=usb
+[carplay] 	iap2.mfi_passed peer=000081301A46 transport=usb
+[carplay] 	iap2.carplay_start_sent peer=000081301A46 transport=usb airplay=192.168.20.1:52843
+[carplay] 	airplay.connected peer=192.168.20.3:53412
+[carplay] 	pairing.verified
+[carplay] 	airplay.info_answered width=1280 height=720 fps=30 codec=avc1
+[carplay] 	video.stream_attached
 ```
 
 ### Cross-compiling for the board
@@ -147,7 +147,7 @@ session rebuilt once, early on, for exactly this reason — the log says so:
 
 ```
 [carlife] 	msg.recv service_type=0x00018007(MSG_CMD_VIDEO_ENCODER_INIT) width=1280 height=720 frameRate=30 served_width=1920 served_height=720 served_frameRate=30 source=channel_map
-[screen]  	named width=1920 height=720 fps=30
+[carplay] 	video.screen_named width=1920 height=720 fps=30
 ```
 
 Two things have to happen, and closing the connection is only the first:
@@ -179,7 +179,7 @@ notice the first one ending before it will act on the second.
 | Log line | What it means |
 |---|---|
 | `carplay.restart phone=... action=reopen_carkit` | wired: the old tunnel is closed and another is being opened |
-| `wireless.restart peer=... action=drop_link` | wireless: the link is closed; the platform has to bring the phone back |
+| `carplay.restart peer=... action=drop_link` | wireless: the link is closed; the platform has to bring the phone back |
 
 The wireless half depends on something outside this program bringing the phone
 back: BlueZ's `AutoConnect` pages a phone that has paired before. **Wired has
@@ -367,12 +367,9 @@ is where it stopped:
 
 ```bash
 [usb]     	waiting_for_host
-[usb]     	control_request request=51 direction=in type=0xc0 value=0 index=0 length=2
-[usb]     	aoa_version version=2
-[usb]     	control_request request=52 direction=out type=0x40 value=0 index=0 length=5
-[usb]     	ident index=0 text="Baidu"       # and five more like it
-[usb]     	control_request request=53 direction=out type=0x40 value=0 index=0 length=0
-[usb]     	accessory_switch result=ok identity="18d1:2d00 as Google / Android"
+[usb]     	msg.send request=51 type=0xc0 value=0 index=0 length=2 version=2
+[usb]     	msg.recv request=52 type=0x40 value=0 index=0 length=5 text="Baidu"     # and five more like it
+[usb]     	msg.recv request=53 type=0x40 value=0 index=0 length=0 result=ok identity="18d1:2d00 as Google / Android"
 [usb]     	enumerated action=start_session
 [carlife] 	msg.recv service_type=0x00018001(MSG_CMD_HU_PROTOCOL_VERSION) majorVersion=1 minorVersion=0
 [carlife] 	session_up                          # the gate opens here
@@ -387,8 +384,8 @@ from `waiting_for_host` to `enumerated`. The other half of the bridge says
 so too, and its two lines bracket the one above:
 
 ```bash
-[airplay] 	held reason=car_session_not_up   # until carlife.session_up
-[airplay] 	connected peer=<phone>           # and only after it
+[carplay] 	airplay.held reason=car_session_not_up   # until carlife.session_up
+[carplay] 	airplay.connected peer=<phone>           # and only after it
 ```
 
 If the car goes quiet and nothing from `[carlife]` follows, the last line printed says
@@ -780,7 +777,7 @@ arrived at.
 
 Nothing captures it yet — there is no microphone on the board, and no path from
 the car up to this side — so the uplink opens and is reported
-(`mic.uplink_open peer=...`) for a capture that does not exist. It is open while
+(`airplay.mic.uplink_open peer=...`) for a capture that does not exist. It is open while
 the phone is listening and shut the rest of the time, so the way to see it is to
 start a call or invoke Siri.
 
@@ -996,7 +993,7 @@ this a derivative work, so cp2cl inherits that.
   because the phone sends PCM packet by packet there. The audio pump therefore
   releases the buffered stream one frame per 21.33 ms, and prints how it is
   going every five seconds:
-  `audio.stats packets=N missing=M worst_gap_ms=X bursts=B burst_lo=LO burst_hi=HI burst_avg=A held=N`.
+  `carplay.audio.stats packets=N missing=M worst_gap_ms=X bursts=B burst_lo=LO burst_hi=HI burst_avg=A held=N`.
   A rising `missing` is loss; a large `worst_gap_ms` is the phone's lumping and is
   expected; `held` is how much audio is waiting to go out.
 

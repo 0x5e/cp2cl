@@ -90,7 +90,7 @@ impl AudioReceiver {
                 Some(decoder) => Some(decoder),
                 None => {
                     tracing::warn!(
-                        "audio.codec_unsupported codec=aac-lc rate_hz={rate} channels={channels} \
+                        "carplay.audio.codec_unsupported codec=aac-lc rate_hz={rate} channels={channels} \
                          consequence=frames_dropped"
                     );
                     None
@@ -128,7 +128,7 @@ impl AudioReceiver {
         let sealed = &packet[RTP_HEADER_LEN..end];
 
         let Ok(payload) = open(&self.key, &nonce, sealed, aad) else {
-            tracing::warn!("audio.packet_open_failed");
+            tracing::warn!("carplay.audio.packet_open_failed");
             return None;
         };
         if payload.is_empty() {
@@ -188,7 +188,7 @@ impl AudioReceiver {
     fn say_dropped(&mut self) {
         if !self.dropped {
             self.dropped = true;
-            tracing::warn!("audio.stream_dropped consequence=no_sound");
+            tracing::warn!("carplay.audio.stream_dropped consequence=no_sound");
         }
     }
 }
@@ -259,7 +259,7 @@ impl Speech {
                 decimator: Decimator::default(),
             }),
             Err(e) => {
-                tracing::warn!("audio.prompt_decoder_missing err={e}");
+                tracing::warn!("carplay.audio.prompt_decoder_missing err={e}");
                 None
             }
         }
@@ -275,7 +275,7 @@ impl Speech {
             Err(e) => {
                 // Once per frame at debug: the warning is the caller's, and says
                 // it once.
-                tracing::debug!("audio.prompt_frame_dropped err={e}");
+                tracing::debug!("carplay.audio.prompt_frame_dropped err={e}");
                 return None;
             }
         };

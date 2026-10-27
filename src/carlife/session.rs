@@ -448,7 +448,6 @@ where
         gcj02: false,
         vehicle,
         up: false,
-        frames_seen: 0,
         last_touch: None,
         status,
     };
@@ -696,11 +695,24 @@ fn command_for_control(control: proto::ModuleControl) -> Option<Command> {
     }
 }
 
-/// What a control became, as the log names it.
+/// What a control or a panel key became, as the log names it.
 fn action_name(command: Option<Command>) -> &'static str {
     match command {
         Some(Command::Play) => "play",
         Some(Command::Pause) => "pause",
+        Some(Command::Next) => "next",
+        Some(Command::Prev) => "prev",
+        Some(Command::Home) => "home",
+        Some(Command::Back) => "back",
+        Some(Command::Select) => "select",
+        Some(Command::Left) => "left",
+        Some(Command::Right) => "right",
+        Some(Command::Up) => "up",
+        Some(Command::Down) => "down",
+        Some(Command::Siri) => "siri",
+        Some(Command::Telephony(PHONE_HOOK_SWITCH)) => "call",
+        Some(Command::Telephony(PHONE_DROP)) => "hang_up",
+        Some(Command::Telephony(PHONE_MUTE)) => "mute",
         _ => "none",
     }
 }
@@ -904,10 +916,6 @@ struct Session<'a, W> {
     vehicle: Arc<Vehicle>,
     next_tick: Instant,
     up: bool,
-    /// How many frames the car has sent, up to the handful reported raw — see
-    /// `note_frames`. Counted here rather than kept as a local because the
-    /// reporting sits in `handle`, which is called once per frame.
-    frames_seen: u32,
     /// Where the finger was the last time the car said. A release has to name it
     /// — see `touch`.
     last_touch: Option<(u16, u16)>,
@@ -916,48 +924,67 @@ struct Session<'a, W> {
     status: Arc<Status>,
 }
 
+/// Bytes as one run of lowercase hex, which is the shape a protobuf decoder is
+/// fed and the shape a person reads a frame's head out of.
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
 impl<W: AsyncWrite + Unpin> Session<'_, W> {
-    /// Reports the first few frames the car sends, whatever they are.
+    /// The bytes of a frame this code could not read, as the one line that says
+    /// so.
     ///
-    /// A type this code has no arm for is named at `debug`, and so is a channel
-    /// it does not read, but neither says what was in the body. The first few
-    /// frames are therefore reported as bytes, and then the log goes quiet
-    /// again: after a handful the shape is known, and a session that is running
-    /// sends frames sixty times a second.
-    fn note_frames(&mut self, chunk: &frame::Chunk) {
-        const REPORTED: u32 = 8;
-        if self.frames_seen >= REPORTED {
-            return;
+    /// Every other line says what the car meant in the protocol's own words.
+    /// This one says what it sent instead, for a type with no arm of its own and
+    /// for a channel nothing here reads, so that a message nobody has words for
+    /// is still something to work from. Only the first few dozen bytes of it:
+    /// enough to see where the head ends and the body starts, and a session that
+    /// is running is one of sixty frames a second.
+    fn unknown(&self, chunk: &frame::Chunk, service_type: Option<u32>, reason: &str) {
+        const SHOWN: usize = 64;
+        // The head is taken off when it parses, so that what the line calls the
+        // body is what a decoder is fed rather than the header in front of it.
+        let decoded = frame::decode(chunk.channel, &chunk.body);
+        let body = decoded
+            .as_ref()
+            .map_or(&chunk.body[..], |message| &message.body[..]);
+        let body = hex(&body[..body.len().min(SHOWN)]);
+        match service_type {
+            Some(service_type) => tracing::debug!(
+                "carlife.msg.recv_unknown channel={} service_type={} bytes={} body={body} \
+                 reason={reason}",
+                chunk.channel,
+                names::ServiceType(service_type),
+                chunk.body.len()
+            ),
+            None => tracing::debug!(
+                "carlife.msg.recv_unknown channel={} bytes={} body={body} reason={reason}",
+                chunk.channel,
+                chunk.body.len()
+            ),
         }
-        self.frames_seen += 1;
-        // Enough of the message to see where its head ends and its body starts.
-        // Eight bytes was enough to tell a frame from a frame and not enough to
-        // tell a head from the bytes around it.
-        let body = &chunk.body[..chunk.body.len().min(64)];
-        tracing::debug!(
-            "carlife.frame channel={} bytes={} body={:02x?}",
-            chunk.channel,
-            chunk.body.len(),
-            body
-        );
     }
 
     /// One message from the car.
     async fn handle<F: FnMut(bool)>(&mut self, chunk: frame::Chunk, carplay: &mut F) -> Result<()> {
-        self.note_frames(&chunk);
         if chunk.channel != frame::CMD {
             self.other_channel(chunk).await;
             return Ok(());
         }
         let Some(message) = frame::decode(frame::CMD, &chunk.body) else {
-            tracing::warn!("carlife.command_dropped reason=decode_failed");
+            tracing::warn!(
+                "carlife.command_dropped channel=cmd reason=decode_failed bytes={} body={}",
+                chunk.body.len(),
+                hex(&chunk.body)
+            );
             return Ok(());
         };
         if !frame::from_car(message.service_type) {
-            tracing::debug!(
-                "carlife.msg.ignored service_type={} reason=direction_bit_clear",
-                names::ServiceType(message.service_type)
-            );
+            self.unknown(&chunk, Some(message.service_type), "direction_bit_clear");
             return Ok(());
         }
 
@@ -1467,10 +1494,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     message.body.len()
                 );
             }
-            other => tracing::debug!(
-                "carlife.msg.ignored service_type={}",
-                names::ServiceType(other)
-            ),
+            other => self.unknown(&chunk, Some(other), "unhandled"),
         }
         Ok(())
     }
@@ -1610,15 +1634,15 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     /// has no meaning for is dropped with a line rather than guessed at.
     async fn other_channel(&mut self, chunk: frame::Chunk) {
         if chunk.channel != frame::TOUCH {
-            tracing::debug!(
-                "carlife.chunk_ignored channel={} bytes={}",
-                chunk.channel,
-                chunk.body.len()
-            );
+            self.unknown(&chunk, None, "channel_unread");
             return;
         }
         let Some(message) = frame::decode(frame::TOUCH, &chunk.body) else {
-            tracing::warn!("carlife.command_dropped channel=touch reason=decode_failed");
+            tracing::warn!(
+                "carlife.command_dropped channel=touch reason=decode_failed bytes={} body={}",
+                chunk.body.len(),
+                hex(&chunk.body)
+            );
             return;
         };
         let command = match message.service_type {
@@ -1635,16 +1659,16 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             TOUCH_HARD_KEY => match proto::decode_hard_key(&message.body) {
                 Some(key) => {
                     let command = command_for(key);
-                    // Only a key with nothing behind it is a line: a key that
-                    // became a command is followed by what that command did.
-                    if command.is_none() {
-                        tracing::debug!(
-                            "carlife.msg.recv service_type={} keycode={:#04x}({}) action=none",
-                            names::ServiceType(TOUCH_HARD_KEY),
-                            key,
-                            names::keycode(key)
-                        );
-                    }
+                    // Every press is a line, mapped or not: a panel key is the
+                    // one thing on the car's side this program decides what to
+                    // do with, and nothing else records that it was pressed.
+                    tracing::info!(
+                        "carlife.msg.recv service_type={} keycode={:#04x}({}) action={}",
+                        names::ServiceType(TOUCH_HARD_KEY),
+                        key,
+                        names::keycode(key),
+                        action_name(command)
+                    );
                     command
                 }
                 None => {
@@ -1656,10 +1680,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 }
             },
             other => {
-                tracing::debug!(
-                    "carlife.msg.ignored service_type={}",
-                    names::ServiceType(other)
-                );
+                self.unknown(&chunk, Some(other), "unhandled");
                 None
             }
         };
@@ -1991,12 +2012,13 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 });
                 // The phone decides when to send these, so how often it does —
                 // and what one costs across a pause or a drag — is not
-                // something this side can know any other way.
-                tracing::debug!(
-                    "carlife.media_position elapsed={} playing={moving} stated={}",
-                    position.elapsed_ms,
-                    position.playing.is_some()
-                );
+                // something this side can know any other way. Off for now: it
+                // arrives once a second for the length of a song.
+                // tracing::debug!(
+                //     "carlife.media_position elapsed={} playing={moving} stated={}",
+                //     position.elapsed_ms,
+                //     position.playing.is_some()
+                // );
                 // A change of play state is what the car's own pause and play
                 // messages are for, and the state of the module playing the
                 // song is the same news on the command channel. The phone
@@ -2432,10 +2454,10 @@ fn adopt_clock(epoch_ms: u64) {
     // SAFETY: `at` is this function's own, and `CLOCK_REALTIME` is the clock
     // `clock_settime` is defined for.
     if unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &at) } == 0 {
-        tracing::info!("clock.adopted source=car clock={}", clock(epoch_ms));
+        tracing::info!("carlife.clock.adopted source=car clock={}", clock(epoch_ms));
     } else {
         let e = std::io::Error::last_os_error();
-        tracing::warn!("clock.adopt_failed clock={} err={e}", clock(epoch_ms));
+        tracing::warn!("carlife.clock.adopt_failed clock={} err={e}", clock(epoch_ms));
     }
 }
 
@@ -2500,6 +2522,14 @@ mod tests {
         );
         assert_eq!(listed(&[9]), " moduleID_0=9(UNKNOWN)");
         assert_eq!(listed(&[]), "");
+    }
+
+    /// The bytes of a message nothing here can read are one run of hex, with no
+    /// separators to count past: what a person pastes into a decoder.
+    #[test]
+    fn a_body_is_written_as_one_run_of_hex() {
+        assert_eq!(hex(&[0x00, 0x01, 0xab, 0xff]), "0001abff");
+        assert_eq!(hex(&[]), "");
     }
 
     /// The other end of the pipe: enough of a car to walk the conversation, and
@@ -4933,6 +4963,35 @@ mod tests {
             0x04, 0x05, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x11, 0x12, 0x1D,
         ] {
             assert_eq!(command_for(key), None, "key {key:#04x}");
+        }
+    }
+
+    /// Every press is a line, so a key that became something has to be named as
+    /// that: `action=none` is what a key nothing uses says, and it must not be
+    /// what a key the phone answers says.
+    #[test]
+    fn a_key_is_named_by_what_it_became() {
+        for (key, said) in [
+            (KEY_MAIN, "home"),
+            (KEY_HOME, "home"),
+            (KEY_BACK, "back"),
+            (KEY_OK, "select"),
+            (KEY_MOVE_LEFT, "left"),
+            (KEY_MOVE_RIGHT, "right"),
+            (KEY_MOVE_UP, "up"),
+            (KEY_MOVE_DOWN, "down"),
+            (KEY_SELECTOR_NEXT, "down"),
+            (KEY_SEEK_SUB, "prev"),
+            (KEY_SEEK_ADD, "next"),
+            (KEY_MEDIA_START, "play"),
+            (KEY_MEDIA_STOP, "pause"),
+            (KEY_VR_START, "siri"),
+            (KEY_PHONE_CALL, "call"),
+            (KEY_PHONE_END, "hang_up"),
+            (KEY_MUTE, "mute"),
+            (0x04, "none"),
+        ] {
+            assert_eq!(action_name(command_for(key)), said, "key {key:#04x}");
         }
     }
 }

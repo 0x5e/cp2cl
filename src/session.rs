@@ -338,18 +338,17 @@ async fn attach(
             run_accessory(channel, signer, identity, cp, tx, feed).await
         });
 
-        let ended =
-            run_bringup(
-                "cp",
-                &short(&phone.id),
-                airplay_port,
-                None,
-                rx,
-                &mut changed,
-                panel,
-                status,
-            )
-                .await;
+        let ended = run_bringup(
+            &short(&phone.id),
+            "usb",
+            airplay_port,
+            None,
+            rx,
+            &mut changed,
+            panel,
+            status,
+        )
+        .await;
 
         // Neither half of the link may outlive this round. Aborting the session
         // drops its handle to the link, and the latch is what makes the driver's
@@ -377,10 +376,15 @@ async fn attach(
 
 /// Prints the progress of one iAP2 bringup, and says how it ended.
 ///
-/// Both transports run the same conversation, and differ only in the area their
-/// events are named under and in which events they can produce, so the loop
-/// lives here once. `ssid` is the network a wireless session tells the phone to
-/// join; the wired one never has that step and passes `None`.
+/// Three links run this same conversation — the cable, the Bluetooth channel a
+/// wireless phone is paged onto, and the data stream it moves that session onto
+/// afterwards — and they differ only in which events they can produce, so the
+/// loop lives here once. The name is the same for all three: this is the iAP2
+/// session, and `transport` is what says which link it is running on, since a
+/// wireless phone runs it twice and the log would otherwise say the same thing
+/// twice with nothing to tell the two apart. `ssid` is the network a wireless
+/// session tells the phone to join; the wired one never has that step and
+/// passes `None`.
 ///
 /// `changed` fires when what the phone should render has changed, which the
 /// caller turns into a new session.
@@ -392,8 +396,8 @@ async fn attach(
 /// `status` is told how far the conversation got, which is the only place any of
 /// these steps is known: see `crate::web::status`.
 pub(crate) async fn run_bringup(
-    area: &str,
     peer: &str,
+    transport: &str,
     airplay_port: u32,
     ssid: Option<&str>,
     mut rx: mpsc::Receiver<BringupEvent>,
@@ -419,34 +423,41 @@ pub(crate) async fn run_bringup(
         match event {
             Some(BringupEvent::Identified) => {
                 status.with(|s| s.carplay.identified = true);
-                tracing::info!("{area}.identified peer={peer}");
+                tracing::info!("carplay.iap2.identified peer={peer} transport={transport}");
             }
             Some(BringupEvent::Authenticated) => {
                 status.with(|s| s.carplay.authenticated = true);
-                tracing::info!("{area}.mfi_passed peer={peer}");
+                tracing::info!("carplay.iap2.mfi_passed peer={peer} transport={transport}");
             }
             Some(BringupEvent::Subscribed) => {
                 status.with(|s| s.carplay.subscribed = true);
-                tracing::info!("{area}.subscriptions_sent peer={peer}");
+                tracing::info!("carplay.iap2.subscriptions_sent peer={peer} transport={transport}");
             }
             Some(BringupEvent::WifiConfigSent) => {
                 if let Some(ssid) = ssid {
-                    tracing::info!("{area}.wifi_config_sent peer={peer} ssid={ssid:?}");
+                    tracing::info!(
+                        "carplay.iap2.wifi_config_sent peer={peer} transport={transport} \
+                         ssid={ssid:?}"
+                    );
                 }
             }
             Some(BringupEvent::CarPlayStartSent { ip }) => {
                 status.with(|s| s.carplay.advertised = Some(format!("{ip}:{airplay_port}")));
                 tracing::info!(
-                    "{area}.carplay_start_sent peer={peer} airplay={ip}:{airplay_port}"
+                    "carplay.iap2.carplay_start_sent peer={peer} transport={transport} \
+                     airplay={ip}:{airplay_port}"
                 );
             }
             Some(BringupEvent::Failed(reason)) => {
                 status.with(|s| s.carplay.failed = Some(reason.to_string()));
-                tracing::error!("{area}.session_failed peer={peer} reason={reason:?}");
+                tracing::error!(
+                    "carplay.iap2.session_failed peer={peer} transport={transport} \
+                     reason={reason:?}"
+                );
                 return Ended::Finished;
             }
             Some(BringupEvent::Closed) => {
-                tracing::info!("{area}.session_closed peer={peer}");
+                tracing::info!("carplay.iap2.session_closed peer={peer} transport={transport}");
                 return Ended::Finished;
             }
             // What the phone is playing, which the car's panel is owed. It is
@@ -693,14 +704,14 @@ impl Trace {
     fn inbound(&mut self, data: &[u8]) {
         self.chunks_in += 1;
         if self.chunks_in <= TRACE_CHUNKS {
-            tracing::debug!("link.frame_in bytes={} data={}", data.len(), hex(data));
+            tracing::debug!("carplay.iap2.frame_in bytes={} data={}", data.len(), hex(data));
         }
     }
 
     fn outbound(&mut self, data: &[u8]) {
         self.chunks_out += 1;
         if self.chunks_out <= TRACE_CHUNKS {
-            tracing::debug!("link.frame_out bytes={} data={}", data.len(), hex(data));
+            tracing::debug!("carplay.iap2.frame_out bytes={} data={}", data.len(), hex(data));
         }
     }
 }

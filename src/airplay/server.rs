@@ -365,7 +365,7 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
     let newest = Arc::new(AtomicU64::new(0));
     loop {
         if !*gate.borrow() {
-            tracing::info!("airplay.held reason=car_session_not_up");
+            tracing::info!("carplay.airplay.held reason=car_session_not_up");
             if gate.changed().await.is_err() {
                 return;
             }
@@ -376,12 +376,12 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                 let (socket, peer) = match accepted {
                     Ok(v) => v,
                     Err(e) => {
-                        tracing::warn!("airplay.accept_failed err={e}");
+                        tracing::warn!("carplay.airplay.accept_failed err={e}");
                         return;
                     }
                 };
                 let status = shared.status.clone();
-                tracing::info!("airplay.connected peer={peer}");
+                tracing::info!("carplay.airplay.connected peer={peer}");
                 status.with(|s| s.carplay.airplay.peer = Some(peer.to_string()));
                 shared.led.carplay(Carplay::Connecting);
                 let serial = newest.fetch_add(1, Ordering::SeqCst) + 1;
@@ -449,7 +449,7 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                         led,
                     };
                     if let Err(e) = session.run(socket).await {
-                        tracing::info!("airplay.ended peer={peer} err={e}");
+                        tracing::info!("carplay.airplay.ended peer={peer} err={e}");
                     }
                     // The connection is gone, and so is everything about it: a
                     // page still naming the last client's address, ports and
@@ -469,7 +469,7 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                     return;
                 }
                 if !*gate.borrow() {
-                    tracing::info!("airplay.closed reason=car_session_ended");
+                    tracing::info!("carplay.airplay.closed reason=car_session_ended");
                     let _ = shared.shutdown.send(());
                 }
             }
@@ -740,7 +740,7 @@ impl Session {
                 }
                 Wakeup::Restart => {
                     tracing::info!(
-                        "airplay.dropped peer={} reason=render_changed",
+                        "carplay.airplay.dropped peer={} reason=render_changed",
                         self.peer
                     );
                     self.close_streams().await;
@@ -749,7 +749,7 @@ impl Session {
                 // There is nothing left for the phone to send us: the session it
                 // was feeding is over on the other side of the bridge.
                 Wakeup::Shutdown => {
-                    tracing::info!("airplay.closed peer={} reason=car_session_over", self.peer);
+                    tracing::info!("carplay.airplay.closed peer={} reason=car_session_over", self.peer);
                     self.close_streams().await;
                     return Ok(());
                 }
@@ -773,14 +773,14 @@ impl Session {
                     // own without telling anyone what the screen is doing.
                     if self.newest.load(Ordering::SeqCst) != self.serial {
                         tracing::debug!(
-                            "airplay.retired peer={} reason=superseded",
+                            "carplay.airplay.retired peer={} reason=superseded",
                             self.peer
                         );
                         self.abandon_streams();
                         return Ok(());
                     }
                     tracing::info!(
-                        "airplay.silent peer={} idle_s={} action=new_session",
+                        "carplay.airplay.silent peer={} idle_s={} action=new_session",
                         self.peer,
                         PHONE_SILENT.as_secs()
                     );
@@ -790,7 +790,7 @@ impl Session {
                 }
             };
             if n == 0 {
-                tracing::info!("airplay.disconnected peer={}", self.peer);
+                tracing::info!("carplay.airplay.disconnected peer={}", self.peer);
                 // A phone that hung up has not necessarily left: the car's
                 // session is still up and this half is still open, but nothing
                 // will knock again on its own. So this ends like the silence
@@ -832,7 +832,7 @@ impl Session {
                         self.cipher_read = SymKey::from_bytes(&keys.control_read()).ok();
                         self.cipher_write = SymKey::from_bytes(&keys.control_write()).ok();
                         self.status.with(|s| s.carplay.airplay.encrypted = true);
-                        tracing::info!("airplay.encrypted channel=control");
+                        tracing::info!("carplay.airplay.encrypted channel=control");
                     }
                 }
 
@@ -892,7 +892,7 @@ impl Session {
                     &mut self.frame_buf,
                     &mut self.plain_buf,
                 ) {
-                    tracing::warn!("airplay.frame_open_failed ctr={} err={e}", self.read_ctr);
+                    tracing::warn!("carplay.airplay.frame_open_failed ctr={} err={e}", self.read_ctr);
                     return Err(e.into());
                 }
                 if let Some((request, used)) = rtsp::parse(&self.plain_buf)? {
@@ -916,7 +916,7 @@ impl Session {
         let chatty = req.method == "OPTIONS" || req.path.to_lowercase().ends_with("/feedback");
         if !chatty {
             tracing::info!(
-                "airplay.request_in method={} path={} bytes={}",
+                "carplay.airplay.request_in method={} path={} bytes={}",
                 req.method,
                 req.path,
                 req.body.len()
@@ -927,7 +927,7 @@ impl Session {
             Ok(response) => response,
             Err(e) => {
                 tracing::warn!(
-                    "airplay.request_failed method={} path={} err={e}",
+                    "carplay.airplay.request_failed method={} path={} err={e}",
                     req.method,
                     req.path
                 );
@@ -946,7 +946,7 @@ impl Session {
             "GET" if path == "/info" => self.info(),
             "SETUP" => self.setup(req).await,
             "RECORD" => {
-                tracing::info!("airplay.media_live");
+                tracing::info!("carplay.airplay.media_live");
                 Ok(Response::new(200))
             }
             // Worth reading: the phone usually names the streams it is dropping,
@@ -1020,7 +1020,7 @@ impl Session {
         // H.264 is the only family on offer: CarLife carries an elementary
         // stream and its head units decode `video/avc`.
         tracing::info!(
-            "airplay.info_answered width={width} height={height} fps={fps} ppi={ppi} codec={}",
+            "carplay.airplay.info_answered width={width} height={height} fps={fps} ppi={ppi} codec={}",
             screen::CODEC
         );
         Ok(Response::new(200).plist(plist))
@@ -1050,10 +1050,10 @@ impl Session {
             .unwrap_or("");
         match dict.get("type").and_then(|v| v.as_string()) {
             Some("requestUI") if url == "videoplayback:" => {
-                tracing::info!("airplay.request_ui url={url:?} action=not_handled")
+                tracing::info!("carplay.airplay.request_ui url={url:?} action=not_handled")
             }
             Some("requestUI") => {
-                tracing::info!("airplay.request_ui action=ask_car_for_desktop");
+                tracing::info!("carplay.airplay.request_ui action=ask_car_for_desktop");
                 // Nobody to tell is not a failure: the car may have gone.
                 let _ = self.desktop.send(());
             }
@@ -1062,7 +1062,7 @@ impl Session {
                     .and_then(|p| p.get("urls"))
                     .and_then(|v| v.as_array())
                     .map_or(0, Vec::len);
-                tracing::info!("airplay.suggest_ui urls={urls} shown=false");
+                tracing::info!("carplay.airplay.suggest_ui urls={urls} shown=false");
             }
             // The phone's own iAP2 session, arriving down the event channel
             // instead of the data stream. The reference accepts both, and the
@@ -1075,14 +1075,14 @@ impl Session {
                     .map(|d| d.to_vec());
                 match (data, self.tunnel.as_ref()) {
                     (Some(data), Some(tunnel)) => {
-                        tracing::debug!("airplay.iap_message_in bytes={}", data.len());
+                        tracing::debug!("carplay.airplay.iap_message_in bytes={}", data.len());
                         tunnel.feed(data);
                     }
                     (Some(_), None) => {
-                        tracing::warn!("airplay.iap_message_ignored reason=no_tunnel")
+                        tracing::warn!("carplay.airplay.iap_message_ignored reason=no_tunnel")
                     }
                     (None, _) => {
-                        tracing::warn!("airplay.iap_message_ignored reason=no_data")
+                        tracing::warn!("carplay.airplay.iap_message_ignored reason=no_data")
                     }
                 }
             }
@@ -1100,7 +1100,7 @@ impl Session {
                 match mac_of(named, phone.as_deref()) {
                     Some(mac) => {
                         tracing::info!(
-                            "wireless.bt_disconnecting mac={mac} reason=disable_bluetooth"
+                            "bt.disconnecting mac={mac} reason=disable_bluetooth"
                         );
                         let adapter = self.cfg.bt_adapter.clone();
                         // Not awaited: the phone does not wait for this answer
@@ -1110,13 +1110,13 @@ impl Session {
                             if let Err(e) = crate::wireless::disconnect_phone(&mac, &adapter).await
                             {
                                 tracing::warn!(
-                                    "wireless.bt_disconnect_failed mac={mac} err={e}"
+                                    "bt.disconnect_failed mac={mac} err={e}"
                                 );
                             }
                         });
                     }
                     None => tracing::warn!(
-                        "wireless.bt_disconnect_skipped reason=no_address device={named:?}"
+                        "bt.disconnect_skipped reason=no_address device={named:?}"
                     ),
                 }
             }
@@ -1134,9 +1134,9 @@ impl Session {
     /// request it belongs to is on the line before, so the path is not repeated.
     fn describe(body: &[u8]) {
         match Self::plist_body(body) {
-            Ok(dict) => tracing::info!("airplay.body json={}", to_json(&dict)),
+            Ok(dict) => tracing::info!("carplay.airplay.body json={}", to_json(&dict)),
             Err(e) => tracing::warn!(
-                "airplay.body_unparsed err={e} bytes={} data={}",
+                "carplay.airplay.body_unparsed err={e} bytes={} data={}",
                 body.len(),
                 hex::encode(&body[..body.len().min(24)])
             ),
@@ -1150,12 +1150,12 @@ impl Session {
     async fn teardown(&mut self, req: &Request) {
         let named = match Self::plist_body(&req.body) {
             Ok(dict) => {
-                tracing::info!("airplay.body json={}", to_json(&dict));
+                tracing::info!("carplay.airplay.body json={}", to_json(&dict));
                 dict.get("streams").and_then(|v| v.as_array()).cloned()
             }
             Err(e) => {
                 tracing::warn!(
-                    "airplay.body_unparsed err={e} bytes={} data={}",
+                    "carplay.airplay.body_unparsed err={e} bytes={} data={}",
                     req.body.len(),
                     hex::encode(&req.body[..req.body.len().min(24)])
                 );
@@ -1169,7 +1169,7 @@ impl Session {
             .filter_map(|s| s.as_dictionary()?.get("type")?.as_signed_integer())
         {
             self.close_stream(stream_type).await;
-            tracing::info!("airplay.stream_torn_down stream={stream_type}");
+            tracing::info!("carplay.airplay.stream_torn_down stream={stream_type}");
         }
     }
 
@@ -1212,7 +1212,7 @@ impl Session {
         // which is what lets Bluetooth be paged again.
         if stream_type == 130 {
             if self.tunnel.take().is_some() {
-                tracing::info!("airplay.iap_tunnel_torn_down");
+                tracing::info!("carplay.airplay.iap_tunnel_torn_down");
             }
             return;
         }
@@ -1228,7 +1228,7 @@ impl Session {
             self.pumps.remove(&stream_type);
         }
         let Some(connection_id) = closed else {
-            tracing::debug!("airplay.stream_already_gone stream={stream_type}");
+            tracing::debug!("carplay.airplay.stream_already_gone stream={stream_type}");
             return;
         };
         self.audio_clock
@@ -1276,7 +1276,7 @@ impl Session {
         // change — it is otherwise once-a-second chatter like the request.
         let summary = clock.summary();
         if self.feedback_log != summary {
-            tracing::info!("airplay.feedback_streams summary={summary:?}");
+            tracing::info!("carplay.airplay.feedback_streams summary={summary:?}");
             self.feedback_log = summary;
         }
         Ok(Response::new(200).plist(plist))
@@ -1299,7 +1299,7 @@ impl Session {
             self.keys = Some(keys);
             self.event_sink.set_key(keys.events_write()).await;
             self.status.with(|s| s.carplay.airplay.verified = true);
-            tracing::info!("pairing.verified");
+            tracing::info!("carplay.pairing.verified");
         }
         Ok(Response::new(200)
             .header("Content-Type", PAIRING_CONTENT_TYPE)
@@ -1349,7 +1349,7 @@ impl Session {
         let enc_sig = aes_ctr128(&aes_key[..16], &aes_iv[..16], &sig);
 
         tracing::info!(
-            "airplay.auth_setup_signed cert_bytes={} sig_bytes={} digest=sha{}",
+            "carplay.airplay.auth_setup_signed cert_bytes={} sig_bytes={} digest=sha{}",
             cert.len(),
             enc_sig.len(),
             if major == 2 { 1 } else { 256 }
@@ -1370,7 +1370,7 @@ impl Session {
         let dict = Self::plist_body(&req.body)?;
         // The whole body and nothing else: the keys were a table of contents for
         // a body nobody could see, and the body is short enough to print.
-        tracing::info!("airplay.body json={}", to_json(&dict));
+        tracing::info!("carplay.airplay.body json={}", to_json(&dict));
         let has_streams = dict
             .get("streams")
             .and_then(|v| v.as_array())
@@ -1415,7 +1415,7 @@ impl Session {
             let Ok((socket, peer)) = listener.accept().await else {
                 return;
             };
-            tracing::info!("event.channel_opened peer={peer}");
+            tracing::info!("carplay.event.channel_opened peer={peer}");
             event_status.with(|s| s.carplay.airplay.event_port = Some(event_port));
             // Input is latency-sensitive and always written in pairs. With Nagle
             // on, a Wi-Fi link holds the second report until the first is acked
@@ -1454,7 +1454,7 @@ impl Session {
             s.carplay.airplay.event_port = Some(event_port);
             s.carplay.airplay.timing_port = Some(timing_port);
         });
-        tracing::info!("airplay.setup_answered event_port={event_port}");
+        tracing::info!("carplay.airplay.setup_answered event_port={event_port}");
         Ok(Response::new(200).plist(plist))
     }
 
@@ -1493,7 +1493,7 @@ impl Session {
                         let Ok((socket, _)) = listener.accept().await else {
                             return;
                         };
-                        tracing::info!("video.stream_attached");
+                        tracing::info!("carplay.video.stream_attached");
                         status.with(|s| s.carplay.video.active = true);
                         // The phone's screen is arriving, which is as far as
                         // this side of the bridge gets on its own: the light
@@ -1559,9 +1559,9 @@ impl Session {
                     // The whole table, because the codec's own name for a stream
                     // can be as much as 8% away from the rate it carries, and a
                     // field naming the rate outright would settle it.
-                    tracing::debug!("audio.setup_table stream={stream_type} table={table:?}");
+                    tracing::debug!("carplay.audio.setup_table stream={stream_type} table={table:?}");
                     tracing::info!(
-                        "audio.stream_ready stream={stream_type} type={audio_type:?} \
+                        "carplay.audio.stream_ready stream={stream_type} type={audio_type:?} \
                          format=0x{fmt:x} codec={codec:?} frames_per_packet={frames_per_packet} \
                          latency_ms={latency}"
                     );
@@ -1634,7 +1634,7 @@ impl Session {
                         connection_id: stream_id,
                     };
                     let task = tokio::spawn(async move {
-                        tracing::info!("audio.stream_attached");
+                        tracing::info!("carplay.audio.stream_attached");
                         Self::pump_audio(socket, key, stream, &name, codec, sink, clock, id, status)
                             .await;
                     });
@@ -1643,7 +1643,7 @@ impl Session {
                     let control = match UdpSocket::bind(("::", 0)).await {
                         Ok(s) => Some(s),
                         Err(e) => {
-                            tracing::warn!("audio.control_port_unbound err={e}");
+                            tracing::warn!("carplay.audio.control_port_unbound err={e}");
                             None
                         }
                     };
@@ -1694,7 +1694,7 @@ impl Session {
                             entry.insert("dataPort".into(), Value::Integer((port as i64).into()));
                         }
                         Err(why) => {
-                            tracing::warn!("airplay.iap_tunnel_skipped reason={why}");
+                            tracing::warn!("carplay.airplay.iap_tunnel_skipped reason={why}");
                             entry.insert("dataPort".into(), Value::Integer(UNUSED_PORT.into()));
                         }
                     }
@@ -1767,7 +1767,7 @@ impl Session {
         let key = match SymKey::from_bytes(&keys.media_input(stream_id as u64)) {
             Ok(key) => key,
             Err(e) => {
-                tracing::warn!("mic.key_unusable stream={stream_id} err={e}");
+                tracing::warn!("carplay.mic.key_unusable stream={stream_id} err={e}");
                 return;
             }
         };
@@ -1784,7 +1784,7 @@ impl Session {
                     });
                 });
                 tracing::info!(
-                    "mic.uplink_open peer={peer} codec={:?} rate_hz={} channels={} \
+                    "carplay.mic.uplink_open peer={peer} codec={:?} rate_hz={} channels={} \
                      samples_per_packet={}",
                     config.codec,
                     config.sample_rate,
@@ -1792,7 +1792,7 @@ impl Session {
                     config.samples_per_packet
                 );
             }
-            Err(e) => tracing::warn!("mic.uplink_failed peer={peer} err={e}"),
+            Err(e) => tracing::warn!("carplay.mic.uplink_failed peer={peer} err={e}"),
         }
     }
 
@@ -1833,12 +1833,12 @@ impl Session {
         let mut frames: u64 = 0;
         loop {
             if let Err(e) = socket.read_exact(&mut header).await {
-                ended("video", "header", &e);
+                ended("carplay.video", "header", &e);
                 break;
             }
             let len = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
             if len > 8 * 1024 * 1024 {
-                tracing::warn!("video.frame_rejected len={len} reason=implausible");
+                tracing::warn!("carplay.video.frame_rejected len={len} reason=implausible");
                 break;
             }
             // KeepAlive, ForceKeyFrame and friends carry no payload at all.
@@ -1849,7 +1849,7 @@ impl Session {
             }
             let mut body = vec![0u8; len];
             if let Err(e) = socket.read_exact(&mut body).await {
-                ended("video", "body", &e);
+                ended("carplay.video", "body", &e);
                 break;
             }
             // The codec description is the one message that says which profile
@@ -1867,7 +1867,7 @@ impl Session {
         // the socket, and the codec description and the keepalives are messages
         // too. Only the second is pictures.
         tracing::info!(
-            "video.stream_closed messages={frames} frames={}",
+            "carplay.video.stream_closed messages={frames} frames={}",
             rx.frames()
         );
         status.with(|s| {
@@ -1943,7 +1943,7 @@ impl Session {
                         // UDP has no end of file, so anything here is the socket
                         // itself failing — worth a line, unlike a close.
                         Err(e) => {
-                            tracing::warn!("audio.stream_recv_failed stream={} err={}", name, e);
+                            tracing::warn!("carplay.audio.stream_recv_failed stream={} err={}", name, e);
                             break;
                         }
                     };
@@ -1987,11 +1987,11 @@ impl Session {
                     }
                     packets += 1;
                     // Once, and only to settle a question: if this appears right
-                    // after `audio.stream_attached` but sound comes seconds
+                    // after `carplay.audio.stream_attached` but sound comes seconds
                     // later, the wait is in the player. If this line itself is
                     // late, the wait was the phone opening the audio stream.
                     if packets == 1 {
-                        tracing::debug!("audio.first_packet");
+                        tracing::debug!("carplay.audio.first_packet");
                     }
                 }
             }
@@ -2001,7 +2001,7 @@ impl Session {
         // in `/feedback` is one the phone keeps asking about.
         clock.lock().await.close(id);
         sink.push(StreamEvent::AudioStopped { stream });
-        tracing::info!("audio.stream_closed packets={packets} missing={missing}");
+        tracing::info!("carplay.audio.stream_closed packets={packets} missing={missing}");
         // The counters only exist here, and the stream is over, so this is the
         // last moment they can be reported at all.
         status.with(|s| {
@@ -2106,7 +2106,7 @@ impl Session {
             target.set_port(p);
             let tx = socket.clone();
             let tx_clock = self.timing.clone();
-            tracing::info!("clock.driving target={target}");
+            tracing::info!("carlife.clock.driving target={target}");
             let ticker = tokio::spawn(async move {
                 let mut tick = tokio::time::interval(Duration::from_secs(1));
                 loop {

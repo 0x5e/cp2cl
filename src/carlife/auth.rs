@@ -72,7 +72,7 @@ impl Signer {
             Ok(pem) => Self::from_pem(&pem),
             Err(e) => {
                 tracing::warn!(
-                    "auth.key_missing file={} err={e:#} consequence=carlife_auth_skipped",
+                    "carlife.auth.key_missing file={} err={e:#} consequence=carlife_auth_skipped",
                     path.display()
                 );
                 None
@@ -86,7 +86,7 @@ impl Signer {
     /// CarLife side unable to answer a challenge.
     pub fn from_pem(pem: &str) -> Option<Self> {
         let Some(der) = pem_body(pem) else {
-            tracing::warn!("auth.key_unreadable reason=no_pem");
+            tracing::warn!("carlife.auth.key_unreadable reason=no_pem");
             return None;
         };
         // Either shape of private key file will do: the PKCS#8 one a key
@@ -97,11 +97,11 @@ impl Signer {
             .ok();
         let Some(key) = key else {
             tracing::warn!(
-                "auth.key_unreadable reason=not_rsa consequence=challenge_unanswered"
+                "carlife.auth.key_unreadable reason=not_rsa consequence=challenge_unanswered"
             );
             return None;
         };
-        tracing::info!("auth.key_loaded bits={}", key.size() * 8);
+        tracing::info!("carlife.auth.key_loaded bits={}", key.size() * 8);
         Some(Self { key })
     }
 
@@ -123,7 +123,7 @@ impl Signer {
         match self.key.sign(Pkcs1v15Sign::new_unprefixed(), text.as_bytes()) {
             Ok(answer) => Some(BASE64.encode(answer)),
             Err(e) => {
-                tracing::warn!("auth.challenge_unanswered err={e}");
+                tracing::warn!("carlife.auth.challenge_unanswered err={e}");
                 None
             }
         }
@@ -146,12 +146,12 @@ impl Signer {
 /// and the car accepts the challenge back in both cases.
 fn answer_text(challenge: &str) -> String {
     let Some((head, version)) = challenge.split_once('_') else {
-        tracing::debug!("auth.challenge_version_missing action=answer_as_is");
+        tracing::debug!("carlife.auth.challenge_version_missing action=answer_as_is");
         return challenge.to_string();
     };
     let Some(theirs) = version_of(version) else {
         tracing::debug!(
-            "auth.challenge_version_unparsed version={version:?} action=answer_as_is"
+            "carlife.auth.challenge_version_unparsed version={version:?} action=answer_as_is"
         );
         return challenge.to_string();
     };
@@ -161,7 +161,7 @@ fn answer_text(challenge: &str) -> String {
             // only newer versions is a car that will not accept the answer, and
             // this line is what says why.
             tracing::info!(
-                "auth.car_version_too_new car={version} claimed={}.{}.{} action=answer_as_older",
+                "carlife.auth.car_version_too_new car={version} claimed={}.{}.{} action=answer_as_older",
                 CLAIMED_VERSION[0],
                 CLAIMED_VERSION[1],
                 CLAIMED_VERSION[2]

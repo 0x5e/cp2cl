@@ -88,9 +88,9 @@ pub(super) async fn guard(conn: Connection, adapter: String, handover: Arc<Hando
                 off = off_wanted;
                 complained = false;
                 if off_wanted {
-                    tracing::info!("wireless.bt_off adapter={adapter} reason=carplay_on_wifi");
+                    tracing::info!("bt.off adapter={adapter} reason=carplay_on_wifi");
                 } else {
-                    tracing::info!("wireless.bt_on adapter={adapter} reason=carplay_over");
+                    tracing::info!("bt.on adapter={adapter} reason=carplay_over");
                 }
             }
             Err(e) => {
@@ -99,7 +99,7 @@ pub(super) async fn guard(conn: Connection, adapter: String, handover: Arc<Hando
                 let powered = !off_wanted;
                 if complained {
                     tracing::debug!(
-                        "wireless.bt_set_failed adapter={adapter} powered={powered} err={e}"
+                        "bt.set_failed adapter={adapter} powered={powered} err={e}"
                     );
                 } else {
                     complained = true;
@@ -109,7 +109,7 @@ pub(super) async fn guard(conn: Connection, adapter: String, handover: Arc<Hando
                         "phone_cannot_be_paged_back"
                     };
                     tracing::warn!(
-                        "wireless.bt_set_failed adapter={adapter} powered={powered} err={e} \
+                        "bt.set_failed adapter={adapter} powered={powered} err={e} \
                          consequence={consequence}"
                     );
                 }
@@ -144,7 +144,7 @@ async fn bring_back(conn: &Connection, path: &str) -> Result<(), zbus::Error> {
     set(conn, path, "Powered", Value::from(true)).await?;
     for prop in ["Discoverable", "Pairable"] {
         if let Err(e) = set(conn, path, prop, Value::from(true)).await {
-            tracing::warn!("wireless.bt_prop_failed prop={prop} err={e}");
+            tracing::warn!("bt.prop_failed prop={prop} err={e}");
         }
     }
     Ok(())
