@@ -5,8 +5,9 @@
 //! these. `event.rs` is the only place that knows how each one reaches the phone.
 //!
 //! The CarLife protocol has no control that means `Wheel`, `KeyFrame` or `Night`
-//! — a head unit sends panel keys and touch, and those three are the Android Auto
-//! bridge's and the operator's — which is what the allow below is for.
+//! — a head unit sends panel keys and touch. `Night` is the operator's and
+//! `KeyFrame` is the session asking for a picture it can start again from; the
+//! allow below is for the wheel, which nothing here builds.
 #![allow(dead_code)]
 
 /// One finger in a touch report, in the display's own pixel space.

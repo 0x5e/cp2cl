@@ -128,10 +128,11 @@ pub struct StreamId {
 /// started, and a consumer has to know where to put them.
 ///
 /// Not all of it has a reader: the car takes the frames and the sound, and has
-/// no use for the keyframe flag — what it reads is an elementary stream, where
-/// the frames say for themselves what they are — nor for whether the screen
-/// stream is up, which the video channel says by going quiet. Both are carried
-/// for whoever does need them, which is what the allow is for.
+/// no use for whether the screen stream is up, which the video channel says by
+/// going quiet. That one is carried for whoever does need it, which is what the
+/// allow is for. The keyframe flag is not spare: `AccessUnit` carries it to the
+/// session, which is what decides where to start again after a write is given
+/// up.
 #[allow(dead_code)]
 #[derive(Debug)]
 pub enum StreamEvent {
@@ -177,6 +178,17 @@ pub enum StreamEvent {
 /// once instead of forever.
 pub trait MediaSink: Send + Sync {
     fn push(&self, event: StreamEvent);
+}
+
+/// One access unit on its way to the car, and whether it opens on an IDR.
+///
+/// The flag is what a channel that has fallen behind starts again from. A
+/// decoder handed the middle of a group of pictures has nothing to reference
+/// and draws noise until the next keyframe.
+#[derive(Debug)]
+pub struct AccessUnit {
+    pub keyframe: bool,
+    pub data: Vec<u8>,
 }
 
 /// One thing on its way to the car's media channel, which is where the phone's
@@ -280,8 +292,8 @@ const CL_BACKLOG: usize = 8;
 /// those and gives them back on exactly these terms, and nothing about that
 /// changes for them being records rather than streams.
 pub struct ClOutlet {
-    video_tx: mpsc::Sender<Vec<u8>>,
-    video_rx: Mutex<Option<mpsc::Receiver<Vec<u8>>>>,
+    video_tx: mpsc::Sender<AccessUnit>,
+    video_rx: Mutex<Option<mpsc::Receiver<AccessUnit>>>,
     media_tx: mpsc::Sender<Media>,
     media_rx: Mutex<Option<mpsc::Receiver<Media>>>,
     navi_tx: mpsc::Sender<Navi>,
@@ -290,6 +302,10 @@ pub struct ClOutlet {
     playing_rx: Mutex<Option<mpsc::Receiver<Playing>>>,
     guidance_tx: mpsc::Sender<Guidance>,
     guidance_rx: Mutex<Option<mpsc::Receiver<Guidance>>>,
+    /// Whether the phone's screen stream is up. Written by the sink, which is
+    /// what sees it open and close, and read by the session, which asks the
+    /// phone for a keyframe only while there is a stream to ask on.
+    screen: Arc<AtomicBool>,
 }
 
 impl ClOutlet {
@@ -310,6 +326,7 @@ impl ClOutlet {
             playing_rx: Mutex::new(Some(playing_rx)),
             guidance_tx,
             guidance_rx: Mutex::new(Some(guidance_rx)),
+            screen: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -337,17 +354,25 @@ impl ClOutlet {
             navi_behind: AtomicBool::new(false),
             playing_dropped: AtomicBool::new(false),
             guidance_dropped: AtomicBool::new(false),
+            screen: self.screen.clone(),
         })
+    }
+
+    /// Whether the phone's screen stream is up, as the sink keeps it. The session
+    /// reads it before asking the phone for anything: there is nothing to ask
+    /// while no stream is open.
+    pub fn screen_up(&self) -> Arc<AtomicBool> {
+        self.screen.clone()
     }
 
     /// The video half, for the CarLife session. One car, one owner: a second
     /// call gets nothing.
-    pub fn take_video(&self) -> Option<mpsc::Receiver<Vec<u8>>> {
+    pub fn take_video(&self) -> Option<mpsc::Receiver<AccessUnit>> {
         self.video_rx.lock().ok()?.take()
     }
 
     /// Given back when a session ends so the next one can use it.
-    pub fn return_video(&self, rx: mpsc::Receiver<Vec<u8>>) {
+    pub fn return_video(&self, rx: mpsc::Receiver<AccessUnit>) {
         if let Ok(mut guard) = self.video_rx.lock() {
             *guard = Some(rx);
         }
@@ -428,7 +453,7 @@ fn starve(slot: &Mutex<Option<StreamId>>, stream: StreamId) -> bool {
 
 /// Where the CarPlay streams go when the car is the one reading them.
 pub struct ClSink {
-    video: mpsc::Sender<Vec<u8>>,
+    video: mpsc::Sender<AccessUnit>,
     media: mpsc::Sender<Media>,
     navi: mpsc::Sender<Navi>,
     playing: mpsc::Sender<Playing>,
@@ -455,6 +480,9 @@ pub struct ClSink {
     playing_dropped: AtomicBool,
     /// And once for where it is going, which is dropped the same way.
     guidance_dropped: AtomicBool,
+    /// Whether the phone's screen stream is up, which is the same flag the
+    /// session reads through `ClOutlet::screen_up`.
+    screen: Arc<AtomicBool>,
 }
 
 impl ClSink {
@@ -485,10 +513,10 @@ impl ClSink {
     }
 
     /// The video channel's half of the above, which is most of the callers.
-    fn send_video(&self, access_unit: Vec<u8>) {
+    fn send_video(&self, unit: AccessUnit) {
         Self::send(
             &self.video,
-            access_unit,
+            unit,
             "video",
             &self.no_video_reader,
             &self.video_behind,
@@ -558,14 +586,17 @@ impl MediaSink for ClSink {
                     }
                 }
             }
-            StreamEvent::VideoFrame { data, .. } => {
+            StreamEvent::VideoFrame { keyframe, data } => {
                 let mut access_unit = self
                     .pending
                     .lock()
                     .map(|mut pending| std::mem::take(&mut *pending))
                     .unwrap_or_default();
                 access_unit.extend_from_slice(&data);
-                self.send_video(access_unit);
+                self.send_video(AccessUnit {
+                    keyframe,
+                    data: access_unit,
+                });
             }
             // Which of the car's channels a stream feeds is said once, when the
             // stream opens, and by the name the phone gave it.
@@ -631,8 +662,12 @@ impl MediaSink for ClSink {
                 }
             }
             // The car learns nothing from this: it is the video channel that
-            // tells it whether there is a picture.
-            StreamEvent::ScreenActive(_) => {}
+            // tells it whether there is a picture. It is kept for the other side
+            // of the bridge: a keyframe can only be asked for while a stream is
+            // open, and this is where that is known.
+            StreamEvent::ScreenActive(up) => {
+                self.screen.store(up, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -810,5 +845,21 @@ mod tests {
                 "0x{bits:x}"
             );
         }
+    }
+
+    /// The stream's own state is what the session reads before asking the phone
+    /// for a keyframe, and the sink is what sees the stream open and close.
+    #[test]
+    fn the_screen_stream_is_up_for_exactly_as_long_as_it_is_open() {
+        let outlet = ClOutlet::new();
+        let sink = outlet.sink();
+        let up = outlet.screen_up();
+        let now = || up.load(std::sync::atomic::Ordering::Relaxed);
+
+        assert!(!now(), "nothing is open yet");
+        sink.push(StreamEvent::ScreenActive(true));
+        assert!(now());
+        sink.push(StreamEvent::ScreenActive(false));
+        assert!(!now(), "a stream that closed is not open");
     }
 }

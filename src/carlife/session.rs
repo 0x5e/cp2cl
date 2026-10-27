@@ -39,7 +39,7 @@ use crate::commands::{Command, TouchContact, PHONE_DROP, PHONE_HOOK_SWITCH, PHON
 use crate::config::{bt_address, Config};
 use crate::navigation::{turn_kind, Guidance};
 use crate::playing::{Playing, Track};
-use crate::sink::{ClOutlet, Media, Navi};
+use crate::sink::{AccessUnit, ClOutlet, Media, Navi};
 use crate::web::{Size, Statistic, Status};
 
 // What the car sends, by name — the numbers are CarLifeVehicleLib's
@@ -148,6 +148,25 @@ const PROBE_QUIET: Duration = Duration::from_secs(2);
 /// How long the probe's write is waited on. A host that is reading the endpoint
 /// takes it in one transfer; one that is not never does.
 const PROBE_WAIT: Duration = Duration::from_secs(1);
+
+/// How long a write on the video channel is waited on before it is given up.
+///
+/// A write completes once the host has read the endpoint, and a car that has
+/// left the CarLife interface stops reading. Waiting for ever would hold the
+/// whole session, the command channel with it, for as long as the car is away.
+/// Six frame periods at 30 fps: a write still outstanding after that is not a
+/// slow one.
+const VIDEO_WRITE_WAIT: Duration = Duration::from_millis(200);
+
+/// How long a write on the video channel may take before it is worth a line.
+const SLOW_WRITE: Duration = Duration::from_millis(100);
+
+/// How often the phone may be asked for a keyframe.
+///
+/// A channel that keeps timing out would ask once per frame, and every one of
+/// those is a request the phone answers by encoding a picture that cannot be
+/// delivered either.
+const KEYFRAME_INTERVAL: Duration = Duration::from_secs(2);
 
 /// How long silence on the navigation channel may last before the car is told
 /// the prompt is over.
@@ -353,6 +372,13 @@ where
     // session was showing belongs to a car that is no longer here, and the page
     // would otherwise go on showing it.
     status.now_playing_cleared();
+    // Whether the phone has a screen stream open, which is what decides whether
+    // a keyframe can be asked for at all. It is the sink's flag, shared rather
+    // than copied: the stream opens and closes on the other side of the bridge.
+    let stream_up = match frames {
+        Frames::Live(outlet) => Some(outlet.screen_up()),
+        _ => None,
+    };
     let (mut video, mut media, mut navi, mut playing, mut guidance, source) = match frames {
         Frames::Live(outlet) => match outlet.take_video() {
             Some(rx) => (
@@ -414,6 +440,9 @@ where
         screen_in_force: None,
         panel: info::Panel::default(),
         started_at: None,
+        awaiting_keyframe: false,
+        keyframe_asked: None,
+        stream_up,
         media_format: None,
         navi_format: None,
         navi_open: false,
@@ -737,7 +766,7 @@ fn listed(modules: &[i32]) -> String {
 /// The next access unit from the CarPlay side, or never if there is no CarPlay
 /// side. Waiting on a future that never resolves is what keeps the branch out of
 /// the way without a second code path in the loop.
-async fn recv_video(video: &mut Option<mpsc::Receiver<Vec<u8>>>) -> Option<Vec<u8>> {
+async fn recv_video(video: &mut Option<mpsc::Receiver<AccessUnit>>) -> Option<AccessUnit> {
     match video {
         Some(rx) => rx.recv().await,
         None => std::future::pending().await,
@@ -834,6 +863,18 @@ struct Session<'a, W> {
     /// When the encoder started, which is what the video channel's timestamps
     /// are measured from.
     started_at: Option<Instant>,
+    /// Whether the channel is waiting to start again from a keyframe. Set when
+    /// a write is given up, cleared by the keyframe that goes out after it.
+    /// Everything in between references a picture the car never decoded.
+    awaiting_keyframe: bool,
+    /// Whether the phone has a screen stream open, when there is a phone behind
+    /// this session at all. Read before a keyframe is asked for: with no stream
+    /// there is nothing to ask, and a stream that opens later begins with a
+    /// keyframe of its own.
+    stream_up: Option<Arc<AtomicBool>>,
+    /// When the phone was last asked for a keyframe. Nothing is asked for while
+    /// this is younger than `KEYFRAME_INTERVAL`.
+    keyframe_asked: Option<Instant>,
     /// The format the car has been told the media channel's samples are in, once
     /// it has been told. A stream that opens with the same one is not worth a
     /// second message: nothing about it has changed.
@@ -1373,6 +1414,13 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // phone's second `FOREGROUND` came with this message, in the same
                 // millisecond the car started it.
                 self.send(FOREGROUND, &[]).await?;
+                // The car starts the encoder again when it comes back to the
+                // interface, and whatever decodes from here is a new decoder
+                // with no picture behind it. A keyframe is asked for so the
+                // first thing it draws is a whole one. A session's first start
+                // is not that case and costs nothing here: the phone has no
+                // stream open yet, which is what `request_keyframe` checks.
+                self.request_keyframe().await;
             }
             HU_VIDEO_ENCODER_PAUSE | HU_VIDEO_ENCODER_RESET => {
                 tracing::info!(
@@ -1776,12 +1824,24 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     .map_or(true, |touched| touched.elapsed() >= HEARTBEAT);
                 if idle {
                     self.channel_touched = Some(Instant::now());
-                    self.send(VIDEO_HEARTBEAT, &[]).await
+                    self.send_heartbeat().await
                 } else {
                     Ok(())
                 }
             }
-            _ => self.send(VIDEO_HEARTBEAT, &[]).await,
+            _ => self.send_heartbeat().await,
+        }
+    }
+
+    /// A heartbeat on the video channel, given up if the car has stopped
+    /// reading.
+    ///
+    /// Losing one is not worth a line of its own: a car that is not reading is
+    /// not waiting for it, and the frame path is where that is reported.
+    async fn send_heartbeat(&mut self) -> Result<()> {
+        match self.video_write(VIDEO_HEARTBEAT, 0, &[]).await {
+            Some(written) => written,
+            None => Ok(()),
         }
     }
 
@@ -1831,13 +1891,110 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     /// has it paused, is dropped rather than queued: the car is not expecting
     /// pictures then, and one held back would arrive attached to a timestamp
     /// measured from a start that has since been reset.
-    async fn send_video(&mut self, access_unit: Vec<u8>) -> Result<()> {
+    ///
+    /// A frame that is not a keyframe is dropped while the channel is waiting to
+    /// start again, and the phone is asked for one it can start from. The car's
+    /// decoder has lost the pictures the frame references, so sending it costs a
+    /// corrupt picture and buys nothing.
+    async fn send_video(&mut self, unit: AccessUnit) -> Result<()> {
         let Some(started_at) = self.started_at else {
             return Ok(());
         };
+        if self.awaiting_keyframe && !unit.keyframe {
+            self.request_keyframe().await;
+            return Ok(());
+        }
         let timestamp_ms = started_at.elapsed().as_millis() as u32;
         self.channel_touched = Some(Instant::now());
-        self.send_frame(VIDEO_DATA, timestamp_ms, &access_unit).await
+        match self.video_write(VIDEO_DATA, timestamp_ms, &unit.data).await {
+            Some(written) => {
+                self.awaiting_keyframe = false;
+                written
+            }
+            // The car stopped reading. The frame is left where it is and the
+            // channel starts again from a keyframe, which the phone is asked
+            // for rather than waited on.
+            None => {
+                self.awaiting_keyframe = true;
+                tracing::warn!(
+                    "carlife.video.write_stalled waited_ms={} bytes={} keyframe={} \
+                     action=await_keyframe",
+                    VIDEO_WRITE_WAIT.as_millis(),
+                    unit.data.len(),
+                    unit.keyframe
+                );
+                self.request_keyframe().await;
+                Ok(())
+            }
+        }
+    }
+
+    /// One message out on the video channel, waited on for a bounded time.
+    ///
+    /// `None` is a write that ran out of time: the host is not reading the
+    /// endpoint. A write already handed to the kernel is not taken back, so it
+    /// goes out if the host ever reads.
+    async fn video_write(
+        &mut self,
+        service_type: u32,
+        timestamp_ms: u32,
+        body: &[u8],
+    ) -> Option<Result<()>> {
+        let began = Instant::now();
+        let outcome = tokio::time::timeout(
+            VIDEO_WRITE_WAIT,
+            self.send_frame(service_type, timestamp_ms, body),
+        )
+        .await;
+        match outcome {
+            Ok(written) => {
+                let waited = began.elapsed();
+                if waited >= SLOW_WRITE {
+                    tracing::warn!(
+                        "carlife.video.write_slow service_type={} waited_ms={} bytes={}",
+                        names::ServiceType(service_type),
+                        waited.as_millis(),
+                        body.len()
+                    );
+                }
+                Some(written)
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// Asks the phone to encode a keyframe now.
+    ///
+    /// Nothing is asked while the phone has no screen stream open: a session's
+    /// first start is the car asking before CarPlay has connected, and there is
+    /// no encoder behind that request. A stream that opens afterwards begins
+    /// with a keyframe of its own, so the request is not owed then either.
+    ///
+    /// The CarLife protocol has no message that means this, so it goes out on
+    /// the CarPlay side's event channel, where a CarPlay session's own commands
+    /// travel. Two calls inside `KEYFRAME_INTERVAL` are one request: a channel
+    /// that is stuck asks on every frame otherwise, and each answer is another
+    /// picture that cannot be delivered either.
+    async fn request_keyframe(&mut self) {
+        let open = self
+            .stream_up
+            .as_ref()
+            .is_some_and(|up| up.load(Ordering::Relaxed));
+        if !open {
+            tracing::debug!("carlife.video.keyframe_request_skipped reason=no_stream");
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .keyframe_asked
+            .is_some_and(|asked| now.duration_since(asked) < KEYFRAME_INTERVAL)
+        {
+            return;
+        }
+        self.keyframe_asked = Some(now);
+        if let Err(e) = self.events.dispatch(Command::KeyFrame).await {
+            tracing::warn!("carlife.video.keyframe_request_failed err={e}");
+        }
     }
 
     /// One thing the phone's audio produced, on the media channel.
@@ -2467,7 +2624,7 @@ mod tests {
     use crate::playing::Position;
     use crate::sink::{AudioCodec, MediaSink, StreamEvent, StreamId};
     use std::sync::{Arc, Mutex};
-    use tokio::io::DuplexStream;
+    use tokio::io::{AsyncReadExt, DuplexStream};
 
     /// One stream: a type the phone names it with, and the instance it opened.
     fn stream(stream_type: u8, connection_id: i64) -> StreamId {
@@ -2630,6 +2787,22 @@ mod tests {
         async fn expect_silence(&mut self, quiet_for: Duration) {
             let heard = tokio::time::timeout(quiet_for, frame::read_chunk(&mut self.pipe)).await;
             assert!(heard.is_err(), "the session spoke when it should not have");
+        }
+
+        /// Throws away whatever is on the pipe, including the part of a frame
+        /// that was given up half written.
+        async fn drain(&mut self) {
+            let mut scratch = vec![0u8; 16 * 1024];
+            while let Ok(Ok(taken)) = tokio::time::timeout(
+                Duration::from_millis(50),
+                self.pipe.read(&mut scratch),
+            )
+            .await
+            {
+                if taken == 0 {
+                    break;
+                }
+            }
         }
     }
 
@@ -4738,6 +4911,82 @@ mod tests {
         .await
             .expect("the session ends cleanly");
         car.await.unwrap();
+    }
+
+    /// A write the car stops reading is given up rather than waited on, and the
+    /// channel starts again at a keyframe: the pictures after a lost one
+    /// reference it, so sending them would only draw noise.
+    #[tokio::test]
+    async fn a_write_the_car_stops_reading_is_given_up_and_the_picture_restarts_at_a_keyframe() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.handshake(asked()).await;
+            car.start_the_encoder().await;
+            let _ = started_tx.send(());
+
+            // Not reading for long enough that the frame cannot be taken, and
+            // then taking what is left of it — a frame given up is left on the
+            // pipe half written, and the drain is what makes room for the next
+            // one.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            car.drain().await;
+
+            // The first picture after the lost one is a keyframe, and not the
+            // one the car was sent next.
+            let first = car.expect(VIDEO_DATA).await;
+            assert_eq!(first.body, idr(), "the channel restarts at a keyframe");
+        });
+
+        let pushing = tokio::spawn(async move {
+            let _ = started_rx.await;
+            // Larger than the pipe holds, so the write cannot complete.
+            outlet.sink().push(StreamEvent::VideoFrame {
+                keyframe: false,
+                data: vec![0x41; 200 * 1024],
+            });
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            // Sent while the channel is waiting, so it is dropped: the car never
+            // sees it, which is what the assertion above says.
+            outlet.sink().push(StreamEvent::VideoFrame {
+                keyframe: false,
+                data: vec![0x00, 0x00, 0x00, 0x01, 0x41],
+            });
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            outlet.sink().push(StreamEvent::VideoFrame {
+                keyframe: true,
+                data: idr(),
+            });
+        });
+
+        run(
+            device,
+            &frames,
+            &cfg,
+            None,
+            &mut |_, _, _| {},
+            no_icon(),
+            EventSink::new(),
+            &mut carplay,
+            &no_tap(),
+            Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
+        )
+        .await
+        .expect("the session ends cleanly");
+        car.await.unwrap();
+        pushing.await.unwrap();
+    }
+
+    /// One access unit that opens on an IDR picture.
+    fn idr() -> Vec<u8> {
+        vec![0x00, 0x00, 0x00, 0x01, 0x65, 0x88]
     }
 
     /// A challenge with no key behind it is left alone rather than answered with
