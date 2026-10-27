@@ -30,8 +30,7 @@ mod wireless;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use iap2_mfi::local::LocalCoprocessor;
-use iap2_mfi::{AuthCoprocessor, NoCoprocessor};
+use iap2_mfi::{AuthCoprocessor, FileCoprocessor, NoCoprocessor};
 use livi_runtime::mfi_async::SharedCoprocessor;
 use livi_runtime::vehicle::Vehicle;
 use tokio::net::TcpListener;
@@ -470,7 +469,9 @@ fn mfi_signer() -> Result<Box<dyn AuthCoprocessor + Send>> {
         );
         return Ok(Box::new(NoCoprocessor));
     };
-    let signer = LocalCoprocessor::load(&key, &cert)
+    // The certificate first, the key second: that is the order the coprocessor
+    // takes them in, and the two are not interchangeable.
+    let signer = FileCoprocessor::from_bytes(&cert, &key)
         .context("the MFi credentials in the data directory could not be used")?;
     tracing::info!(
         "carplay.mfi.credentials_loaded key_bytes={} cert_bytes={}",

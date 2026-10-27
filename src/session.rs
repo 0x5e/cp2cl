@@ -34,7 +34,7 @@ use livi_runtime::ident::Identity;
 // privately, so it has to be named through the module that defines it.
 use livi_runtime::ident::Transport;
 use livi_runtime::mfi_async::SharedCoprocessor;
-use livi_runtime::vehicle::{Fuels, Vehicle};
+use livi_runtime::vehicle::{Fuels, Plugs, Vehicle};
 use livi_wifi::Channel;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{broadcast, mpsc};
@@ -281,6 +281,11 @@ async fn attach(
             ssid: cfg.name.clone(),
             bt_mac: parse_mac(&bt_address(&cfg.bt_adapter)),
             fuels: Fuels::default(),
+            // The board is not an EV and has no charge port to describe.
+            plugs: Plugs::default(),
+            // Themes are an accessory look the phone draws its UI in; there is
+            // no such asset here, so the phone keeps its own.
+            theme: None,
         };
         // The session task owns both of these for as long as it runs, and a
         // restart means running it again — so neither may be moved out of the
@@ -318,6 +323,10 @@ async fn attach(
             // while — so there is nothing to wait for.
             av_iface_late: None,
             available_current_ma: 500,
+            // No identifier of our own: the wired start names no Wi-Fi
+            // interface, so there is nothing to fall back to and the field
+            // stays out — as it did before this existed.
+            device_id: None,
             ap_mac: None,
             ap_on_air: None,
             // Bluetooth-only: whether a phone we can see is also on the cable.
@@ -325,6 +334,7 @@ async fn attach(
             // Wired sends the start once, when the phone offers CarPlay. Every
             // start after that comes from a new session, below.
             start_again: None,
+            theme: None,
         };
 
         let (tx, rx) = mpsc::channel(64);

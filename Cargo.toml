@@ -6,22 +6,24 @@ description = "Headless CarPlay receiver that hands an iPhone's streams to a Car
 license = "GPL-3.0-or-later"
 
 # The LIVI crates come from the `vendor/LIVI` submodule, pinned to the
-# `feature/local-credential` branch. LIVI's repository root is an Electron app
-# with no top-level Cargo.toml; its Rust lives under `native/`, so every path
-# spells that out. See README "Depending on LIVI".
+# `feature/cp2cl-10.1` branch. LIVI's repository root is an app; its Rust lives
+# under `native/`, and every crate sits flat under `native/crates`. See README
+# "Depending on LIVI".
 
 [dependencies]
-livi-runtime = { path = "vendor/LIVI/native/livi-helperd/crates/livi-runtime" }
-iap2-link = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-link" }
-iap2-wired = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-wired" }
+livi-runtime = { path = "vendor/LIVI/native/crates/livi-runtime" }
+iap2-link = { path = "vendor/LIVI/native/crates/iap2-link" }
+iap2-wired = { path = "vendor/LIVI/native/crates/iap2-wired" }
 # Linux has no usbmuxd to ask — Alpine does not even package one — so the phone's
 # CarPlay USB configuration and its mux are claimed in-process instead. See
 # `src/session.rs`.
-iap2-usbmux = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-usbmux" }
-iap2-mfi = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-mfi" }
-iap2-csm = { path = "vendor/LIVI/native/livi-helperd/crates/iap2-csm" }
+iap2-usbmux = { path = "vendor/LIVI/native/crates/iap2-usbmux" }
+# `files` is what signs a challenge with an identity kept on disk: there is no
+# MFi coprocessor on this board. See `main::mfi_signer`.
+iap2-mfi = { path = "vendor/LIVI/native/crates/iap2-mfi", features = ["files"] }
+iap2-csm = { path = "vendor/LIVI/native/crates/iap2-csm" }
 # `CpConfig::channel` is a `livi_wifi::Channel`, and LIVI does not re-export it.
-livi-wifi = { path = "vendor/LIVI/native/livi-helperd/crates/livi-wifi" }
+livi-wifi = { path = "vendor/LIVI/native/crates/livi-wifi" }
 # Paging a paired phone is one BlueZ D-Bus call, and LIVI's own paging loop is
 # tied to the state its app keeps. Same version LIVI resolves, so it unifies
 # into one build. See `src/wireless/page.rs`.

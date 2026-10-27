@@ -23,7 +23,7 @@ use livi_runtime::bringup::{run_accessory, CpConfig, OnCable};
 use livi_runtime::driver::LinkChannel;
 use livi_runtime::ident::{Identity, Transport};
 use livi_runtime::mfi_async::SharedCoprocessor;
-use livi_runtime::vehicle::{Fuels, Vehicle};
+use livi_runtime::vehicle::{Fuels, Plugs, Vehicle};
 use livi_wifi::{Channel, OnAir, Security};
 use tokio::sync::{broadcast, mpsc};
 
@@ -134,6 +134,9 @@ pub(crate) fn session_params(
         // Nothing here knows what the car runs on, so no fuel type is claimed:
         // the phone is told the accessory has no range to report.
         fuels: Fuels::default(),
+        // Nor is there a charge port: the board draws its power from the cable.
+        plugs: Plugs::default(),
+        theme: None,
     };
 
     // What the phone is about to be told, kept where the bringup can ask for
@@ -169,6 +172,7 @@ pub(crate) fn session_params(
         available_current_ma: 500,
         // Left to whoever knows the network: the accessory's identifier is then
         // the MAC of the interface named above, read off that interface.
+        device_id: None,
         ap_mac: None,
         // The network the phone joins, as hostapd runs it — see `ON_AIR`.
         ap_on_air: Some(on_air),
@@ -183,6 +187,8 @@ pub(crate) fn session_params(
         // — ending it drops the link, and the platform paging the phone again
         // is what gets us a new one.
         start_again: None,
+        // No look of its own to hand the phone.
+        theme: None,
     };
 
     Ok(SessionParams {

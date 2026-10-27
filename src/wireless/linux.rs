@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use iap2_link::LinkConfig;
-use livi_runtime::bt::IncomingConn;
+use livi_runtime::bt::{IncomingConn, Wireless};
 use livi_runtime::driver::spawn_link;
 use livi_runtime::mfi_async::SharedCoprocessor;
 use livi_runtime::vehicle::Vehicle;
@@ -108,8 +108,15 @@ pub async fn watch(
             continue;
         }
 
+        // CarPlay and nothing else: this is what publishes the iAP and CarPlay
+        // profiles and what makes the adapter discoverable. Android Auto would
+        // add SAP and a second record.
+        let wireless = Wireless {
+            carplay: true,
+            android_auto: false,
+        };
         let (conn, mut incoming, held) =
-            match livi_runtime::bt::start(&cfg.bt_adapter, &cfg.name, true).await {
+            match livi_runtime::bt::start(&cfg.bt_adapter, &cfg.name, wireless).await {
                 Ok(started) => started,
                 Err(e) => {
                     tracing::error!(
@@ -190,11 +197,6 @@ pub async fn watch(
             let link = LinkConfig {
                 max_outgoing: 4,
                 control_version: 2,
-                // The phone takes this as the largest packet it may send, and
-                // this link carries small iAP2 messages: 4096 is what it has
-                // been in use with. The cable and the tunnel keep the default,
-                // where a cover need not be cut into 4 KB pieces.
-                max_len: 4096,
                 ..LinkConfig::default()
             };
             // Over RFCOMM the phone speaks first, so we must not open with a

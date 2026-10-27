@@ -910,16 +910,17 @@ git submodule update --init --recursive
 
 | Submodule | Upstream | Pinned to |
 |---|---|---|
-| `vendor/LIVI` | `0x5e/LIVI` | `feature/local-credential` |
+| `vendor/LIVI` | `0x5e/LIVI` | `feature/cp2cl-10.1` |
 
 `Cargo.toml` takes the LIVI crates by path from the submodule:
 
 ```toml
-livi-runtime = { path = "vendor/LIVI/native/livi-helperd/crates/livi-runtime" }
+livi-runtime = { path = "vendor/LIVI/native/crates/livi-runtime" }
 ```
 
-LIVI's repository root is an Electron app with no top-level `Cargo.toml`; its
-Rust lives under `native/`, which is why every path spells that out.
+LIVI's repository root is an app with no top-level `Cargo.toml`; its Rust lives
+under `native/crates/`, one directory per crate, which is why every path spells
+that out.
 
 Because the submodule is pinned rather than tracking a branch, nothing moves on
 its own — `git submodule update --remote vendor/LIVI` is the deliberate, manual
