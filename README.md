@@ -62,14 +62,14 @@ board is built in a container instead, since it cannot build this itself — see
 Then plug the phone in and unlock it. You should see:
 
 ```
-[cp]      	cp.attached phone=000081301A46 transport=usb
-[cp]      	cp.identified peer=000081301A46
-[cp]      	cp.mfi_passed peer=000081301A46
-[cp]      	cp.carplay_start_sent peer=000081301A46 airplay=192.168.20.1:52843
-[airplay] 	airplay.connected peer=192.168.20.3:53412
-[pairing] 	pairing.verified
-[airplay] 	airplay.info_answered width=1280 height=720 fps=30 codec=avc1
-[video]   	video.stream_attached
+[carplay] 	attached phone=000081301A46 transport=usb
+[carplay] 	identified peer=000081301A46
+[carplay] 	mfi_passed peer=000081301A46
+[carplay] 	carplay_start_sent peer=000081301A46 airplay=192.168.20.1:52843
+[airplay] 	connected peer=192.168.20.3:53412
+[pairing] 	verified
+[airplay] 	info_answered width=1280 height=720 fps=30 codec=avc1
+[video]   	stream_attached
 ```
 
 ### Cross-compiling for the board
@@ -146,8 +146,8 @@ reaches it on the next one. A car whose screen is not the default has its CarPla
 session rebuilt once, early on, for exactly this reason — the log says so:
 
 ```
-[cl]      	cl.geometry_asked width=1280 height=720 fps=30 served_width=1920 served_height=720 served_fps=30 source=channel_map
-[screen]  	screen.named width=1920 height=720 fps=30
+[carlife] 	msg.recv service_type=0x00018007(MSG_CMD_VIDEO_ENCODER_INIT) width=1280 height=720 frameRate=30 served_width=1920 served_height=720 served_frameRate=30 source=channel_map
+[screen]  	named width=1920 height=720 fps=30
 ```
 
 Two things have to happen, and closing the connection is only the first:
@@ -178,7 +178,7 @@ notice the first one ending before it will act on the second.
 
 | Log line | What it means |
 |---|---|
-| `cp.restart phone=... action=reopen_carkit` | wired: the old tunnel is closed and another is being opened |
+| `carplay.restart phone=... action=reopen_carkit` | wired: the old tunnel is closed and another is being opened |
 | `wireless.restart peer=... action=drop_link` | wireless: the link is closed; the platform has to bring the phone back |
 
 The wireless half depends on something outside this program bringing the phone
@@ -366,35 +366,34 @@ What to watch for, in the order it happens. The first line that does not appear
 is where it stopped:
 
 ```bash
-[usb]     	usb.waiting_for_host
-[usb]     	usb.control_request request=51 direction=in type=0xc0 value=0 index=0 length=2
-[usb]     	usb.aoa_version version=2
-[usb]     	usb.control_request request=52 direction=out type=0x40 value=0 index=0 length=5
-[usb]     	usb.ident index=0 text="Baidu"       # and five more like it
-[usb]     	usb.control_request request=53 direction=out type=0x40 value=0 index=0 length=0
-[usb]     	usb.accessory_switch result=ok identity="18d1:2d00 as Google / Android"
-[usb]     	usb.enumerated action=start_session
-[cl]      	cl.version version=1.0
-[cl]      	cl.session_up                        # the gate opens here
-[cl]      	cl.setting key=VOICE_MIC value="0"   # whatever it asks for
-[cl]      	cl.geometry_asked width=1280 height=720 fps=30 agreed_width=1280 agreed_height=720 agreed_fps=30
-[cl]      	cl.encoder state=started
+[usb]     	waiting_for_host
+[usb]     	control_request request=51 direction=in type=0xc0 value=0 index=0 length=2
+[usb]     	aoa_version version=2
+[usb]     	control_request request=52 direction=out type=0x40 value=0 index=0 length=5
+[usb]     	ident index=0 text="Baidu"       # and five more like it
+[usb]     	control_request request=53 direction=out type=0x40 value=0 index=0 length=0
+[usb]     	accessory_switch result=ok identity="18d1:2d00 as Google / Android"
+[usb]     	enumerated action=start_session
+[carlife] 	msg.recv service_type=0x00018001(MSG_CMD_HU_PROTOCOL_VERSION) majorVersion=1 minorVersion=0
+[carlife] 	session_up                          # the gate opens here
+[carlife] 	msg.recv service_type=0x00018007(MSG_CMD_VIDEO_ENCODER_INIT) width=1280 height=720 frameRate=30 served_width=1280 served_height=720 served_frameRate=30 source=car
+[carlife] 	msg.recv service_type=0x00018009(MSG_CMD_VIDEO_ENCODER_START)
 ```
 
-The `[cl]` lines are the session, the `[usb]` lines the USB side under it. A head
+The `[carlife]` lines are the session, the `[usb]` lines the USB side under it. A head
 unit that skips the handshake — which is what the reference implementation does,
 and what a car does when it has already switched this device once — goes straight
-from `usb.waiting_for_host` to `usb.enumerated`. The other half of the bridge says
+from `waiting_for_host` to `enumerated`. The other half of the bridge says
 so too, and its two lines bracket the one above:
 
 ```bash
-[airplay] 	airplay.held reason=car_session_not_up   # until cl.session_up
-[airplay] 	airplay.connected peer=<phone>           # and only after it
+[airplay] 	held reason=car_session_not_up   # until carlife.session_up
+[airplay] 	connected peer=<phone>           # and only after it
 ```
 
-If the car goes quiet and nothing from `[cl]` follows, the last line printed says
-what it was waiting on. A stop at `cl.challenge result=skipped reason=no_key` is
-the next section's subject.
+If the car goes quiet and nothing from `[carlife]` follows, the last line printed says
+what it was waiting on. A stop at `action=none reason=no_key` on
+`MSG_CMD_HU_AUTHEN_REQUEST` is the next section's subject.
 
 ### The accessory interface
 

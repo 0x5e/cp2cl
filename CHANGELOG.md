@@ -19,6 +19,8 @@
 
 ### 变更
 
+- 日志行统一成一种写法：域由 `cl` / `cp` 改为 `carlife` / `carplay`，收发报文改为 `msg.recv` / `msg.send` 并带上协议里的名字与字段名（`service_type=0x00018007(MSG_CMD_VIDEO_ENCODER_INIT) width=1280 height=720 frameRate=60`），枚举值写作 `值(名字)`，认不出的数一律 `UNKNOWN`；级别列由右对齐改为左对齐。
+- 只转述报文的十几行并进报文行本身，`cl.version`、`cl.car_info`、`cl.geometry_asked`、`cl.media_play_state`、`cl.navi_turn` 等不再各占一行；导航提示的采样格式随 `MSG_NAVI_TTS_INIT` 一起记，不再在收到格式时就记一行。
 - 渠道号的鉴权结论、特性开关的询问与车载数据的询问都改到 `MSG_CMD_MD_INFO` 之后发出，顺序与 Pixel 真机一致，此前它们紧跟在车机的统计信息后面。
 - `S10radio` 只做 `insmod`，不再等 `wlan0` 与 `hci0` 出现，脚本里 20 s 的轮询和 `dmesg` 摘录一并删掉，等待改由程序自己做。
 - 状态页、CarPlay 接收端与车机会话不再排在电台等待之后，电台始终不来时它们照常可用。

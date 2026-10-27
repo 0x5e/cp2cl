@@ -6,18 +6,20 @@
 //! here reacts: `usb` composes the device this program presents and `gadget`
 //! answers what then arrives on it, `session` walks the conversation that
 //! follows, `auth` answers the car's challenge and judges it in turn, `frame` and
-//! `proto` are the two layers the messages are carried in, `gps` turns the car's
-//! position into the sentences the phone reads one from, and `desc` is the shape
-//! of the device as a host reads it.
+//! `proto` are the two layers the messages are carried in, `names` is what the
+//! log calls the numbers in them, `gps` turns the car's position into the
+//! sentences the phone reads one from, and `desc` is the shape of the device as
+//! a host reads it.
 //!
-//! `auth`, `desc`, `frame`, `gps`, `proto` and `session` are plain code with no
-//! USB in them, which is what lets them be tested against an in-memory pipe.
-//! `usb`, `gadget` and `aio` are the ones that need the board.
+//! `auth`, `desc`, `frame`, `gps`, `names`, `proto` and `session` are plain code
+//! with no USB in them, which is what lets them be tested against an in-memory
+//! pipe. `usb`, `gadget` and `aio` are the ones that need the board.
 
 pub mod auth;
 pub mod desc;
 pub mod frame;
 pub mod gps;
+pub mod names;
 pub mod proto;
 pub mod session;
 

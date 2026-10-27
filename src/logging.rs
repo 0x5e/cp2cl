@@ -59,13 +59,17 @@ fn uptime() -> Duration {
 
 /// A line is `<seconds since boot> <LEVEL> [<area>]\t<event name> <fields>`.
 ///
-/// Where the writer takes them, the stamp is written grey and the level in its
-/// own colour: both are glanced at rather than read, unlike the name and the
-/// fields that follow them.
+/// The level is five columns wide and filled from the left, so that the column
+/// after it starts in the same place whatever the level is. Where the writer
+/// takes them, the stamp is written grey and the level in its own colour: both
+/// are glanced at rather than read, unlike the name and the fields that follow
+/// them.
 ///
 /// The bracketed area is the module column, and it is read off the event name
 /// rather than passed in: a call site cannot then say one thing in a column and
-/// another in the name, and the name is left whole for `grep`.
+/// another in the name. The name below the column is the event without the area
+/// in front of it, since the column already has it — the call site writes
+/// `carlife.msg.recv` and the line reads `[carlife] msg.recv`.
 pub struct Line;
 
 /// The column is as wide as the longest area name, `wireless`, so that the tab
@@ -97,15 +101,19 @@ where
         Clock.format_time(&mut w)?;
         if colours {
             w.write_str(RESET)?;
-            write!(w, " {}{level:>5}{RESET} ", level_colour(level))?;
+            write!(w, " {}{level:<5}{RESET} ", level_colour(level))?;
         } else {
-            write!(w, " {level:>5} ")?;
+            write!(w, " {level:<5} ")?;
         }
         if let Some(area) = area_of(&said.message) {
             let pad = AREA_WIDTH.saturating_sub(area.len());
             write!(w, "[{area}]{:pad$}\t", "")?;
+            // The area is already in the column, so it is not repeated below
+            // it. The area is ASCII, so the dot that ended it is one byte.
+            w.write_str(&said.message[area.len() + 1..])?;
+        } else {
+            w.write_str(&said.message)?;
         }
-        w.write_str(&said.message)?;
         w.write_str(&said.rest)?;
         writeln!(w)
     }
@@ -382,13 +390,13 @@ mod tests {
                 .with_writer(journal),
         );
         tracing::subscriber::with_default(subscriber, || {
-            tracing::info!("cl.encoder state=started");
+            tracing::info!("carlife.encoder state=started");
         });
 
         let text = fs::read_to_string(&path).unwrap();
         assert!(!text.contains('\x1b'), "{text:?}");
         assert!(
-            text.ends_with(" INFO [cl]      \tcl.encoder state=started\n"),
+            text.ends_with(" INFO  [carlife] \tencoder state=started\n"),
             "{text:?}"
         );
 
@@ -420,19 +428,19 @@ mod tests {
                     .with_filter(LevelFilter::DEBUG),
             );
         tracing::subscriber::with_default(subscriber, || {
-            tracing::trace!("cl.below_the_copy");
-            tracing::debug!("cl.below_the_terminal");
-            tracing::info!("cl.at_the_terminal");
+            tracing::trace!("carlife.below_the_copy");
+            tracing::debug!("carlife.below_the_terminal");
+            tracing::info!("carlife.at_the_terminal");
         });
 
         let terminal = String::from_utf8(seen.lock().unwrap().clone()).unwrap();
-        assert!(terminal.contains("cl.at_the_terminal"), "{terminal:?}");
-        assert!(!terminal.contains("cl.below_the_terminal"), "{terminal:?}");
+        assert!(terminal.contains("at_the_terminal"), "{terminal:?}");
+        assert!(!terminal.contains("below_the_terminal"), "{terminal:?}");
 
         let copy = fs::read_to_string(&path).unwrap();
-        assert!(copy.contains("cl.at_the_terminal"), "{copy:?}");
-        assert!(copy.contains("cl.below_the_terminal"), "{copy:?}");
-        assert!(!copy.contains("cl.below_the_copy"), "{copy:?}");
+        assert!(copy.contains("at_the_terminal"), "{copy:?}");
+        assert!(copy.contains("below_the_terminal"), "{copy:?}");
+        assert!(!copy.contains("below_the_copy"), "{copy:?}");
 
         fs::remove_file(&path).ok();
         fs::remove_file(&previous).ok();
@@ -440,45 +448,49 @@ mod tests {
 
     #[test]
     fn the_area_is_the_first_segment_of_the_event_name() {
-        assert_eq!(area_of("cl.encoder state=started"), Some("cl"));
+        assert_eq!(area_of("carlife.encoder state=started"), Some("carlife"));
         assert_eq!(area_of("usb.control_request request=51"), Some("usb"));
         assert_eq!(area_of("process.started name=cp2cl"), Some("process"));
-        assert_eq!(area_of("cl.video_channel source=first"), Some("cl"));
+        assert_eq!(
+            area_of("carlife.msg.recv service_type=0x00018003"),
+            Some("carlife")
+        );
     }
 
     #[test]
     fn a_message_that_does_not_begin_with_an_event_name_has_no_area() {
         assert_eq!(area_of("192.168.4.1 went away"), None);
         assert_eq!(area_of("C.encoder state=started"), None);
-        assert_eq!(area_of("cl."), None);
+        assert_eq!(area_of("carlife."), None);
         assert_eq!(area_of(""), None);
     }
 
     #[test]
     fn a_line_is_the_stamp_the_level_the_column_and_the_event_name() {
-        let text = plain(&render("cl.encoder state=started"));
-        // `[cl]` padded out to the ten columns `[wireless]` needs, then the tab.
+        let text = plain(&render("carlife.encoder state=started"));
+        // `[carlife]` padded out to the eight columns `[wireless]` needs, then
+        // the tab, and the event name without the area the column already has.
         assert!(
-            text.ends_with(" INFO [cl]      \tcl.encoder state=started\n"),
+            text.ends_with(" INFO  [carlife] \tencoder state=started\n"),
             "{text:?}"
         );
     }
 
     #[test]
     fn the_event_name_starts_in_the_same_column_whatever_the_area() {
-        let short = expand(&plain(&render("cl.encoder state=started")));
+        let short = expand(&plain(&render("carlife.encoder state=started")));
         let long = expand(&plain(&render("airplay.held reason=car_session_not_up")));
         // Measured from the bracket, since the stamp is as wide as the uptime
         // makes it and both lines need not have been written in the same second.
         let column = |line: &str, name: &str| {
             line.find(name).unwrap() - line.find('[').unwrap()
         };
-        assert_eq!(column(&short, "cl.encoder"), column(&long, "airplay.held"));
+        assert_eq!(column(&short, "encoder"), column(&long, "held"));
     }
 
     #[test]
     fn the_stamp_is_the_only_grey_part_of_the_line() {
-        let text = render("cl.encoder state=started");
+        let text = render("carlife.encoder state=started");
         let rest = text.strip_prefix(GREY).expect("the stamp is grey");
         let (stamp, rest) = rest.split_once(RESET).expect("the grey is shut");
         assert!(

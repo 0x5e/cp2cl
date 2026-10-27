@@ -369,13 +369,6 @@ pub const MUSIC_MODULE: i32 = 3;
 /// the phone's is — see `modules_at_rest`.
 pub const VR_MODULE: i32 = 4;
 
-/// `CARLIFE_CONNECT_MODULE_ID` and `CARLIFE_MIC_MODULE_ID`. Neither is ever
-/// reported in a status this device sends: the first is the link itself, and
-/// the second is where the voice is taken from. The car names both in
-/// `MSG_CMD_MODULE_CONTROL`, so they are named here.
-pub const CONNECT_MODULE: i32 = 5;
-pub const MIC_MODULE: i32 = 6;
-
 /// `MusicState`. `IDLE` is a song that is not moving through its own time and
 /// `RUNNING` one that is — the same distinction the car's own pause and play
 /// messages carry.
