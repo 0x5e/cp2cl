@@ -1247,6 +1247,10 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // heartbeat is only owed if no picture arrives within a period.
                 self.channel_touched = Some(now);
                 self.next_tick = now;
+                // And the phone says it is in front once more: the reference
+                // phone's second `FOREGROUND` came with this message, in the same
+                // millisecond the car started it.
+                self.send(FOREGROUND, &[]).await?;
             }
             HU_VIDEO_ENCODER_PAUSE | HU_VIDEO_ENCODER_RESET => {
                 tracing::info!("cl.encoder state=stopped");
@@ -2336,6 +2340,7 @@ mod tests {
 
         async fn start_the_encoder(&mut self) {
             self.send(HU_VIDEO_ENCODER_START, &[]).await;
+            self.expect(FOREGROUND).await;
         }
 
         /// The car asking which data this device can provide, and the answer it
