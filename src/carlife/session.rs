@@ -54,6 +54,7 @@ const HU_CAR_VELOCITY: u32 = 0x0001_800F;
 const HU_CAR_GPS: u32 = 0x0001_8010;
 const HU_GO_TO_FOREGROUND: u32 = 0x0001_8025;
 const HU_STATISTIC_INFO: u32 = 0x0001_8027;
+const HU_MODULE_CONTROL: u32 = 0x0001_8028;
 const HU_CAR_DATA_SUBSCRIBE_DONE: u32 = 0x0001_8032;
 const HU_DATA_SUBSCRIBE: u32 = 0x0001_8043;
 const HU_DATA_SUBSCRIBE_START: u32 = 0x0001_8045;
@@ -680,6 +681,63 @@ fn command_for(key: i32) -> Option<Command> {
     })
 }
 
+/// What the car's `MSG_CMD_MODULE_CONTROL` asks the CarPlay side to do.
+///
+/// The media HID device carries play and pause and nothing else: a phone has no
+/// way to be told to stop a navigation or an assistant. So the song is the one
+/// module with a command behind it, and the rest are `None` — reported by the
+/// caller rather than acted on.
+fn command_for_control(control: proto::ModuleControl) -> Option<Command> {
+    match (control.module, control.state) {
+        (proto::MUSIC_MODULE, proto::MUSIC_IDLE) => Some(Command::Pause),
+        (proto::MUSIC_MODULE, proto::MUSIC_RUNNING) => Some(Command::Play),
+        _ => None,
+    }
+}
+
+/// The module a control named, in the car's own vocabulary.
+fn module_name(module: i32) -> &'static str {
+    match module {
+        proto::PHONE_MODULE => "phone",
+        proto::NAVI_MODULE => "navigation",
+        proto::MUSIC_MODULE => "music",
+        proto::VR_MODULE => "vr",
+        proto::CONNECT_MODULE => "connect",
+        proto::MIC_MODULE => "mic",
+        _ => "UNKNOWN",
+    }
+}
+
+/// The state a control named. Every module reads the same field against an enum
+/// of its own, so the name is looked up against the module as well.
+fn module_state_name(control: proto::ModuleControl) -> &'static str {
+    match (control.module, control.state) {
+        (proto::MUSIC_MODULE, proto::MUSIC_IDLE) => "idle",
+        (proto::MUSIC_MODULE, proto::MUSIC_RUNNING) => "running",
+        (proto::NAVI_MODULE, proto::NAVI_IDLE) => "idle",
+        (proto::NAVI_MODULE, proto::NAVI_START) => "running",
+        (proto::PHONE_MODULE, proto::MODULE_IDLE) => "idle",
+        (proto::PHONE_MODULE, 1) => "incoming",
+        (proto::PHONE_MODULE, 2) => "outing",
+        (proto::VR_MODULE, proto::MODULE_IDLE) => "idle",
+        (proto::VR_MODULE, 1) => "running",
+        (proto::VR_MODULE, 2) => "not_supported",
+        (proto::MIC_MODULE, 0) => "vehicle_mic",
+        (proto::MIC_MODULE, 1) => "mobile_mic",
+        (proto::MIC_MODULE, 2) => "not_supported",
+        _ => "UNKNOWN",
+    }
+}
+
+/// What a control became, as the log names it.
+fn action_name(command: Option<Command>) -> &'static str {
+    match command {
+        Some(Command::Play) => "play",
+        Some(Command::Pause) => "pause",
+        _ => "none",
+    }
+}
+
 /// The next access unit from the CarPlay side, or never if there is no CarPlay
 /// side. Waiting on a future that never resolves is what keeps the branch out of
 /// the way without a second code path in the loop.
@@ -929,6 +987,18 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 self.send(MATCH_STATUS, &body).await?;
             }
             HU_INFO => {
+                let info = proto::decode_hu_info(&message.body);
+                tracing::info!(
+                    "carlife.msg.recv service_type={:#010x}(MSG_CMD_HU_INFO) os={:?} \
+                     manufacturer={:?} model={:?} release={:?} btaddress={:?} btname={:?}",
+                    HU_INFO,
+                    info.os,
+                    info.manufacturer,
+                    info.model,
+                    info.release,
+                    info.bt_address,
+                    info.bt_name
+                );
                 // Everything a phone has to say about itself, in the order the
                 // reference app says it: that it is in front, then what it is,
                 // then that its screen is on. Nothing here depends on that
@@ -1318,6 +1388,30 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // mid-route is owed the turn it is already on, and one that has
                 // stopped asking is owed the strip taken down.
                 self.publish_hud().await?;
+            }
+            // The car taking the audio into its own hands: it asks for one of
+            // the phone's modules to be stopped, paused or resumed. Only the song
+            // has a CarPlay command behind it — the media HID device has play and
+            // pause keys — so a navigation or an assistant the car wants stopped
+            // is reported and left running rather than guessed at.
+            HU_MODULE_CONTROL => {
+                let control = proto::decode_module_control(&message.body);
+                let command = command_for_control(control);
+                tracing::info!(
+                    "carlife.msg.recv service_type={:#010x}(MSG_CMD_MODULE_CONTROL) \
+                     moduleID={}({}) statusID={}({}) action={}",
+                    HU_MODULE_CONTROL,
+                    control.module,
+                    module_name(control.module),
+                    control.state,
+                    module_state_name(control),
+                    action_name(command),
+                );
+                if let Some(command) = command {
+                    if let Err(e) = self.events.dispatch(command).await {
+                        tracing::warn!("cl.input_send_failed err={e}");
+                    }
+                }
             }
             HU_ERROR_CODE => {
                 self.status
@@ -2248,6 +2342,8 @@ mod tests {
     use super::*;
     use crate::playing::Position;
     use crate::sink::{AudioCodec, MediaSink, StreamEvent, StreamId};
+    use std::sync::{Arc, Mutex};
+    use tokio::io::DuplexStream;
 
     /// One stream: a type the phone names it with, and the instance it opened.
     fn stream(stream_type: u8, connection_id: i64) -> StreamId {
@@ -2256,8 +2352,50 @@ mod tests {
             connection_id,
         }
     }
-    use std::sync::{Arc, Mutex};
-    use tokio::io::DuplexStream;
+
+    /// The car's control of a module, as the two fields it is.
+    fn control(module: i32, state: i32) -> proto::ModuleControl {
+        proto::ModuleControl { module, state }
+    }
+
+    #[test]
+    fn the_cars_control_of_a_module_reaches_carplay_as_the_command_it_has() {
+        // The media HID device has play and pause, so the song is the one
+        // module a control turns into something the phone is sent.
+        assert_eq!(
+            command_for_control(control(proto::MUSIC_MODULE, proto::MUSIC_IDLE)),
+            Some(Command::Pause)
+        );
+        assert_eq!(
+            command_for_control(control(proto::MUSIC_MODULE, proto::MUSIC_RUNNING)),
+            Some(Command::Play)
+        );
+        // A navigation or an assistant the car asks to stop has no command
+        // behind it: it is reported and left running rather than guessed at.
+        assert_eq!(
+            command_for_control(control(proto::NAVI_MODULE, proto::NAVI_IDLE)),
+            None
+        );
+        assert_eq!(
+            command_for_control(control(proto::VR_MODULE, proto::MODULE_IDLE)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_module_a_state_and_the_action_it_became_are_named_for_the_log() {
+        assert_eq!(module_name(proto::MUSIC_MODULE), "music");
+        assert_eq!(module_name(proto::NAVI_MODULE), "navigation");
+        assert_eq!(module_name(0xff), "UNKNOWN");
+        // The same field reads against a different enum per module.
+        assert_eq!(module_state_name(control(proto::MUSIC_MODULE, 1)), "running");
+        assert_eq!(module_state_name(control(proto::NAVI_MODULE, 1)), "running");
+        assert_eq!(module_state_name(control(proto::PHONE_MODULE, 1)), "incoming");
+        assert_eq!(module_state_name(control(proto::MIC_MODULE, 1)), "mobile_mic");
+        assert_eq!(module_state_name(control(proto::VR_MODULE, 9)), "UNKNOWN");
+        assert_eq!(action_name(Some(Command::Pause)), "pause");
+        assert_eq!(action_name(None), "none");
+    }
 
     /// The other end of the pipe: enough of a car to walk the conversation, and
     /// no more. Everything it sends is what the reference sends.

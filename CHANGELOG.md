@@ -8,6 +8,8 @@
 
 ### 新增
 
+- 车机发来 `MSG_CMD_MODULE_CONTROL` 要求暂停或恢复音乐时，cp2cl 翻成 CarPlay 的暂停键与播放键下发；导航与语音模块被要求停止时只记一行、不下发，媒体通道只有播放与暂停两个键，此前这条消息落进未处理消息的分支，只在 DEBUG 级记一个消息号。
+- 车机的 `MSG_CMD_HU_INFO` 解出 `os`、`manufacturer`、`model`、`release`、`btaddress`、`btname` 六项并连同消息名记一行，它的字段号与手机侧那份 `CarlifeDeviceInfo` 不是同一套（厂商在 13 而不是 4），此前同样只在 DEBUG 级记一个消息号。
 - 车机报上自己是谁之后，cp2cl 连发一次 `MSG_CMD_FOREGROUND`、一次 `MSG_CMD_SCREEN_ON`，并把手机、导航、音乐、语音四个模块的初值一次报给车机，麦克风不报，此前这三条一条都不发。
 - 无线这一半在发布服务之前自己等 `wlan0`、`hci0` 与系统总线上的 `bluetoothd`，20 s 内没等齐也照常往下走并记一行说明缺哪一样。
 - 主机名改为 `CarPlayBox` 加 `wlan0` 地址的末四位，热点 SSID 一起改成这个名字，蓝牙名、CarPlay 名、车机看到的型号与页面都从主机名读，此前它们各自是构建时写死的 `nanopi-duo2`。
