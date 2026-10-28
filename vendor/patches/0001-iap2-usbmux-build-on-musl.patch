@@ -1,0 +1,28 @@
+From 9060dad0758de6c40fa6c1c24deb432c24927a37 Mon Sep 17 00:00:00 2001
+From: gaosen <0x5e@sina.cn>
+Date: Wed, 7 Oct 2026 14:25:36 +0800
+Subject: [PATCH 1/2] fix(iap2-usbmux): build on musl
+
+`ioctl`'s request argument is `c_int` on musl and `c_ulong` on glibc, so the
+`TUNSETIFF` constant has to be cast rather than handed over as it is. The cast
+is a no-op on glibc.
+
+Nothing in LIVI builds this crate for a musl target, so this went unnoticed
+until cp2aa came along and did.
+---
+ native/crates/iap2-usbmux/src/ncm.rs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/native/crates/iap2-usbmux/src/ncm.rs b/native/crates/iap2-usbmux/src/ncm.rs
+index 1b61ce7f..6c7e05c6 100644
+--- a/native/crates/iap2-usbmux/src/ncm.rs
++++ b/native/crates/iap2-usbmux/src/ncm.rs
+@@ -130,7 +130,7 @@ fn open_tap(ifname: &str) -> Result<OwnedFd, String> {
+         ifr.ifr_name[i] = *b as libc::c_char;
+     }
+     ifr.ifr_ifru.ifru_flags = IFF_TAP | IFF_NO_PI;
+-    if unsafe { libc::ioctl(fd, TUNSETIFF, &mut ifr) } < 0 {
++    if unsafe { libc::ioctl(fd, TUNSETIFF as _, &mut ifr) } < 0 {
+         let e = std::io::Error::last_os_error();
+         unsafe { libc::close(fd) };
+         return Err(format!("TUNSETIFF {ifname}: {e}"));

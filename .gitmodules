@@ -1,4 +1,3 @@
 [submodule "vendor/LIVI"]
 	path = vendor/LIVI
-	url = https://github.com/0x5e/LIVI.git
-	branch = feature/local-credential
+	url = https://github.com/f-io/LIVI.git

@@ -36,7 +36,9 @@ DIST          := dist
 BR_VERSION    := $(shell sed -n 's/^ARG BUILDROOT_VERSION=//p' docker/buildroot.Dockerfile)
 CP2CL_VERSION := $(shell git describe --tags --exact-match 2>/dev/null || echo dev)
 CP2CL_COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
-DIRTY         := $(shell git status --porcelain 2>/dev/null)
+# The submodule carries two patches (see `patched`), so its worktree is always
+# dirty by design; only a different commit is a change worth naming.
+DIRTY         := $(shell git status --porcelain --ignore-submodules=dirty 2>/dev/null)
 FW := $(DIST)/buildroot-$(BR_VERSION)-cp2cl-$(CP2CL_VERSION)-$(CP2CL_COMMIT)$(if $(DIRTY),-dirty).img.gz
 
 # What a firmware build starts from: no target tree, and no stamp claiming a
@@ -58,22 +60,41 @@ FW := $(DIST)/buildroot-$(BR_VERSION)-cp2cl-$(CP2CL_VERSION)-$(CP2CL_COMMIT)$(if
 # both partitions and the card, every run, out of a fixed list of files.
 BR_FRESH := rm -rf /build/target && rm -f /build/build/*/.stamp_target_installed
 
-.PHONY: all app test image firmware buildroot-image
+.PHONY: all app test image firmware buildroot-image patched
 
 # Both products: the program the board runs, and the image it runs from.
 # `make app` on its own is the program, which is what a change to the crate
 # needs; the image is a tree, a toolchain and a kernel on every build.
 all: app firmware
 
+# The submodule is the upstream tag, so whatever this board needs that the tag
+# does not carry arrives as a patch in vendor/patches/, applied into the
+# submodule's worktree. `--check --reverse` first: a second `make` finds them
+# already on and does nothing, and one that no longer applies stops the build
+# instead of quietly building a tree without it.
+PATCHES := $(sort $(wildcard vendor/patches/*.patch))
+
+patched:
+	@for p in $(PATCHES); do \
+	  if git -C vendor/LIVI apply --check --reverse "$(CURDIR)/$$p" 2>/dev/null; then \
+	    :; \
+	  elif git -C vendor/LIVI apply "$(CURDIR)/$$p"; then \
+	    echo "patched $$p"; \
+	  else \
+	    echo "$$p no longer applies to vendor/LIVI" >&2; \
+	    exit 1; \
+	  fi; \
+	done
+
 # The program, statically linked, staged into dist/ where buildroot/package/
 # cp2cl points at it. Nothing else from the checkout is staged: a `local` site
 # over the repository root would drag target/ through rsync on every build.
-app:
+app: patched
 	$(RUN) cargo build --release --target $(TARGET)
 	mkdir -p $(DIST)
 	install -m 0755 target/$(TARGET)/release/cp2cl $(DIST)/cp2cl
 
-test:
+test: patched
 	$(RUN) cargo test
 
 # Once per machine, and again only when `docker/Dockerfile` changes.

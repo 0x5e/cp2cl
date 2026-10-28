@@ -902,7 +902,8 @@ including no name at all, is a prompt. See `src/sink.rs`.
 
 ## Depending on LIVI
 
-LIVI is a git submodule under `vendor/`, pinned to an exact commit:
+LIVI is a git submodule under `vendor/`, pinned to an upstream tag rather than
+to a branch of ours:
 
 ```bash
 git submodule update --init --recursive
@@ -910,7 +911,7 @@ git submodule update --init --recursive
 
 | Submodule | Upstream | Pinned to |
 |---|---|---|
-| `vendor/LIVI` | `0x5e/LIVI` | `feature/cp2cl-10.1` |
+| `vendor/LIVI` | `f-io/LIVI` | `v10.1.0` |
 
 `Cargo.toml` takes the LIVI crates by path from the submodule:
 
@@ -922,9 +923,23 @@ LIVI's repository root is an app with no top-level `Cargo.toml`; its Rust lives
 under `native/crates/`, one directory per crate, which is why every path spells
 that out.
 
-Because the submodule is pinned rather than tracking a branch, nothing moves on
-its own — `git submodule update --remote vendor/LIVI` is the deliberate, manual
-step that advances it.
+Two things this board needs are not in the tag, so they are patches in
+`vendor/patches/`, applied to the submodule's worktree by `make` before it
+builds — the `patched` target, which `app` and `test` both depend on:
+
+| Patch | Why |
+|---|---|
+| `0001-iap2-usbmux-build-on-musl` | `ioctl`'s request argument is `c_int` on musl |
+| `0002-bringup-no-mutual-authentication` | the receiver answers classic MFiSAP only |
+
+The submodule therefore reads as dirty, which `make` leaves out of the image's
+name; `git -C vendor/LIVI checkout .` puts it back to the tag. Moving to a new
+tag means checking both patches against it.
+
+`.gitmodules` names no branch, so nothing moves on its own: `branch` takes a
+branch name and a tag is not one, and the commit recorded here is the tag.
+Advancing means checking the new tag out, checking both patches against it, and
+committing the new pointer.
 
 Note the licence: LIVI is **GPL-3.0-or-later**, and linking its crates makes
 this a derivative work, so cp2cl inherits that.
