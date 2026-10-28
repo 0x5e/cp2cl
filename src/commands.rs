@@ -6,8 +6,9 @@
 //!
 //! The CarLife protocol has no control that means `Wheel`, `KeyFrame` or `Night`
 //! — a head unit sends panel keys and touch. `Night` is the operator's and
-//! `KeyFrame` is the session asking for a picture it can start again from; the
-//! allow below is for the wheel, which nothing here builds.
+//! `KeyFrame` is the session asking the phone for a whole picture when the car
+//! starts its encoder again; the allow below is for the wheel, which nothing
+//! here builds.
 #![allow(dead_code)]
 
 /// One finger in a touch report, in the display's own pixel space.

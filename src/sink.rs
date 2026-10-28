@@ -128,11 +128,11 @@ pub struct StreamId {
 /// started, and a consumer has to know where to put them.
 ///
 /// Not all of it has a reader: the car takes the frames and the sound, and has
-/// no use for whether the screen stream is up, which the video channel says by
-/// going quiet. That one is carried for whoever does need it, which is what the
-/// allow is for. The keyframe flag is not spare: `AccessUnit` carries it to the
-/// session, which is what decides where to start again after a write is given
-/// up.
+/// no use for the keyframe flag — what it reads is an elementary stream, where
+/// the frames say for themselves what they are — nor for whether the screen
+/// stream is up, which the video channel says by going quiet. The first is
+/// carried for whoever does need it, which is what the allow is for; the second
+/// is what the CarLife session reads to decide what the car is shown.
 #[allow(dead_code)]
 #[derive(Debug)]
 pub enum StreamEvent {
@@ -178,17 +178,6 @@ pub enum StreamEvent {
 /// once instead of forever.
 pub trait MediaSink: Send + Sync {
     fn push(&self, event: StreamEvent);
-}
-
-/// One access unit on its way to the car, and whether it opens on an IDR.
-///
-/// The flag is what a channel that has fallen behind starts again from. A
-/// decoder handed the middle of a group of pictures has nothing to reference
-/// and draws noise until the next keyframe.
-#[derive(Debug)]
-pub struct AccessUnit {
-    pub keyframe: bool,
-    pub data: Vec<u8>,
 }
 
 /// One thing on its way to the car's media channel, which is where the phone's
@@ -292,8 +281,8 @@ const CL_BACKLOG: usize = 8;
 /// those and gives them back on exactly these terms, and nothing about that
 /// changes for them being records rather than streams.
 pub struct ClOutlet {
-    video_tx: mpsc::Sender<AccessUnit>,
-    video_rx: Mutex<Option<mpsc::Receiver<AccessUnit>>>,
+    video_tx: mpsc::Sender<Vec<u8>>,
+    video_rx: Mutex<Option<mpsc::Receiver<Vec<u8>>>>,
     media_tx: mpsc::Sender<Media>,
     media_rx: Mutex<Option<mpsc::Receiver<Media>>>,
     navi_tx: mpsc::Sender<Navi>,
@@ -373,12 +362,12 @@ impl ClOutlet {
 
     /// The video half, for the CarLife session. One car, one owner: a second
     /// call gets nothing.
-    pub fn take_video(&self) -> Option<mpsc::Receiver<AccessUnit>> {
+    pub fn take_video(&self) -> Option<mpsc::Receiver<Vec<u8>>> {
         self.video_rx.lock().ok()?.take()
     }
 
     /// Given back when a session ends so the next one can use it.
-    pub fn return_video(&self, rx: mpsc::Receiver<AccessUnit>) {
+    pub fn return_video(&self, rx: mpsc::Receiver<Vec<u8>>) {
         if let Ok(mut guard) = self.video_rx.lock() {
             *guard = Some(rx);
         }
@@ -459,7 +448,7 @@ fn starve(slot: &Mutex<Option<StreamId>>, stream: StreamId) -> bool {
 
 /// Where the CarPlay streams go when the car is the one reading them.
 pub struct ClSink {
-    video: mpsc::Sender<AccessUnit>,
+    video: mpsc::Sender<Vec<u8>>,
     media: mpsc::Sender<Media>,
     navi: mpsc::Sender<Navi>,
     playing: mpsc::Sender<Playing>,
@@ -520,10 +509,10 @@ impl ClSink {
     }
 
     /// The video channel's half of the above, which is most of the callers.
-    fn send_video(&self, unit: AccessUnit) {
+    fn send_video(&self, access_unit: Vec<u8>) {
         Self::send(
             &self.video,
-            unit,
+            access_unit,
             "video",
             &self.no_video_reader,
             &self.video_behind,
@@ -593,17 +582,14 @@ impl MediaSink for ClSink {
                     }
                 }
             }
-            StreamEvent::VideoFrame { keyframe, data } => {
+            StreamEvent::VideoFrame { data, .. } => {
                 let mut access_unit = self
                     .pending
                     .lock()
                     .map(|mut pending| std::mem::take(&mut *pending))
                     .unwrap_or_default();
                 access_unit.extend_from_slice(&data);
-                self.send_video(AccessUnit {
-                    keyframe,
-                    data: access_unit,
-                });
+                self.send_video(access_unit);
             }
             // Which of the car's channels a stream feeds is said once, when the
             // stream opens, and by the name the phone gave it.
