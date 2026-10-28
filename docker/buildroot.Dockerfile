@@ -8,12 +8,14 @@ FROM debian:bookworm-slim
 ARG BUILDROOT_VERSION=2026.02.3
 
 # dosfstools and mtools are genimage's, not Buildroot's: the boot partition is a
-# vfat image, and genimage shells out to mkdosfs and mcopy to make one.
+# vfat image, and genimage shells out to mkdosfs and mcopy to make one. diffutils
+# is the Makefile's: `cmp` decides whether the target tree is still the one the
+# configuration describes.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-        bc bzip2 ca-certificates cpio curl dosfstools file g++ gcc git \
-        libncurses-dev make mtools patch perl python3 rsync sed tar unzip wget \
-        which \
+        bc bzip2 ca-certificates cpio curl diffutils dosfstools file g++ gcc \
+        git libncurses-dev make mtools patch perl python3 rsync sed tar unzip \
+        wget which \
  && rm -rf /var/lib/apt/lists/*
 
 RUN git clone --depth 1 --branch "${BUILDROOT_VERSION}" \

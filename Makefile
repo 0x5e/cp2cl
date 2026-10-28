@@ -41,13 +41,22 @@ CP2CL_COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DIRTY         := $(shell git status --porcelain --ignore-submodules=dirty 2>/dev/null)
 FW := $(DIST)/buildroot-$(BR_VERSION)-cp2cl-$(CP2CL_VERSION)-$(CP2CL_COMMIT)$(if $(DIRTY),-dirty).img.gz
 
-# What a firmware build starts from: no target tree, and no stamp claiming a
-# package was installed into it. The tree is what the card is, and Buildroot
-# only ever adds to it — a file stays after the package that put it there leaves
-# the configuration, and after the overlay stops shipping it. There is no way
-# back to a tree that holds only what this run asked for. This volume was still
-# carrying the whole module tree of kernel 6.6.160 beside the 6.18.58 one the
-# card runs: 31 files, 350 KB, for a kernel nothing here runs.
+# What a firmware build starts from.
+#
+# The tree is what the card is, and Buildroot only ever adds to it — a file
+# stays after the package that put it there leaves the configuration, and after
+# the overlay stops shipping it. There is no way back to a tree that holds only
+# what this run asked for. This volume was still carrying the whole module tree
+# of kernel 6.6.160 beside the 6.18.58 one the card runs: 31 files, 350 KB, for
+# a kernel nothing here runs.
+#
+# So the tree is emptied when what decides it changes, and kept otherwise. The
+# Buildroot release, the generated `.config` and everything under `board/` —
+# the overlays, the post-build script, the blobs it installs — are the whole of
+# it, and that is what the tree is fingerprinted by. A build after a change to
+# the crate then installs one package instead of thirty. Timestamps would empty
+# the tree on every checkout: a checkout rewrites every mtime in the working
+# tree and changes nothing else.
 #
 # Upstream has nothing that empties the tree and keeps the cache that produced
 # it: `make clean` takes dl/ and every build directory with it, and the
@@ -58,7 +67,24 @@ FW := $(DIST)/buildroot-$(BR_VERSION)-cp2cl-$(CP2CL_VERSION)-$(CP2CL_COMMIT)$(if
 #
 # `images/` is not touched: mkfs writes the root filesystem and genimage writes
 # both partitions and the card, every run, out of a fixed list of files.
-BR_FRESH := rm -rf /build/target && rm -f /build/build/*/.stamp_target_installed
+#
+# `make firmware FRESH=1` empties the tree whether the fingerprint says so or
+# not: the answer when the tree was edited in place while debugging.
+BR_FINGERPRINT := { echo $(BR_VERSION); cat /build/.config; \
+	find /src/buildroot/board -type f | LC_ALL=C sort | xargs -r cat; } \
+	| md5sum | cut -c1-32 > /build/.target-fingerprint.now
+BR_EMPTY := rm -rf /build/target && rm -f /build/build/*/.stamp_target_installed
+ifeq ($(FRESH),1)
+BR_FRESH := $(BR_EMPTY)
+else
+BR_FRESH := $(BR_FINGERPRINT) && { cmp -s /build/.target-fingerprint.now /build/.target-fingerprint \
+	|| { $(BR_EMPTY) && mv /build/.target-fingerprint.now /build/.target-fingerprint; }; }
+endif
+
+# The one package whose source changes on every build. A `local` site is rsynced
+# once, when `.stamp_rsynced` is written, and the tree is filled from the install
+# stamps — so both go, and the rsync lands ahead of the install in the same run.
+BR_REFRESH := rm -f /build/build/cp2cl-*/.stamp_rsynced /build/build/cp2cl-*/.stamp_target_installed
 
 .PHONY: all app test image firmware buildroot-image patched
 
@@ -117,15 +143,14 @@ image:
 # of the right length and an exit status that stops the build. `gzip -c` writes
 # the bytes it compresses and nothing more, so there is no tail to give back.
 #
-# `cp2cl-rebuild` between the two makes is what makes a new binary reach the card.
-# A `local` site is rsynced once, when `.stamp_rsynced` is written, so a second
-# `make firmware` would find every stamp in place and produce an image with the
-# previous binary on it. The rebuild has to come after the first make: on a fresh
-# volume there is no target directory to install into.
+# `BR_REFRESH` between the configuration and the make is what makes a new binary
+# reach the card. `_defconfig` comes first because `BR_FRESH` fingerprints the
+# `.config` it writes, and a build that fingerprints the previous one keeps a
+# tree the configuration no longer describes.
 #
-# The recipe opens with `BR_FRESH`: the target tree is emptied on every build, so
-# what the card carries is the configuration and the overlays and nothing else
-# that was ever on the volume.
+# The recipe empties the tree before the make, when the configuration or the
+# overlays changed, so what the card carries is the configuration and the
+# overlays and nothing else that was ever on the volume.
 firmware: app buildroot-image
 	mkdir -p $(DIST)
 	docker volume create $(BR_VOL) >/dev/null
@@ -133,10 +158,9 @@ firmware: app buildroot-image
 		-v "$(CURDIR)":/src:ro \
 		-e BR2_DL_DIR=/build/dl \
 		$(BR_IMAGE) sh -c 'chown $(BR_UID):$(BR_UID) /build \
-			&& su -s /bin/sh builder -c "$(BR_FRESH) \
-				&& make -C /opt/buildroot O=/build BR2_EXTERNAL=/src/buildroot $(BOARD)_defconfig \
-				&& make -C /opt/buildroot O=/build -j$$(nproc) \
-				&& make -C /opt/buildroot O=/build cp2cl-rebuild \
+			&& su -s /bin/sh builder -c "make -C /opt/buildroot O=/build BR2_EXTERNAL=/src/buildroot $(BOARD)_defconfig \
+				&& $(BR_FRESH) \
+				&& $(BR_REFRESH) \
 				&& make -C /opt/buildroot O=/build -j$$(nproc)"'
 	docker run --rm -u $(UID_GID) -v $(BR_VOL):/build -v "$(CURDIR)/$(DIST)":/out \
 		$(BR_IMAGE) sh -c 'gzip -9 -c /build/images/sdcard.img > /out/$(notdir $(FW))'
