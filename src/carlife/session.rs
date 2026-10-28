@@ -30,10 +30,10 @@ use base64::Engine as _;
 use chrono::{DateTime, FixedOffset, SecondsFormat};
 use livi_runtime::vehicle::Vehicle;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::Instant;
 
-use super::{auth, frame, gps, names, proto};
+use super::{auth, frame, gps, guide, names, proto};
 use crate::airplay::{info, EventSink, ScreenParams, SharedChannel};
 use crate::commands::{Command, TouchContact, PHONE_DROP, PHONE_HOOK_SWITCH, PHONE_MUTE};
 use crate::config::{bt_address, Config};
@@ -353,34 +353,37 @@ where
     // session was showing belongs to a car that is no longer here, and the page
     // would otherwise go on showing it.
     status.now_playing_cleared();
-    let (mut video, mut media, mut navi, mut playing, mut guidance, source) = match frames {
-        Frames::Live(outlet) => match outlet.take_video() {
-            Some(rx) => (
-                Some(rx),
-                outlet.take_media(),
-                outlet.take_navi(),
-                outlet.take_playing(),
-                outlet.take_guidance(),
-                Source::Live,
-            ),
-            None => {
-                tracing::warn!("carlife.video_source_taken action=heartbeat_only");
-                (None, None, None, None, None, Source::None)
-            }
-        },
-        Frames::Cycle(units) => (
-            None,
-            None,
-            None,
-            None,
-            None,
-            Source::Cycle {
-                units: units.clone(),
-                next: 0,
+    let (mut video, mut media, mut navi, mut playing, mut guidance, source, phone_screen) =
+        match frames {
+            Frames::Live(outlet) => match outlet.take_video() {
+                Some(rx) => (
+                    Some(rx),
+                    outlet.take_media(),
+                    outlet.take_navi(),
+                    outlet.take_playing(),
+                    outlet.take_guidance(),
+                    Source::Live,
+                    Some(outlet.screen()),
+                ),
+                None => {
+                    tracing::warn!("carlife.video_source_taken action=heartbeat_only");
+                    (None, None, None, None, None, Source::None, None)
+                }
             },
-        ),
-        Frames::None => (None, None, None, None, None, Source::None),
-    };
+            Frames::Cycle(units) => (
+                None,
+                None,
+                None,
+                None,
+                None,
+                Source::Cycle {
+                    units: units.clone(),
+                    next: 0,
+                },
+                None,
+            ),
+            Frames::None => (None, None, None, None, None, Source::None, None),
+        };
 
     // Reads are their own task. A frame can be six hundred kilobytes and the
     // video tick fires while one is arriving, so the read cannot live inside a
@@ -450,6 +453,10 @@ where
         up: false,
         frames_seen: 0,
         last_touch: None,
+        // Both wait for the car to name its screen: until it does, there is no
+        // size to look a guide up by.
+        guide: None,
+        phone_screen,
         status,
     };
 
@@ -911,6 +918,13 @@ struct Session<'a, W> {
     /// Where the finger was the last time the car said. A release has to name it
     /// — see `touch`.
     last_touch: Option<(u16, u16)>,
+    /// What the car is shown while the phone's screen stream is not open, once
+    /// this screen's size is known. `None` is a build with no guide for it, and
+    /// the channel is then left to its heartbeats.
+    guide: Option<guide::Guide>,
+    /// Whether the phone's screen stream is open. `None` where there is no phone
+    /// to wait for — a session fed from a file, or from nowhere.
+    phone_screen: Option<watch::Receiver<bool>>,
     /// Where the status page reads this session from. Reported to and never
     /// read back: see `crate::web::status`.
     status: Arc<Status>,
@@ -1296,6 +1310,18 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     }
                 );
                 self.screen_in_force = Some(in_force);
+                // What the car is shown until the phone's screen stream is open.
+                // Looked up now because this is the moment the size is known,
+                // and it is the size the channel carries: the picture and the
+                // screen agree without anything being scaled at run time.
+                self.guide = guide::picture(in_force.width as u32, in_force.height as u32)
+                    .and_then(|bytes| guide::Guide::cycle(access_units(bytes)));
+                tracing::info!(
+                    "carlife.guide width={} height={} loaded={}",
+                    in_force.width,
+                    in_force.height,
+                    self.guide.is_some()
+                );
                 // The panel is the car's, so its physical size is worked out
                 // here, from the size the phone is actually asked for and the
                 // density the table gives this car — 120 dpi where it says
@@ -1749,7 +1775,18 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             // Pictures arrive on the phone's own clock, so there is nothing for
             // the tick to send while they do. A heartbeat goes out once they
             // stop, which is what tells the car the channel is still ours.
+            //
+            // A screen stream that has not opened is the case the guide is for:
+            // the channel is the car's and the car is looking at it, so the
+            // picture goes out on the rate the two of them agreed rather than
+            // leaving the panel black behind a heartbeat.
             Source::Live => {
+                if !self.phone_screen_open() {
+                    if let Some(unit) = self.next_guide_unit() {
+                        let elapsed = started_at.elapsed().as_millis() as u32;
+                        return self.send_frame(VIDEO_DATA, elapsed, &unit).await;
+                    }
+                }
                 let idle = self
                     .channel_touched
                     .map_or(true, |touched| touched.elapsed() >= HEARTBEAT);
@@ -1762,6 +1799,31 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             }
             _ => self.send(VIDEO_HEARTBEAT, &[]).await,
         }
+    }
+
+    /// Whether the phone's screen stream is open.
+    ///
+    /// A session with no phone behind it has nothing to wait for, and is open:
+    /// a file or a run with no pictures at all is not a car sitting in front of
+    /// a guide.
+    fn phone_screen_open(&self) -> bool {
+        match self.phone_screen.as_ref() {
+            Some(screen) => *screen.borrow(),
+            None => true,
+        }
+    }
+
+    /// Whether the guide is what the car is being shown.
+    fn guiding(&self) -> bool {
+        self.guide.is_some() && !self.phone_screen_open()
+    }
+
+    /// The guide's next frame, or nothing when there is no guide to show.
+    ///
+    /// Taken before it is written, for the reason the file's frame is: the write
+    /// wants the session mutably and the guide is part of the session.
+    fn next_guide_unit(&mut self) -> Option<Vec<u8>> {
+        self.guide.as_mut().map(guide::Guide::next)
     }
 
     /// Writes one frame into a pipe the car has not used, and says what became
@@ -2289,10 +2351,17 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     /// How long until the next tick: a frame's worth of time when there is a
     /// picture to send on a schedule and one has been agreed, otherwise the
     /// heartbeat's.
+    ///
+    /// The guide is such a picture. Left on the heartbeat's second it would go
+    /// out at one frame a second, which is a panel that looks stuck rather than a
+    /// panel showing an instruction.
     fn period(&self) -> Duration {
         let rate = self.screen_in_force.map(|screen| screen.frame_rate);
         match (&self.source, self.started_at, rate) {
             (Source::Cycle { .. }, Some(_), Some(fps)) if fps > 0 => {
+                Duration::from_millis(1000 / fps as u64)
+            }
+            (Source::Live, Some(_), Some(fps)) if fps > 0 && self.guiding() => {
                 Duration::from_millis(1000 / fps as u64)
             }
             _ => HEARTBEAT,
@@ -2517,20 +2586,41 @@ mod tests {
                 .expect("the car can write");
         }
 
-        /// The next message, which is expected to be the one named.
-        async fn expect(&mut self, service_type: u32) -> frame::Message {
+        /// The next message, whatever it is.
+        async fn next(&mut self) -> frame::Message {
             let deadline = Duration::from_secs(2);
             let chunk = tokio::time::timeout(deadline, frame::read_chunk(&mut self.pipe))
                 .await
                 .expect("something arrived before the deadline")
                 .expect("the pipe is intact")
                 .expect("the session is still there");
-            let message = frame::decode(chunk.channel, &chunk.body).expect("it decodes");
+            frame::decode(chunk.channel, &chunk.body).expect("it decodes")
+        }
+
+        /// The next message, which is expected to be the one named.
+        async fn expect(&mut self, service_type: u32) -> frame::Message {
+            let message = self.next().await;
             assert_eq!(
                 message.service_type, service_type,
                 "expected {service_type:#010x}"
             );
             message
+        }
+
+        /// The next picture `wanted` accepts, with heartbeats and pictures it
+        /// does not accept passed over on the way.
+        ///
+        /// A picture already on its way when something changes arrives all the
+        /// same, and the channel sends a heartbeat whenever it has nothing else
+        /// to send, so neither is a reason for the test to fail.
+        async fn expect_picture(&mut self, wanted: impl Fn(&[u8]) -> bool) -> frame::Message {
+            for _ in 0..10 {
+                let message = self.next().await;
+                if message.service_type == VIDEO_DATA && wanted(&message.body) {
+                    return message;
+                }
+            }
+            panic!("no such picture arrived");
         }
 
         /// The car naming its channel and then asking who is there, answered the
@@ -4765,6 +4855,10 @@ mod tests {
         let mut carplay = |_: bool| {};
         let outlet = Arc::new(ClOutlet::new());
         let frames = Frames::Live(outlet.clone());
+        // The phone's screen stream is open before any of this: what is being
+        // tested is a picture going through, and a closed screen is the guide's
+        // case, which has tests of its own.
+        outlet.sink().push(StreamEvent::ScreenActive(true));
 
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let car = tokio::spawn(async move {
@@ -4807,6 +4901,146 @@ mod tests {
             .expect("the session ends cleanly");
         car.await.unwrap();
         pushing.await.unwrap();
+    }
+
+    /// The kinds of the NALs in a picture, in the order they are written. An
+    /// encoder uses either length of start code, and does within one picture.
+    fn nal_kinds(picture: &[u8]) -> Vec<u8> {
+        let mut kinds = Vec::new();
+        let mut at = 0;
+        while at + 3 <= picture.len() {
+            let header = if picture[at..at + 3] == [0, 0, 1] {
+                at + 3
+            } else if at + 4 <= picture.len() && picture[at..at + 4] == [0, 0, 0, 1] {
+                at + 4
+            } else {
+                at += 1;
+                continue;
+            };
+            if header < picture.len() {
+                kinds.push(picture[header] & 0x1f);
+            }
+            at = header;
+        }
+        kinds
+    }
+
+    /// The kind of the first NAL in a picture, whatever length its start code is.
+    fn opening_nal(picture: &[u8]) -> u8 {
+        *nal_kinds(picture)
+            .first()
+            .expect("a picture opens with a start code")
+    }
+
+    /// Until the phone's screen stream opens, the channel carries the guide.
+    ///
+    /// The first picture has to be a keyframe with its parameter sets, or a
+    /// decoder that has just started has nothing to start from; and the ones
+    /// after it have to follow at the rate the car agreed to, which is what the
+    /// second assertion is about — on the heartbeat's second the panel would
+    /// look stuck.
+    #[tokio::test]
+    async fn the_guide_is_what_the_car_is_shown_until_the_phones_screen_opens() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.handshake(asked()).await;
+            car.start_the_encoder().await;
+
+            // Parameter sets and then the keyframe they describe.
+            let first = car.expect(VIDEO_DATA).await;
+            let kinds = nal_kinds(&first.body);
+            assert_eq!(kinds.first(), Some(&7), "a picture opens with its SPS");
+            assert!(kinds.contains(&8), "and the PPS it refers to");
+            assert!(kinds.contains(&5), "and the keyframe they describe");
+            assert!(first.timestamp_ms.is_some());
+
+            // The next picture follows within a frame's worth of time rather
+            // than a second's.
+            let asking = tokio::time::Instant::now();
+            let second = car.expect(VIDEO_DATA).await;
+            assert!(asking.elapsed() < Duration::from_millis(500));
+            // A picture after the keyframe, not another keyframe: the file is a
+            // second of pictures and is looped rather than repeated.
+            assert_eq!(opening_nal(&second.body), 1);
+        });
+
+        run(
+            device,
+            &frames,
+            &cfg,
+            None,
+            &mut |_, _, _| {},
+            no_icon(),
+            EventSink::new(),
+            &mut carplay,
+            &no_tap(),
+            Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
+        )
+        .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    /// A phone whose screen has just opened replaces the guide with its own
+    /// pictures, which is the whole of the switch between the two.
+    #[tokio::test]
+    async fn the_phones_pictures_take_over_from_the_guide() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let outlet = Arc::new(ClOutlet::new());
+        let frames = Frames::Live(outlet.clone());
+
+        let phone_picture = vec![0x00, 0x00, 0x00, 0x01, 0x41];
+        let pressed = phone_picture.clone();
+
+        let (guiding_tx, guiding_rx) = tokio::sync::oneshot::channel();
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.handshake(asked()).await;
+            car.start_the_encoder().await;
+            // One guide picture, and only then does the phone arrive.
+            let guide = car.expect(VIDEO_DATA).await;
+            assert_eq!(opening_nal(&guide.body), 7);
+            let _ = guiding_tx.send(());
+
+            let picture = car.expect_picture(|body| body == pressed).await;
+            assert!(picture.timestamp_ms.is_some());
+        });
+
+        let arriving = tokio::spawn(async move {
+            let _ = guiding_rx.await;
+            outlet.sink().push(StreamEvent::ScreenActive(true));
+            outlet.sink().push(StreamEvent::VideoFrame {
+                keyframe: false,
+                data: phone_picture,
+            });
+        });
+
+        run(
+            device,
+            &frames,
+            &cfg,
+            None,
+            &mut |_, _, _| {},
+            no_icon(),
+            EventSink::new(),
+            &mut carplay,
+            &no_tap(),
+            Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
+        )
+        .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+        arriving.await.unwrap();
     }
 
     #[tokio::test]

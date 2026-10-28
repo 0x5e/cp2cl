@@ -1,6 +1,12 @@
 target/
 Cargo.lock.orig
 
+# The guide's screenshots are what the coded streams were built from, not what
+# anyone needs: `scripts/guide.sh` takes them again from `guide/index.html`. The
+# WebKit home it renders into goes beside them for the same reason.
+guide/shots/
+guide/.tmp/
+
 # Credentials — private keys, never commit these. The cp2cl package installs them
 # into the firmware's /etc/cp2cl/ and the program reads them there, so a clone
 # without them builds and runs, just without authentication.

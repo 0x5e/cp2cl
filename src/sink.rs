@@ -14,7 +14,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::navigation::Guidance;
 use crate::playing::Playing;
@@ -290,6 +290,12 @@ pub struct ClOutlet {
     playing_rx: Mutex<Option<mpsc::Receiver<Playing>>>,
     guidance_tx: mpsc::Sender<Guidance>,
     guidance_rx: Mutex<Option<mpsc::Receiver<Guidance>>>,
+    /// Whether the phone's screen stream is open. Something to read rather than
+    /// something to wait on, and read by whoever wants to know what the car is
+    /// being shown from: a screen that is not open has no pictures, so what the
+    /// car gets then is the guide.
+    screen_tx: watch::Sender<bool>,
+    screen_rx: watch::Receiver<bool>,
 }
 
 impl ClOutlet {
@@ -299,6 +305,9 @@ impl ClOutlet {
         let (navi_tx, navi_rx) = mpsc::channel(CL_BACKLOG);
         let (playing_tx, playing_rx) = mpsc::channel(CL_BACKLOG);
         let (guidance_tx, guidance_rx) = mpsc::channel(CL_BACKLOG);
+        // Nothing has opened a screen yet: the first thing a phone does is
+        // arrive, and this says so when it does.
+        let (screen_tx, screen_rx) = watch::channel(false);
         Self {
             video_tx,
             video_rx: Mutex::new(Some(video_rx)),
@@ -310,6 +319,8 @@ impl ClOutlet {
             playing_rx: Mutex::new(Some(playing_rx)),
             guidance_tx,
             guidance_rx: Mutex::new(Some(guidance_rx)),
+            screen_tx,
+            screen_rx,
         }
     }
 
@@ -326,6 +337,7 @@ impl ClOutlet {
             navi: self.navi_tx.clone(),
             playing: self.playing_tx.clone(),
             guidance: self.guidance_tx.clone(),
+            screen: self.screen_tx.clone(),
             pending: Mutex::new(Vec::new()),
             media_stream: Mutex::new(None),
             navi_stream: Mutex::new(None),
@@ -338,6 +350,12 @@ impl ClOutlet {
             playing_dropped: AtomicBool::new(false),
             guidance_dropped: AtomicBool::new(false),
         })
+    }
+
+    /// Whether the phone's screen stream is open, for whoever is deciding what
+    /// the car is shown.
+    pub fn screen(&self) -> watch::Receiver<bool> {
+        self.screen_rx.clone()
     }
 
     /// The video half, for the CarLife session. One car, one owner: a second
@@ -433,6 +451,10 @@ pub struct ClSink {
     navi: mpsc::Sender<Navi>,
     playing: mpsc::Sender<Playing>,
     guidance: mpsc::Sender<Guidance>,
+    /// Whether the phone's screen stream is open, for the side that decides what
+    /// the car is shown while it is not. Written by the airplay pump that opens
+    /// and closes the stream, read by the CarLife session.
+    screen: watch::Sender<bool>,
     /// Parameter sets from the newest codec description, put in front of the
     /// next frame. Held outside the queue deliberately: the queue can be full,
     /// and a dropped SPS/PPS costs everything that follows it.
@@ -630,9 +652,12 @@ impl MediaSink for ClSink {
                     self.send_navi(Navi::Ended);
                 }
             }
-            // The car learns nothing from this: it is the video channel that
-            // tells it whether there is a picture.
-            StreamEvent::ScreenActive(_) => {}
+            // The car learns nothing from this, but the CarLife session does: a
+            // screen stream that is not open is a car with no pictures to show,
+            // and that is the whole of what the guide is for.
+            StreamEvent::ScreenActive(open) => {
+                let _ = self.screen.send(open);
+            }
         }
     }
 }
