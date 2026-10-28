@@ -840,11 +840,9 @@ struct Session<'a, W> {
     /// arriving on their own clock, this is what decides whether the heartbeat
     /// still has a job to do.
     channel_touched: Option<Instant>,
-    /// The screen the channel carries, once the car has named one: what it named
-    /// with its rate clamped into range, or the table's size stored in its place
-    /// where the table preconfigures this number. A preset is written here as it
-    /// arrives rather than kept beside the car's, so everything that reads the
-    /// screen reads one field and nothing downstream asks which it was.
+    /// The screen the channel carries, once the car has named one: what the file,
+    /// the table and the car add up to, written here rather than kept beside the
+    /// car's, so everything downstream reads one field.
     screen_in_force: Option<proto::VideoEncoderInfo>,
     /// What the channel table says about the panel behind this car's number, once
     /// that number has arrived: the size the phone is asked for, when the table
@@ -1336,14 +1334,12 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     },
                 };
                 // And what the channel carries, which is `INIT_DONE`'s answer:
-                // the table's size where it preconfigures this number, because a
-                // make that got its own screen wrong asked for the wrong
-                // numbers. That is what is stored, in place of what the car
-                // said, so nothing past this point has to ask which it was.
-                let in_force = self.preset_in_place_of(named);
+                // the file's numbers where the page picked some, the table's
+                // where it preconfigures this number, and the car's otherwise.
+                let (in_force, size_source, rate_source) = self.screen_in_place_of(named);
                 tracing::info!(
                     "carlife.msg.recv service_type={} width={} height={} frameRate={} \
-                     served_width={} served_height={} served_frameRate={} source={}",
+                     served_width={} served_height={} served_frameRate={} source={} rate_source={}",
                     names::ServiceType(HU_VIDEO_ENCODER_INIT),
                     asked.width,
                     asked.height,
@@ -1351,11 +1347,8 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     in_force.width,
                     in_force.height,
                     in_force.frame_rate,
-                    if self.panel.preset.is_some() {
-                        "channel_map"
-                    } else {
-                        "car"
-                    }
+                    size_source,
+                    rate_source
                 );
                 self.screen_in_force = Some(in_force);
                 // What the car is shown until the phone's screen stream is open.
@@ -1438,13 +1431,13 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             }
             HU_VIDEO_ENCODER_FRAME_RATE_CHANGE => {
                 let asked = proto::decode_frame_rate(&message.body).unwrap_or(0);
-                // Only a car the table says nothing about changes its own rate. A
-                // preset's rate came with its size, and the phone is rendering at
-                // that one: agreeing to another would leave the car pacing a
-                // picture the phone never sends.
+                // Only a car that nothing else has a rate for changes its own: the
+                // file's rate and a preset's are what the phone renders at, and
+                // another would leave the car pacing a picture it never sends.
+                let fixed = self.cfg.screen.fps.is_some() || self.panel.preset.is_some();
                 let current = self.screen_in_force.map_or(30, |screen| screen.frame_rate);
                 let accepted = match asked {
-                    MIN_FPS..=MAX_FPS if self.panel.preset.is_none() => asked,
+                    MIN_FPS..=MAX_FPS if !fixed => asked,
                     _ => current,
                 };
                 tracing::info!(
@@ -1773,24 +1766,41 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         ])
     }
 
-    /// What the video channel carries where the channel table preconfigures this
-    /// car's number: the table's size stands in for the one the car named. This
-    /// is the only place the table and the car are compared — the value it
-    /// returns is stored, and everything else reads the store.
-    fn preset_in_place_of(&self, named: proto::VideoEncoderInfo) -> proto::VideoEncoderInfo {
-        match self.panel.preset {
-            Some(preset) => proto::VideoEncoderInfo {
-                width: preset.width as i32,
-                height: preset.height as i32,
-                frame_rate: preset.fps as i32,
+    /// What the video channel carries, and where each number came from: the
+    /// settings file first, then the channel table, then the car. The two are
+    /// taken one at a time, because the file may name one and not the other.
+    fn screen_in_place_of(
+        &self,
+        named: proto::VideoEncoderInfo,
+    ) -> (proto::VideoEncoderInfo, &'static str, &'static str) {
+        let table = self.panel.preset;
+        let resolution = self
+            .cfg
+            .screen
+            .resolution
+            .map(|r| (r.width as i32, r.height as i32, "config"))
+            .or_else(|| table.map(|p| (p.width as i32, p.height as i32, "channel_map")))
+            .unwrap_or((named.width, named.height, "car"));
+        let fps = self
+            .cfg
+            .screen
+            .fps
+            .map(|fps| (fps as i32, "config"))
+            .or_else(|| table.map(|p| (p.fps as i32, "channel_map")))
+            .unwrap_or((named.frame_rate, "car"));
+        (
+            proto::VideoEncoderInfo {
+                width: resolution.0,
+                height: resolution.1,
+                frame_rate: fps.0,
             },
-            None => named,
-        }
+            resolution.2,
+            fps.1,
+        )
     }
 
     /// The size the picture is drawn at, which is the size the car was answered
-    /// with. A preset was stored in place of what the car named, so this is one
-    /// field and there is nothing to choose between.
+    /// with: one field, with nothing left to choose between.
     fn canvas(&self) -> (u32, u32) {
         self.screen_in_force.map_or(
             (u32::from(u16::MAX), u32::from(u16::MAX)),
@@ -1798,11 +1808,9 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         )
     }
 
-    /// The car's own pixels are the phone's. `INIT_DONE` is what told the car
-    /// which picture to measure its touches in, and a preset was stored there in
-    /// place of what it named, so a touch arrives in those numbers already: it is
-    /// clamped and nothing else, because a point outside the picture is not on
-    /// it.
+    /// The car's own pixels are the phone's: `INIT_DONE` told it which picture to
+    /// measure its touches in, so a touch arrives in those numbers already and is
+    /// only clamped.
     fn on_canvas(&self, x: i32, y: i32) -> (u16, u16) {
         clamped(x, y, self.canvas())
     }
@@ -2766,6 +2774,14 @@ mod tests {
             self.expect(FOREGROUND).await;
         }
 
+        /// The car asking for another rate, and the rate it is answered with.
+        async fn change_rate(&mut self, fps: i32) -> i32 {
+            self.send(HU_VIDEO_ENCODER_FRAME_RATE_CHANGE, &proto::frame_rate(fps))
+                .await;
+            let answer = self.expect(VIDEO_ENCODER_FRAME_RATE_CHANGE_DONE).await;
+            proto::decode_frame_rate(&answer.body).expect("the answer carries a rate")
+        }
+
         /// The car asking which data this device can provide, and the answer it
         /// gets back.
         async fn ask(&mut self, modules: &[i32]) -> frame::Message {
@@ -3167,9 +3183,160 @@ mod tests {
         });
     }
 
-    /// A preset says what the screen is, and the car is answered with it, so its
-    /// touches are in that size already: a point near the right edge stays there
-    /// rather than being scaled up from the size the car claimed.
+    /// 文件排在渠道表与车机之前：两项都有，表和车机都不作数。
+    #[tokio::test]
+    async fn the_settings_file_is_served_before_the_table_and_the_car() {
+        let cfg = Config {
+            screen: crate::settings::Screen {
+                resolution: Some(crate::settings::Resolution {
+                    width: 1920,
+                    height: 1080,
+                }),
+                fps: Some(60),
+            },
+            ..Config::from_env()
+        };
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            // The table preconfigures 1920x720@30 for this number, and the car
+            // asks for 1280x720@30: neither is what comes back.
+            car.handshake_on(
+                "20062104",
+                asked(),
+                proto::VideoEncoderInfo {
+                    width: 1920,
+                    height: 1080,
+                    frame_rate: 60,
+                },
+            )
+            .await;
+        });
+
+        let screens = Arc::new(Mutex::new(Vec::new()));
+        let seen = screens.clone();
+        let mut screen = move |width: u32, height: u32, fps: u32| {
+            seen.lock().unwrap().push((width, height, fps));
+        };
+        let status = Arc::new(Status::new());
+        run(
+            device,
+            &Frames::None,
+            &cfg,
+            None,
+            &mut screen,
+            no_icon(),
+            EventSink::new(),
+            &mut carplay,
+            &no_tap(),
+            status.clone(),
+            Arc::new(Vehicle::default()),
+        )
+        .await
+        .expect("the session ends cleanly");
+        car.await.expect("the car saw its answer");
+
+        assert_eq!(*screens.lock().unwrap(), vec![(1920, 1080, 60)]);
+        status.with(|s| {
+            let agreed = s.carlife.agreed.expect("the answer is on the page");
+            assert_eq!((agreed.width, agreed.height, agreed.fps), (1920, 1080, 60));
+        });
+    }
+
+    /// 两项各自往下走：文件只选了尺寸，帧率还是渠道表的。
+    #[tokio::test]
+    async fn a_size_from_the_file_leaves_the_rate_to_the_table() {
+        let cfg = Config {
+            screen: crate::settings::Screen {
+                resolution: Some(crate::settings::Resolution {
+                    width: 1280,
+                    height: 480,
+                }),
+                fps: None,
+            },
+            ..Config::from_env()
+        };
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.handshake_on(
+                "20062104",
+                asked(),
+                proto::VideoEncoderInfo {
+                    width: 1280,
+                    height: 480,
+                    frame_rate: 30,
+                },
+            )
+            .await;
+        });
+
+        run(
+            device,
+            &Frames::None,
+            &cfg,
+            None,
+            &mut |_, _, _| {},
+            no_icon(),
+            EventSink::new(),
+            &mut carplay,
+            &no_tap(),
+            Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
+        )
+        .await
+        .expect("the session ends cleanly");
+        car.await.expect("the car saw its answer");
+    }
+
+    /// 文件定死的帧率，车机再来改不作数。
+    #[tokio::test]
+    async fn a_rate_the_file_names_is_not_changed_by_the_car() {
+        let cfg = Config {
+            screen: crate::settings::Screen {
+                resolution: None,
+                fps: Some(60),
+            },
+            ..Config::from_env()
+        };
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.handshake(proto::VideoEncoderInfo {
+                width: 1280,
+                height: 720,
+                frame_rate: 60,
+            })
+            .await;
+            assert_eq!(car.change_rate(30).await, 60, "the file's rate stands");
+        });
+
+        run(
+            device,
+            &Frames::None,
+            &cfg,
+            None,
+            &mut |_, _, _| {},
+            no_icon(),
+            EventSink::new(),
+            &mut carplay,
+            &no_tap(),
+            Arc::new(Status::new()),
+            Arc::new(Vehicle::default()),
+        )
+        .await
+        .expect("the session ends cleanly");
+        car.await.expect("the car saw its answer");
+    }
+
+    /// The served size is what the car was answered with, so its touches arrive in
+    /// that size already.
     #[test]
     fn a_touch_is_taken_as_it_arrives_on_the_size_in_force() {
         assert_eq!(clamped(1900, 700, (1920, 720)), (1900, 700));

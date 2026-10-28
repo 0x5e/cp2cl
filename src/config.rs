@@ -3,6 +3,9 @@
 //! Nothing here is required: the defaults build a working wired session and hand
 //! it to whatever head unit turns up. See README for the full table.
 //!
+//! `screen` is not from the environment: it is `/etc/cp2cl/config.json`, read by
+//! `main`. See `crate::settings`.
+//!
 //! Two values are not settings at all, because they are properties of the
 //! machine rather than choices: the name it goes by is the hostname
 //! (`hostname`), and its Bluetooth address is read off the controller
@@ -137,6 +140,9 @@ pub struct Config {
     pub input_file: Option<PathBuf>,
     /// Linux only: the Bluetooth adapter, as BlueZ names it.
     pub bt_adapter: String,
+    /// The screen the settings page picked, out of `/etc/cp2cl/config.json`.
+    /// `main` fills it in; empty is the car's own screen.
+    pub screen: crate::settings::Screen,
 }
 
 impl Config {
@@ -153,6 +159,7 @@ impl Config {
             wifi_iface: env_or("CP2CL_WIFI_IFACE", "wlan0"),
             input_file: env("CP2CL_INPUT_FILE").map(PathBuf::from),
             bt_adapter,
+            screen: crate::settings::Screen::default(),
         }
     }
 }

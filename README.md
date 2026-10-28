@@ -122,6 +122,31 @@ asked to render at, and `GET /info` is where it is said: one display, named
 `cp2cl`, sized to the car's own pixels — or to the size the channel table names
 for it. A car that names nothing gets 1280x720 at 30.
 
+Three things can name that screen, and they are read in this order: the settings
+page's file, the channel table, and the car. The two numbers are taken one at a
+time, so a page that picks a size and leaves the rate at 默认 is served the picked
+size at the table's rate, or the car's where the table names none.
+
+The file is `/etc/cp2cl/config.json`, written by the page at `POST /api/settings`
+and read once at startup — a size saved while the program is up reaches the phone
+on the next run. A field that is not in it is 默认: the next source down.
+
+```json
+{
+  "screen": { "width": 1920, "height": 720, "fps": 60 }
+}
+```
+
+It is read as it is written, so a size or a rate the page does not offer is served
+all the same — the file is the operator's. The `POST` takes the same values, so a
+size put in the file by hand can be saved back from the page. Only what cannot be
+a size or a rate at all is refused, which is half a pair or a zero.
+
+The page offers four sizes — 1280x720 and 1920x1080 at 16:9, 1280x480 and
+1920x720 at 24:9 — and 30 or 60. They are the four the guide is built at, so a
+picked size is one the car is shown a guide of its own shape for. A value in the
+file that is not one of them is listed as it is, rather than shown as 默认.
+
 A number the channel table says something about is served that way instead of what
 it asked for. There are two fields, both per number:
 
@@ -140,13 +165,17 @@ density, which the millimetres the phone is told are worked out at — 120 where
 an entry names none. Both belong to the number rather than to the make, so a make
 that answers on several is only overridden on the one that needs it.
 
+A rate the settings file names is held the same way: `FRAME_RATE_CHANGE` is
+answered with that rate rather than with the one the car asked for, because the
+phone is already rendering at it.
+
 Changing it costs a session, and that is not a shortcut: the phone reads `/info`
 exactly once, at the start of a session, and never asks again, so a new size only
 reaches it on the next one. A car whose screen is not the default has its CarPlay
 session rebuilt once, early on, for exactly this reason — the log says so:
 
 ```
-[carlife] 	msg.recv service_type=0x00018007(MSG_CMD_VIDEO_ENCODER_INIT) width=1280 height=720 frameRate=30 served_width=1920 served_height=720 served_frameRate=30 source=channel_map
+[carlife] 	msg.recv service_type=0x00018007(MSG_CMD_VIDEO_ENCODER_INIT) width=1280 height=720 frameRate=30 served_width=1920 served_height=720 served_frameRate=30 source=channel_map rate_source=channel_map
 [carplay] 	video.screen_named width=1920 height=720 fps=30
 ```
 
@@ -232,8 +261,9 @@ same place, so it needs the three files copied there or it runs without them.
 | `CP2CL_INPUT_FILE` | — | test video stream file |
 
 On the board every one of these is an environment variable of the process: the
-program is started by hand and has no settings file of its own — see [Running it
-on the board](#running-it-on-the-board). What the accessory is called and where it
+program is started by hand and the only file it reads for itself is
+`/etc/cp2cl/config.json`, which it also writes — see [Running it on the
+board](#running-it-on-the-board). What the accessory is called and where it
 is reachable are not settings: both come off the machine, the name being its
 hostname and its address being read from the Bluetooth adapter, and the network
 the phone comes back over is read from the access point's own configuration — see
@@ -374,7 +404,7 @@ is where it stopped:
 [usb]     	enumerated action=start_session
 [carlife] 	msg.recv service_type=0x00018001(MSG_CMD_HU_PROTOCOL_VERSION) majorVersion=1 minorVersion=0
 [carlife] 	session_up                          # the gate opens here
-[carlife] 	msg.recv service_type=0x00018007(MSG_CMD_VIDEO_ENCODER_INIT) width=1280 height=720 frameRate=30 served_width=1280 served_height=720 served_frameRate=30 source=car
+[carlife] 	msg.recv service_type=0x00018007(MSG_CMD_VIDEO_ENCODER_INIT) width=1280 height=720 frameRate=30 served_width=1280 served_height=720 served_frameRate=30 source=car rate_source=car
 [carlife] 	msg.recv service_type=0x00018009(MSG_CMD_VIDEO_ENCODER_START)
 ```
 
@@ -697,6 +727,15 @@ has reported a position: the numbers are the ones CarLife carries, and the page
 is where they become degrees and metres. **设备端** is the board itself, CPU share and memory in use: neither
 end, and the one section that says whether the box is keeping up.
 
+The third tab is **设置**, and it is the one part of the page that changes the
+program rather than describing it. Two pickers — 分辨率 and 帧率, each with 默认
+as its first choice — and 重置 and 保存 under them. 保存 writes
+`/etc/cp2cl/config.json`; 重置 puts the pickers back to what was read when the tab
+was opened, without writing anything. A size is in force on the next run, which is
+what the toast says: 保存成功，重启生效. The choices come from `GET /api/settings`
+rather than from the page, so a size is offered and served from one place — see
+[What the phone renders at](#what-the-phone-renders-at).
+
 The port is not a setting, and neither is the page: it is one HTML file with no
 build step, compiled into the binary along with its stylesheet. There is nothing
 to install beside the program and nothing to fetch — which matters here, because
@@ -974,6 +1013,7 @@ this a derivative work, so cp2cl inherits that.
 | `src/artwork.rs` | the cover art, made small enough for the car's one media message |
 | `src/navigation.rs` | where the phone is going, as the fields the car's turn-by-turn strip is told |
 | `src/commands.rs` | the vocabulary of input |
+| `src/settings.rs` | `/etc/cp2cl/config.json`: the screen the settings page picks, the choices it picks from, and the file as it is written |
 | `src/web/status.rs` | the snapshot both halves report into, and the JSON behind `/api/status` |
 | `src/web/device.rs` | the board's own CPU and memory, read from `/proc` on a task of its own |
 | `src/web/mod.rs` | the status page's router and listener |

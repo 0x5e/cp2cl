@@ -30,6 +30,10 @@
 //! with it has to say where it got to — see `log`. `/api/log/download` is the
 //! same copy as one file, for taking off the board.
 //!
+//! `/api/settings` is the one path that is written as well as read: the screen
+//! the page picks is `/etc/cp2cl/config.json`, and a `POST` replaces that file.
+//! The program reads it once at startup, so a save changes the next run.
+//!
 //! `axum` is here for `axum::serve` and its router, which is less code than
 //! parsing a request line by hand and less to get wrong. It used to be here for
 //! a WebSocket too, and that half went with the browser client that needed it —
@@ -45,6 +49,7 @@ pub use status::{AccessPoint, Audio, Mic, Screen, Size, Statistic, Status};
 use std::path::Path;
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use axum::extract::{RawQuery, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -111,6 +116,7 @@ pub async fn serve(listener: TcpListener, status: Arc<Status>) {
         .route("/api/cover", get(cover))
         .route("/api/log", get(log))
         .route("/api/log/download", get(download))
+        .route("/api/settings", get(settings).post(save))
         .fallback(not_found)
         .with_state(status);
     if let Err(e) = axum::serve(listener, app).await {
@@ -151,6 +157,50 @@ async fn api(State(status): State<Arc<Status>>) -> Response {
 /// not change while the program runs.
 async fn channels() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, JSON)], embedded(CHANNELS_NAME))
+}
+
+/// The screen the settings page picks, and the choices it picks from. Read out of
+/// the file rather than out of the running session: the file is what the page is
+/// editing and what the next run serves.
+async fn settings() -> Response {
+    json_answer(StatusCode::OK, crate::settings::answer())
+}
+
+/// The same file, written. A body that is not a size or a rate is a `400` rather
+/// than a file nobody can serve.
+async fn save(body: Bytes) -> Response {
+    let screen = match crate::settings::parse(&body) {
+        Ok(screen) => screen,
+        Err(e) => {
+            tracing::warn!("web.settings_refused err={e}");
+            return json_answer(StatusCode::BAD_REQUEST, json!({ "error": e }));
+        }
+    };
+    match crate::settings::save(&screen) {
+        Ok(()) => {
+            tracing::info!("web.settings_saved screen={screen} effect=restart");
+            json_answer(StatusCode::OK, json!({ "ok": true }))
+        }
+        Err(e) => {
+            tracing::warn!("web.settings_save_failed err={e}");
+            json_answer(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({ "error": format!("写入失败：{e}") }),
+            )
+        }
+    }
+}
+
+/// A JSON answer, never cached: both of these are about a file that changes.
+fn json_answer(status: StatusCode, body: serde_json::Value) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, JSON),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        (status, body.to_string()),
+    )
+        .into_response()
 }
 
 /// The picture on the car's panel, which is the one answer here that is not
@@ -359,6 +409,31 @@ mod tests {
         assert!(
             embedded(CHANNELS_NAME).contains("20062100"),
             "which the binary has"
+        );
+    }
+
+    /// 设置页读的写的都是同一个文件，两个下拉的选项跟着答案一起来：页面里不列
+    /// 一份自己的，所以能选什么和后端收什么是同一份。
+    #[test]
+    fn the_page_reads_and_writes_the_settings_file() {
+        for said in ["分辨率", "帧率", "重置", "保存", "保存成功，重启生效"] {
+            assert!(page_text().contains(said), "the page says {said}");
+        }
+        assert!(
+            page_text().contains("/api/settings"),
+            "one path, read and written"
+        );
+        assert!(
+            page_text().contains("method: \"POST\""),
+            "and it is written rather than only read"
+        );
+        assert!(
+            !page_text().contains("1920x1080"),
+            "the choices come with the answer, not out of the page"
+        );
+        assert!(
+            page_text().contains("data-manual"),
+            "a value the choices do not list is shown as it is, not as 默认"
         );
     }
 

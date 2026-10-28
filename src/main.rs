@@ -23,6 +23,7 @@ mod logging;
 mod navigation;
 mod playing;
 mod session;
+mod settings;
 mod sink;
 mod web;
 mod wireless;
@@ -85,13 +86,20 @@ async fn main() -> Result<()> {
         tracing::warn!("main.copy_unavailable path={} err={reason}", logging::PATH);
     }
 
-    let cfg = Arc::new(Config::from_env());
+    // Read once: what is saved while this run is up reaches the phone on the
+    // next one.
+    let screen = settings::load_or_create();
+    let cfg = Arc::new(Config {
+        screen,
+        ..Config::from_env()
+    });
 
     tracing::info!("main.started name=cp2cl");
     // Which build this run is, said once and at the top: every question about a
     // log begins with "which build was that", and the answer is not in the lines
     // that follow. It is the same string the page shows, from the same place.
     tracing::info!("main.version software={:?}", web::device::SOFTWARE);
+    tracing::info!("main.screen {screen}");
 
     // The settings this run was handed, because "why is nothing happening" is
     // nearly always one of them. The two halves of the program log different
@@ -238,8 +246,12 @@ async fn main() -> Result<()> {
 
     // Worth saying out loud: nothing here draws a picture, and what the phone is
     // asked to render is the car's own screen — so nothing is rendered until a
-    // car has said what that screen is.
-    tracing::info!("main.bridge.ready sink=carlife screen_source=car");
+    // car has said what that screen is. A size picked on the page is the one
+    // exception.
+    tracing::info!(
+        "main.bridge.ready sink=carlife screen_source={}",
+        if cfg.screen.is_empty() { "car" } else { "config" }
+    );
 
     let pairings = Arc::new(Mutex::new(Pairings::load_or_create()?));
     // The half of the pairing identity the phone is told: the key it was given

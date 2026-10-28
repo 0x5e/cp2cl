@@ -81,6 +81,14 @@
   .v-warn{color:#fa9d3b}
   .v-bad{color:#fa5151}
   .stamp{text-align:center;font-size:12px;opacity:.45;padding:18px 16px 0;margin:0}
+  .weui-cell_select{padding:16px var(--weui-cellPaddingLR)}
+  .weui-cell_select .weui-cell__ft{padding-right:32px;text-align:right}
+  .weui-cell_select .weui-select{width:auto;max-width:100%;min-height:0;padding:0;
+    border:0;font:inherit;font-size:14px;line-height:inherit;text-align:right;
+    color:var(--weui-FG-0);background:none;-webkit-appearance:none;appearance:none}
+  .weui-btn-area{margin-top:26px;display:flex;justify-content:center;gap:12px}
+  .weui-btn-area .weui-btn{margin:0;min-width:0;width:136px}
+  .weui-toast[hidden]{display:none}
 </style>
 </head>
 <body>
@@ -120,7 +128,27 @@
     <pre class="log" id="log"></pre>
     <p class="stamp" id="log-stamp">正在读取…</p>
   </div>
-  <div class="panel" id="panel-settings"></div>
+  <div class="panel" id="panel-settings">
+    <div class="weui-cells__title">屏幕</div>
+    <div class="weui-cells">
+      <div class="weui-cell weui-cell_select">
+        <div class="weui-cell__bd"><p>分辨率</p></div>
+        <div class="weui-cell__ft"><select class="weui-select" id="set-resolution"></select></div>
+      </div>
+      <div class="weui-cell weui-cell_select">
+        <div class="weui-cell__bd"><p>帧率</p></div>
+        <div class="weui-cell__ft"><select class="weui-select" id="set-rate"></select></div>
+      </div>
+    </div>
+    <div class="weui-btn-area">
+      <button class="weui-btn weui-btn_default" id="set-reset">重置</button>
+      <button class="weui-btn weui-btn_primary" id="set-save">保存</button>
+    </div>
+    <p class="stamp" id="set-stamp">正在读取…</p>
+  </div>
+</div>
+<div class="weui-toast weui-toast_text" id="toast" hidden>
+  <p class="weui-toast__content" id="toast-text"></p>
 </div>
 <nav class="tabbar">
   <button class="tab on" id="tab-status" data-tab="status">状态</button>
@@ -681,6 +709,107 @@ async function logTick() {
   }
 }
 
+// ---------------------------------------------------------------- 设置 ----
+
+const resolutionPick = document.getElementById("set-resolution");
+const ratePick = document.getElementById("set-rate");
+const setStamp = document.getElementById("set-stamp");
+const toast = document.getElementById("toast");
+const toastText = document.getElementById("toast-text");
+
+let saved = null;
+let settingsRead = false;
+let toastTimer = null;
+
+function choices(pick, entries) {
+  pick.textContent = "";
+  pick.appendChild(new Option("默认", ""));
+  for (const [value, label] of entries) pick.appendChild(new Option(label, value));
+}
+
+function pickValue(pick, value, unit) {
+  for (const option of pick.querySelectorAll("option[data-manual]")) option.remove();
+  if (!value) {
+    pick.value = "";
+    return;
+  }
+  let listed = false;
+  for (const option of pick.options) if (option.value === value) listed = true;
+  if (!listed) {
+    const option = new Option(value + unit, value);
+    option.dataset.manual = "";
+    pick.insertBefore(option, pick.options[1] || null);
+  }
+  pick.value = value;
+}
+
+function shown(screen) {
+  const size = screen && screen.width && screen.height
+    ? screen.width + "x" + screen.height
+    : "";
+  const fps = screen && screen.fps ? String(screen.fps) : "";
+  pickValue(resolutionPick, size, "");
+  pickValue(ratePick, fps, " fps");
+}
+
+async function loadSettings() {
+  try {
+    const response = await fetch("/api/settings", { cache: "no-store" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    const data = await response.json();
+    const screen = data.screen || {};
+    const options = data.options || {};
+    choices(resolutionPick, (options.resolutions || []).map(
+      r => [r.width + "x" + r.height, r.label]));
+    choices(ratePick, (options.rates || []).map(f => [String(f), f + " fps"]));
+    saved = {
+      width: screen.width ?? null,
+      height: screen.height ?? null,
+      fps: screen.fps ?? null,
+    };
+    shown(saved);
+    settingsRead = true;
+    setStamp.className = "stamp";
+    setStamp.textContent = "";
+  } catch (e) {
+    setStamp.className = "stamp v-bad";
+    setStamp.textContent = "读取失败：" + e.message;
+  }
+}
+
+function showToast(text) {
+  toastText.textContent = text;
+  toast.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast.hidden = true; }, 2000);
+}
+
+async function saveSettings() {
+  const size = resolutionPick.value
+    ? resolutionPick.value.split("x").map(Number)
+    : [null, null];
+  const fps = ratePick.value ? Number(ratePick.value) : null;
+  try {
+    const response = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ screen: { width: size[0], height: size[1], fps } }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "HTTP " + response.status);
+    saved = { width: size[0], height: size[1], fps };
+    shown(saved);
+    setStamp.className = "stamp";
+    setStamp.textContent = "已保存 · " + now();
+    showToast("保存成功，重启生效");
+  } catch (e) {
+    showToast("保存失败：" + e.message);
+  }
+}
+
+document.getElementById("set-reset").addEventListener("click", () => shown(saved));
+document.getElementById("set-save").addEventListener("click", saveSettings);
+
 // ---------------------------------------------------------------- tabs ----
 
 // The tab in view is part of the address, so a reload or a link to the page
@@ -708,6 +837,7 @@ function select(name) {
   // Whatever is not being looked at is not asked for: the board has better
   // things to do with its CPU than answer a hidden tab.
   if (name === "status") statusTick();
+  if (name === "settings" && !settingsRead) loadSettings();
   if (name === "log") {
     // A box that was off screen had nowhere to keep its place, so it opens at
     // the end: what the log is looked at for is what is happening now.
