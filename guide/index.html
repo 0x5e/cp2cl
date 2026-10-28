@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="dark">
+<title>CarPlay</title>
+<style>
+  /* The picture the car shows while the phone's screen stream is not open. It
+     is screenshotted, not opened in a browser: every size here is a fraction of
+     the panel's width, so the same page draws the same picture at 1280 and at
+     1920, and on 16:9 as on 24:9. The width is what the two panels share — a
+     24:9 strip is the same screen as a 16:9 one with the bottom cut off, so
+     text that keeps its width keeps its physical size too.
+
+     Colours are iOS's own dark-mode greys rather than #000 and #fff: the panel
+     sits in a car, and pure black against pure white in a dark cabin reads as a
+     flash rather than a background. */
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #1c1c1e;          /* secondarySystemBackground, dark */
+    color: #f2f2f7;               /* systemGray6, which is what text is on it */
+    -webkit-font-smoothing: antialiased;
+    font-family: "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC",
+                 "Source Han Sans SC", sans-serif;
+  }
+
+  /* The block is centred, and its own height is what puts the mark above the
+     middle of the panel: the mark and the name are what the eye lands on first.
+     The bottom padding is the whole of the lift; anything more reads as dead
+     space under the instructions. */
+  main {
+    box-sizing: border-box;
+    height: 100%;
+    padding: 0 5vw 1.2vw;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+  }
+
+  /* The mark and the name on one line, the pair centred: the mark is what the
+     eye lands on first, and it is read as one thing with the word beside it. */
+  .brand {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 2.1vw;
+  }
+  .brand img {
+    width: 6.2vw;
+    height: 6.2vw;
+    display: block;
+  }
+  .brand h1 {
+    margin: 0;
+    font-size: 4.7vw;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    line-height: 1;
+  }
+
+  /* `fit-content` keeps the block as wide as its text and centres it under the
+     mark, which is what makes the numbers read as one column. */
+  .steps {
+    box-sizing: border-box;
+    width: fit-content;
+    max-width: 90vw;
+    margin: 4.2vw 0 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .steps .label {
+    margin: 0 0 1.5vw;
+    font-size: 2vw;
+    line-height: 1.4;
+    color: #8e8e93;               /* systemGray, dark */
+  }
+  .steps ol {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 1.7vw;
+  }
+  /* The number is set at the text's own size and shares its line box, so the
+     two sit on one baseline instead of the smaller digits floating above it.
+     `min-width` is what aligns the two lines: PingFang's digits are not of one
+     width, so 01 and 02 would otherwise push their text to different places. */
+  .steps li {
+    display: flex;
+    gap: 1.1vw;
+    align-items: baseline;
+  }
+  .steps .num {
+    flex: none;
+    min-width: 1.25em;
+    font-size: 2.2vw;
+    line-height: 1.4;
+    font-variant-numeric: tabular-nums;
+    color: #8e8e93;               /* systemGray, dark */
+  }
+  .steps li p {
+    margin: 0;
+    font-size: 2.2vw;
+    line-height: 1.4;
+    color: rgba(235, 235, 245, 0.86);   /* secondaryLabel, dark */
+  }
+</style>
+</head>
+<body>
+<main>
+  <div class="brand">
+    <!-- Apple's mark, beside the name rather than above it. `alt` is empty
+         because the name says the same thing. -->
+    <img src="./carplay.svg" alt="">
+    <h1>CarPlay</h1>
+  </div>
+
+  <section class="steps">
+  <p class="label">连接步骤：</p>
+  <ol>
+    <li><span class="num">01</span><p>确保“无线局域网”和“蓝牙”已打开。</p></li>
+    <li><span class="num">02</span><p>在 iPhone 上前往“设置”>“通用”>“CarPlay车载”，选择「CarPlayBox-XXXX」。</p></li>
+  </ol>
+</section>
+</main>
+</body>
+</html>
