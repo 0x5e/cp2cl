@@ -61,7 +61,7 @@ impl EventSink {
     }
 
     /// Called once pair-verify has derived the keys. Until then every press is
-    /// dropped, with a line saying so.
+    /// dropped: a car that is showing the guide has nothing to send them to.
     pub(crate) async fn set_key(&self, raw: [u8; 32]) {
         *self.key.lock().await = SymKey::from_bytes(&raw).ok();
     }
@@ -86,7 +86,6 @@ impl EventSink {
     pub async fn dispatch(self: &Arc<Self>, cmd: Command) -> std::io::Result<()> {
         let key = self.key.lock().await.clone();
         let Some(key) = key else {
-            tracing::warn!("carplay.event.press_ignored reason=not_paired");
             return Ok(());
         };
         let mut guard = self.writer.lock().await;
