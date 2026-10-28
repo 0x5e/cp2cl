@@ -298,7 +298,8 @@ What is there: the USB interface the car enumerates, the AOA control requests,
 the session a head unit drives — the version handshake, device information,
 authentication in both directions, feature configuration, the video encoder's
 negotiation, and the heartbeat that keeps the channel alive — the video channel,
-carrying CarPlay's frames from the moment the car starts the encoder, the media
+carrying the guide until the phone's screen stream opens and CarPlay's frames
+from then on, the media
 channel, carrying the phone's sound with the AAC-LC taken off it on the way, the
 vehicle data channel, which is asked for the car's position as soon as the
 session is up, hands that position on to the phone as the NMEA sentences it maps
@@ -957,6 +958,7 @@ this a derivative work, so cp2cl inherits that.
 | `src/carlife/gadget.rs` | Linux only — `ep0`: the requests arriving on it, and the answers |
 | `src/carlife/auth.rs` | the two halves of authentication: the car's challenge answered, and its channel judged |
 | `src/carlife/session.rs` | the session a head unit drives: handshake, heartbeats, pictures, sound, touch |
+| `src/carlife/guide.rs` | the picture the car is shown until the phone's screen stream opens: which coded stream a panel's size gets, and the loop over its pictures |
 | `src/carlife/frame.rs` | the USB framing — the outer chunk header and the per-channel message head |
 | `src/carlife/proto.rs` | as much protobuf as these messages need, written by hand |
 | `src/airplay/mod.rs` | RTSP server: pairing, SETUP, `/info`, streams |
@@ -978,6 +980,10 @@ this a derivative work, so cp2cl inherits that.
 | `src/assets.rs` | the lookup over `assets/`: what the binary carries besides code |
 | `assets/` | the icons, the channel table and the status page — `build.rs` includes every file here, so adding one is enough to be able to ask for it by name |
 | `assets/icons/` | the icon `GET /info` puts on the phone's screen, two sizes per make, `Default-*` for the rest |
+| `assets/guide/` | the guide's streams, one per panel size, named for the size they were built at |
+| `guide/index.html` | the page they are screenshots of — one file, every size a fraction of the panel's width |
+| `scripts/guide.sh` | screenshots that page at each size and encodes it; run by hand, the results are committed |
+| `scripts/shot.swift` | the WebKit snapshot it takes them with: macOS only, one page, one size, one pixel per pixel |
 | `assets/carlife_channel_map.json` | one entry per make: its code, the channel numbers it answers on, the label worth showing for it, and what the panel behind a number takes — the size to serve and its density |
 | `assets/web/index.html` | the page itself — one file, four sections, polling |
 | `assets/web/vendor/weui.min.css` | its stylesheet, vendored so the page needs no network |

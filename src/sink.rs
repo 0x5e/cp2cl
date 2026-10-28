@@ -14,7 +14,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::navigation::Guidance;
 use crate::playing::Playing;
@@ -302,10 +302,13 @@ pub struct ClOutlet {
     playing_rx: Mutex<Option<mpsc::Receiver<Playing>>>,
     guidance_tx: mpsc::Sender<Guidance>,
     guidance_rx: Mutex<Option<mpsc::Receiver<Guidance>>>,
-    /// Whether the phone's screen stream is up. Written by the sink, which is
-    /// what sees it open and close, and read by the session, which asks the
-    /// phone for a keyframe only while there is a stream to ask on.
-    screen: Arc<AtomicBool>,
+    /// Whether the phone's screen stream is open. Written by the sink, which is
+    /// what sees it open and close, and read for the two things that turn on it:
+    /// what the car is being shown — a screen that is not open has no pictures,
+    /// so what it gets then is the guide — and whether a keyframe can be asked
+    /// for at all.
+    screen_tx: watch::Sender<bool>,
+    screen_rx: watch::Receiver<bool>,
 }
 
 impl ClOutlet {
@@ -315,6 +318,9 @@ impl ClOutlet {
         let (navi_tx, navi_rx) = mpsc::channel(CL_BACKLOG);
         let (playing_tx, playing_rx) = mpsc::channel(CL_BACKLOG);
         let (guidance_tx, guidance_rx) = mpsc::channel(CL_BACKLOG);
+        // Nothing has opened a screen yet: the first thing a phone does is
+        // arrive, and this says so when it does.
+        let (screen_tx, screen_rx) = watch::channel(false);
         Self {
             video_tx,
             video_rx: Mutex::new(Some(video_rx)),
@@ -326,7 +332,8 @@ impl ClOutlet {
             playing_rx: Mutex::new(Some(playing_rx)),
             guidance_tx,
             guidance_rx: Mutex::new(Some(guidance_rx)),
-            screen: Arc::new(AtomicBool::new(false)),
+            screen_tx,
+            screen_rx,
         }
     }
 
@@ -343,6 +350,7 @@ impl ClOutlet {
             navi: self.navi_tx.clone(),
             playing: self.playing_tx.clone(),
             guidance: self.guidance_tx.clone(),
+            screen: self.screen_tx.clone(),
             pending: Mutex::new(Vec::new()),
             media_stream: Mutex::new(None),
             navi_stream: Mutex::new(None),
@@ -354,15 +362,13 @@ impl ClOutlet {
             navi_behind: AtomicBool::new(false),
             playing_dropped: AtomicBool::new(false),
             guidance_dropped: AtomicBool::new(false),
-            screen: self.screen.clone(),
         })
     }
 
-    /// Whether the phone's screen stream is up, as the sink keeps it. The session
-    /// reads it before asking the phone for anything: there is nothing to ask
-    /// while no stream is open.
-    pub fn screen_up(&self) -> Arc<AtomicBool> {
-        self.screen.clone()
+    /// Whether the phone's screen stream is open, for whoever is deciding what
+    /// the car is shown and whether the phone can be asked for a keyframe.
+    pub fn screen(&self) -> watch::Receiver<bool> {
+        self.screen_rx.clone()
     }
 
     /// The video half, for the CarLife session. One car, one owner: a second
@@ -458,6 +464,10 @@ pub struct ClSink {
     navi: mpsc::Sender<Navi>,
     playing: mpsc::Sender<Playing>,
     guidance: mpsc::Sender<Guidance>,
+    /// Whether the phone's screen stream is open, for the side that decides what
+    /// the car is shown while it is not. Written by the airplay pump that opens
+    /// and closes the stream, read by the CarLife session.
+    screen: watch::Sender<bool>,
     /// Parameter sets from the newest codec description, put in front of the
     /// next frame. Held outside the queue deliberately: the queue can be full,
     /// and a dropped SPS/PPS costs everything that follows it.
@@ -480,9 +490,6 @@ pub struct ClSink {
     playing_dropped: AtomicBool,
     /// And once for where it is going, which is dropped the same way.
     guidance_dropped: AtomicBool,
-    /// Whether the phone's screen stream is up, which is the same flag the
-    /// session reads through `ClOutlet::screen_up`.
-    screen: Arc<AtomicBool>,
 }
 
 impl ClSink {
@@ -662,11 +669,12 @@ impl MediaSink for ClSink {
                 }
             }
             // The car learns nothing from this: it is the video channel that
-            // tells it whether there is a picture. It is kept for the other side
-            // of the bridge: a keyframe can only be asked for while a stream is
-            // open, and this is where that is known.
-            StreamEvent::ScreenActive(up) => {
-                self.screen.store(up, Ordering::Relaxed);
+            // tells it whether there is a picture. Both readers are on this side
+            // of the bridge — a screen stream that is not open is a car with no
+            // pictures, which is what the guide is for, and a keyframe can only
+            // be asked for while one is open.
+            StreamEvent::ScreenActive(open) => {
+                let _ = self.screen.send(open);
             }
         }
     }
@@ -847,19 +855,20 @@ mod tests {
         }
     }
 
-    /// The stream's own state is what the session reads before asking the phone
-    /// for a keyframe, and the sink is what sees the stream open and close.
+    /// The stream's own state is what the session reads — for the guide it shows
+    /// while there are no pictures, and for the keyframe it can ask for — and
+    /// the sink is what sees the stream open and close.
     #[test]
-    fn the_screen_stream_is_up_for_exactly_as_long_as_it_is_open() {
+    fn the_screen_stream_is_open_for_exactly_as_long_as_it_is() {
         let outlet = ClOutlet::new();
         let sink = outlet.sink();
-        let up = outlet.screen_up();
-        let now = || up.load(std::sync::atomic::Ordering::Relaxed);
+        let screen = outlet.screen();
+        let open = || *screen.borrow();
 
-        assert!(!now(), "nothing is open yet");
+        assert!(!open(), "nothing is open yet");
         sink.push(StreamEvent::ScreenActive(true));
-        assert!(now());
+        assert!(open());
         sink.push(StreamEvent::ScreenActive(false));
-        assert!(!now(), "a stream that closed is not open");
+        assert!(!open(), "a stream that closed is not open");
     }
 }

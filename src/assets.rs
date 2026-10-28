@@ -28,6 +28,15 @@ pub fn text(name: &str) -> Option<&'static str> {
     get(name).and_then(|bytes| std::str::from_utf8(bytes).ok())
 }
 
+/// Every name the binary carries, in the order the build wrote them.
+///
+/// For the one thing a name cannot be asked for directly: which of a family of
+/// files were built at all. The guide is that — it ships one file per screen
+/// size, and the set is whatever was generated, not a list kept beside them.
+pub fn names() -> impl Iterator<Item = &'static str> {
+    FILES.iter().map(|(name, _)| *name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
