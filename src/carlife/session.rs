@@ -2578,9 +2578,11 @@ fn adopt_clock(epoch_ms: u64) {
     {
         return;
     }
+    // `as _` rather than `libc::time_t`: the alias is deprecated, and the
+    // struct's own field is what the width comes from.
     let at = libc::timespec {
-        tv_sec: (epoch_ms / 1_000) as libc::time_t,
-        tv_nsec: (epoch_ms % 1_000 * 1_000_000) as libc::c_long,
+        tv_sec: (epoch_ms / 1_000) as _,
+        tv_nsec: (epoch_ms % 1_000 * 1_000_000) as _,
     };
     // SAFETY: `at` is this function's own, and `CLOCK_REALTIME` is the clock
     // `clock_settime` is defined for.
