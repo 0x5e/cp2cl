@@ -676,10 +676,9 @@ fn clamped(x: i32, y: i32, (width, height): (u32, u32)) -> (u16, u16) {
 ///
 /// A head unit is full of keys a phone has no use for — its radio, its
 /// navigation, its own volume — and those are not mistakes to report: they are the
-/// car's, and they stop here. The two families of direction keys both land on the
-/// four directions a phone has: `move` names the direction to go in, and
-/// `selector` is what a knob does when it moves its focus, which is the same
-/// thing to a phone.
+/// car's, and they stop here. A `move` key is one of the four directions a phone
+/// has; a `selector` key is the knob's wheel, one tick each way, which is a
+/// scroll rather than a direction.
 fn command_for(key: i32) -> Option<Command> {
     Some(match key {
         KEY_HOME | KEY_MAIN => Command::Home,
@@ -687,8 +686,10 @@ fn command_for(key: i32) -> Option<Command> {
         KEY_OK => Command::Select,
         KEY_MOVE_LEFT => Command::Left,
         KEY_MOVE_RIGHT => Command::Right,
-        KEY_MOVE_UP | KEY_SELECTOR_PREVIOUS => Command::Up,
-        KEY_MOVE_DOWN | KEY_SELECTOR_NEXT => Command::Down,
+        KEY_MOVE_UP => Command::Up,
+        KEY_MOVE_DOWN => Command::Down,
+        KEY_SELECTOR_PREVIOUS => Command::Wheel(-1),
+        KEY_SELECTOR_NEXT => Command::Wheel(1),
         KEY_SEEK_SUB => Command::Prev,
         KEY_SEEK_ADD => Command::Next,
         KEY_MEDIA_START => Command::Play,
@@ -729,6 +730,8 @@ fn action_name(command: Option<Command>) -> &'static str {
         Some(Command::Right) => "right",
         Some(Command::Up) => "up",
         Some(Command::Down) => "down",
+        Some(Command::Wheel(ticks)) if ticks < 0 => "wheel_prev",
+        Some(Command::Wheel(_)) => "wheel_next",
         Some(Command::Siri) => "siri",
         Some(Command::Telephony(PHONE_HOOK_SWITCH)) => "call",
         Some(Command::Telephony(PHONE_DROP)) => "hang_up",
@@ -5390,7 +5393,7 @@ mod tests {
     }
 
     /// Which of the car's keys a phone has a use for, and what each one means to
-    /// it. Both families of direction key land on the same four directions.
+    /// it. A `move` key is a direction and a `selector` key is a wheel tick.
     #[test]
     fn the_panel_keys_a_phone_has_a_use_for_are_the_ones_that_reach_it() {
         assert_eq!(command_for(KEY_MAIN), Some(Command::Home));
@@ -5401,8 +5404,11 @@ mod tests {
         assert_eq!(command_for(KEY_MOVE_RIGHT), Some(Command::Right));
         assert_eq!(command_for(KEY_MOVE_UP), Some(Command::Up));
         assert_eq!(command_for(KEY_MOVE_DOWN), Some(Command::Down));
-        assert_eq!(command_for(KEY_SELECTOR_NEXT), Some(Command::Down));
-        assert_eq!(command_for(KEY_SELECTOR_PREVIOUS), Some(Command::Up));
+        assert_eq!(command_for(KEY_SELECTOR_NEXT), Some(Command::Wheel(1)));
+        assert_eq!(
+            command_for(KEY_SELECTOR_PREVIOUS),
+            Some(Command::Wheel(-1))
+        );
         assert_eq!(command_for(KEY_SEEK_SUB), Some(Command::Prev));
         assert_eq!(command_for(KEY_SEEK_ADD), Some(Command::Next));
         assert_eq!(command_for(KEY_MEDIA_START), Some(Command::Play));
@@ -5445,7 +5451,8 @@ mod tests {
             (KEY_MOVE_RIGHT, "right"),
             (KEY_MOVE_UP, "up"),
             (KEY_MOVE_DOWN, "down"),
-            (KEY_SELECTOR_NEXT, "down"),
+            (KEY_SELECTOR_NEXT, "wheel_next"),
+            (KEY_SELECTOR_PREVIOUS, "wheel_prev"),
             (KEY_SEEK_SUB, "prev"),
             (KEY_SEEK_ADD, "next"),
             (KEY_MEDIA_START, "play"),

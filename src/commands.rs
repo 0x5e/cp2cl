@@ -4,11 +4,11 @@
 //! session, which is where touch and panel keys come from — turns it into one of
 //! these. `event.rs` is the only place that knows how each one reaches the phone.
 //!
-//! The CarLife protocol has no control that means `Wheel`, `KeyFrame` or `Night`
-//! — a head unit sends panel keys and touch. `Night` is the operator's and
-//! `KeyFrame` is the session asking the phone for a whole picture when the car
-//! starts its encoder again; the allow below is for the wheel, which nothing
-//! here builds.
+//! The CarLife protocol has no control that means `KeyFrame` or `Night` — a head
+//! unit sends panel keys and touch. `Night` is the operator's and `KeyFrame` is
+//! the session asking the phone for a whole picture when the car starts its
+//! encoder again; a knob's `selector` key is a `Wheel` tick. The allow below is
+//! for the variants nothing builds.
 #![allow(dead_code)]
 
 /// One finger in a touch report, in the display's own pixel space.
