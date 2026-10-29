@@ -189,6 +189,12 @@ impl Usb {
         self.bind()
     }
 
+    pub async fn replug(&self) -> Result<()> {
+        self.unbind()?;
+        tokio::time::sleep(REATTACH).await;
+        self.bind()
+    }
+
     /// Takes the gadget off the controller. An unbound gadget is not an error
     /// here: this is called both when there is something to unbind and when there
     /// is not.

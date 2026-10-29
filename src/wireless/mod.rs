@@ -27,7 +27,7 @@ use livi_runtime::vehicle::{Fuels, Plugs, Vehicle};
 use livi_wifi::{Channel, OnAir, Security};
 use tokio::sync::{broadcast, mpsc};
 
-use crate::config::Config;
+use crate::config::{hostname, Config};
 use crate::session::{run_bringup, Ended};
 use crate::sink::ClSink;
 use crate::web::Status;
@@ -128,7 +128,7 @@ pub(crate) fn session_params(
     let (path, ap) = access_point(&cfg.wifi_iface)?;
 
     let identity = Identity {
-        name: cfg.name.clone(),
+        name: hostname(),
         ssid: ap.ssid.clone(),
         bt_mac,
         // Nothing here knows what the car runs on, so no fuel type is claimed:

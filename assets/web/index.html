@@ -88,6 +88,7 @@
     color:var(--weui-FG-0);background:none;-webkit-appearance:none;appearance:none}
   .weui-btn-area{margin-top:26px;display:flex;justify-content:center;gap:12px}
   .weui-btn-area .weui-btn{margin:0;min-width:0;width:136px}
+  #set-restart{width:284px}
   .weui-toast[hidden]{display:none}
 </style>
 </head>
@@ -143,6 +144,9 @@
     <div class="weui-btn-area">
       <button class="weui-btn weui-btn_default" id="set-reset">重置</button>
       <button class="weui-btn weui-btn_primary" id="set-save">保存</button>
+    </div>
+    <div class="weui-btn-area">
+      <button class="weui-btn weui-btn_default" id="set-restart">重启服务</button>
     </div>
     <p class="stamp" id="set-stamp">正在读取…</p>
   </div>
@@ -807,8 +811,24 @@ async function saveSettings() {
   }
 }
 
+async function restartService() {
+  const button = document.getElementById("set-restart");
+  button.disabled = true;
+  try {
+    const response = await fetch("/api/restart", { method: "POST" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "HTTP " + response.status);
+    showToast("正在断开重连…");
+  } catch (e) {
+    showToast("重启失败：" + e.message);
+  } finally {
+    setTimeout(() => { button.disabled = false; }, 5000);
+  }
+}
+
 document.getElementById("set-reset").addEventListener("click", () => shown(saved));
 document.getElementById("set-save").addEventListener("click", saveSettings);
+document.getElementById("set-restart").addEventListener("click", restartService);
 
 // ---------------------------------------------------------------- tabs ----
 

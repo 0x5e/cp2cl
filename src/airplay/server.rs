@@ -29,7 +29,7 @@ use super::pairing::{PairSetup, PairVerify, Pairings, VerifyKeys};
 use super::rtsp::{self, Request, Response, OCTET_CONTENT_TYPE, PAIRING_CONTENT_TYPE};
 use super::screen::{self, VideoReceiver};
 use super::tunnel;
-use crate::config::{bt_address, Config};
+use crate::config::{bt_address, hostname, Config};
 use crate::led::{Carplay, Signals};
 use crate::sink::{AudioCodec, MediaSink, StreamEvent, StreamId};
 use crate::web::{Audio, Mic, Screen, Status};
@@ -140,6 +140,10 @@ impl AudioClock {
             origin: None,
         });
         id
+    }
+
+    pub fn forget_streams(&mut self) {
+        self.streams.clear();
     }
 
     /// Forgets one stream, by the handle its setup returned.
@@ -386,6 +390,8 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                 shared.led.carplay(Carplay::Connecting);
                 let serial = newest.fetch_add(1, Ordering::SeqCst) + 1;
                 let current = newest.clone();
+                *shared.timing.lock().await = SyncedClock::new();
+                shared.audio_clock.lock().await.forget_streams();
                 let cfg = shared.cfg.clone();
                 let screen = shared.screen.clone();
                 let channel = shared.channel.clone();
@@ -1009,7 +1015,7 @@ impl Session {
         });
         let plist = info::build(&info::Static {
             bt_mac: bt_address(&self.cfg.bt_adapter),
-            name: self.cfg.name.clone(),
+            name: hostname(),
             width,
             height,
             fps,
@@ -2194,6 +2200,19 @@ mod tests {
             fps: 60,
             ui_scale,
         }
+    }
+
+    #[test]
+    fn forgetting_the_streams_keeps_the_numbering_going() {
+        let mut clock = AudioClock::default();
+        let first = clock.open(102, 1, 44_100, 0);
+        clock.forget_streams();
+        assert!(clock.is_empty(), "the last phone's streams are gone");
+        let second = clock.open(102, 1, 44_100, 0);
+        assert_ne!(
+            first, second,
+            "an id the replaced session still holds is never handed out again"
+        );
     }
 
     /// The phone names an address as often as it names its own identifier, so

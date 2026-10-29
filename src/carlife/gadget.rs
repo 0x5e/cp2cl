@@ -28,7 +28,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::airplay::{EventSink, SharedChannel};
-use crate::config::Config;
+use crate::config::{hostname, Config};
 use crate::web::Status;
 
 use super::aio::{Context as AioContext, IoEvent};
@@ -81,11 +81,12 @@ pub async fn run<F>(
     desktop: &broadcast::Sender<()>,
     status: Arc<Status>,
     vehicle: Arc<Vehicle>,
+    mut replug: mpsc::Receiver<()>,
 ) -> Result<()>
 where
     F: FnMut(bool),
 {
-    let identity = desc::Identity::phone(&cfg.name);
+    let identity = desc::Identity::phone(&hostname());
     let (usb, endpoints) = Usb::open(&identity)?;
     let Endpoints {
         control,
@@ -131,6 +132,16 @@ where
         status.clone(),
     ));
 
+    let bus = udc.clone();
+    tokio::spawn(async move {
+        while replug.recv().await.is_some() {
+            tracing::info!("usb.replug action=disconnect");
+            if let Err(e) = bus.replug().await {
+                tracing::error!("usb.replug_failed err={e:#}");
+            }
+        }
+    });
+
     while let Some(event) = events_rx.recv().await {
         match event {
             // A session runs in either form. A head unit that does the handshake
@@ -146,6 +157,10 @@ where
                         // configured the device: the two are what a session that
                         // never says anything has to be read against.
                         tracing::info!("usb.enumerated action=start_session {}", udc.link());
+                        let cfg = Config {
+                            screen: crate::settings::load(),
+                            ..(*cfg).clone()
+                        };
                         if let Err(e) = session::run(
                             pair,
                             frames,

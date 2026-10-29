@@ -32,7 +32,8 @@
 //!
 //! `/api/settings` is the one path that is written as well as read: the screen
 //! the page picks is `/etc/cp2cl/config.json`, and a `POST` replaces that file.
-//! The program reads it once at startup, so a save changes the next run.
+//! The program reads it at the start of each session, so a save changes the next
+//! one.
 //!
 //! `axum` is here for `axum::serve` and its router, which is less code than
 //! parsing a request line by hand and less to get wrong. It used to be here for
@@ -50,14 +51,15 @@ use std::path::Path;
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::{RawQuery, State};
+use axum::extract::{Extension, RawQuery, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 
 use crate::logging;
 
@@ -106,7 +108,7 @@ pub const ADDR: &str = "0.0.0.0:80";
 /// fails, and a failure there is worth a line rather than the end of the
 /// program — the streams are what matter, and a page that has gone quiet is not
 /// a reason to take them down.
-pub async fn serve(listener: TcpListener, status: Arc<Status>) {
+pub async fn serve(listener: TcpListener, status: Arc<Status>, replug: mpsc::Sender<()>) {
     let app = Router::new()
         .route("/", get(page))
         .route("/index.html", get(page))
@@ -117,7 +119,9 @@ pub async fn serve(listener: TcpListener, status: Arc<Status>) {
         .route("/api/log", get(log))
         .route("/api/log/download", get(download))
         .route("/api/settings", get(settings).post(save))
+        .route("/api/restart", post(restart_service))
         .fallback(not_found)
+        .layer(Extension(replug))
         .with_state(status);
     if let Err(e) = axum::serve(listener, app).await {
         tracing::warn!("web.serve_failed err={e}");
@@ -186,6 +190,22 @@ async fn save(body: Bytes) -> Response {
             json_answer(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 json!({ "error": format!("写入失败：{e}") }),
+            )
+        }
+    }
+}
+
+async fn restart_service(Extension(replug): Extension<mpsc::Sender<()>>) -> Response {
+    tracing::info!("web.restart_requested");
+    match replug.try_send(()) {
+        Ok(()) | Err(mpsc::error::TrySendError::Full(())) => {
+            json_answer(StatusCode::OK, json!({ "ok": true }))
+        }
+        Err(mpsc::error::TrySendError::Closed(())) => {
+            tracing::warn!("web.restart_refused err=carlife_half_not_running");
+            json_answer(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({ "error": "CarLife 未在运行，无法重启" }),
             )
         }
     }
@@ -435,6 +455,43 @@ mod tests {
             page_text().contains("data-manual"),
             "a value the choices do not list is shown as it is, not as 默认"
         );
+    }
+
+    #[test]
+    fn the_page_restarts_the_service() {
+        assert!(
+            page_text().contains("重启服务"),
+            "the page names the button"
+        );
+        assert!(
+            page_text().contains("/api/restart"),
+            "and asks for the restart"
+        );
+        let save = page_text().find("id=\"set-save\"").expect("the save button");
+        let restart = page_text().find("id=\"set-restart\"").expect("the restart button");
+        assert!(
+            restart > save,
+            "the restart sits under the two buttons it does not save"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_page_restart_asks_for_one_replug() {
+        let (replug, mut asked) = mpsc::channel(1);
+        let answer = restart_service(Extension(replug)).await;
+        assert_eq!(answer.status(), StatusCode::OK);
+        assert_eq!(asked.try_recv(), Ok(()), "one replug was asked for");
+
+        let (replug, mut asked) = mpsc::channel(1);
+        replug.try_send(()).expect("room for one");
+        let answer = restart_service(Extension(replug)).await;
+        assert_eq!(answer.status(), StatusCode::OK);
+        assert_eq!(asked.try_recv(), Ok(()), "and not a second one");
+
+        let (replug, asked) = mpsc::channel(1);
+        drop(asked);
+        let answer = restart_service(Extension(replug)).await;
+        assert_eq!(answer.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     /// The page is three tabs, and the log one is the copy on disk read

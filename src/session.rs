@@ -41,7 +41,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::artwork::{self, Fitted};
 use crate::carlife::proto;
-use crate::config::{bt_address, Config};
+use crate::config::{bt_address, hostname, Config};
 use crate::navigation::Guidance;
 use crate::playing::{Playing, Position, Track};
 use crate::sink::ClSink;
@@ -277,8 +277,8 @@ async fn attach(
         tracing::info!("carplay.carkit_up phone={} action=start_iap2", short(&phone.id));
 
         let identity = Identity {
-            name: cfg.name.clone(),
-            ssid: cfg.name.clone(),
+            name: hostname(),
+            ssid: hostname(),
             bt_mac: parse_mac(&bt_address(&cfg.bt_adapter)),
             fuels: Fuels::default(),
             // The board is not an EV and has no charge port to describe.
@@ -308,7 +308,7 @@ async fn attach(
 
         let cp = CpConfig {
             wifi_iface: String::new(),
-            ssid: cfg.name.clone(),
+            ssid: hostname(),
             passphrase: "00000000".into(),
             channel: Channel::of_number(36),
             airplay_port,

@@ -1,6 +1,6 @@
-//! `/etc/cp2cl/config.json`: the screen the settings page picks, read once at
-//! startup. Either field may be absent, and an absent one is 默认 — the channel
-//! table's value, or the car's where the table has none. See
+//! `/etc/cp2cl/config.json`: the screen the settings page picks, read at the
+//! start of each session. Either field may be absent, and an absent one is 默认
+//! — the channel table's value, or the car's where the table has none. See
 //! `carlife::session::screen_in_place_of`.
 //!
 //! Read as it is written: a size the page does not offer is served all the same.
@@ -68,7 +68,7 @@ fn path() -> PathBuf {
 }
 
 /// The file as it stands; anything unreadable is the defaults.
-fn load() -> Screen {
+pub fn load() -> Screen {
     read(&path())
 }
 

@@ -3,13 +3,13 @@
 //! Nothing here is required: the defaults build a working wired session and hand
 //! it to whatever head unit turns up. See README for the full table.
 //!
-//! `screen` is not from the environment: it is `/etc/cp2cl/config.json`, read by
-//! `main`. See `crate::settings`.
+//! `screen` is not from the environment: it is `/etc/cp2cl/config.json`, read at
+//! the start of each session. See `crate::settings`.
 //!
 //! Two values are not settings at all, because they are properties of the
 //! machine rather than choices: the name it goes by is the hostname
 //! (`hostname`), and its Bluetooth address is read off the controller
-//! (`bt_address`).
+//! (`bt_address`). Both are read where they are used.
 
 use std::path::{Path, PathBuf};
 
@@ -101,7 +101,7 @@ pub(crate) fn bt_address(adapter: &str) -> String {
 /// What the machine goes by, which is what the accessory is called: the phone
 /// shows this name in its CarPlay list, and it is the one the car is told the
 /// model is.
-fn hostname() -> String {
+pub(crate) fn hostname() -> String {
     read_hostname(Path::new("/proc/sys/kernel/hostname"))
 }
 
@@ -117,10 +117,6 @@ fn read_hostname(path: &Path) -> String {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// What the accessory is called: the machine's hostname, which is what the
-    /// phone lists it as — see `hostname`.
-    pub name: String,
-
     /// Take CarPlay over Bluetooth and Wi-Fi instead of the cable.
     ///
     /// The phone is paired in the OS first — this program does not pair — and
@@ -141,7 +137,8 @@ pub struct Config {
     /// Linux only: the Bluetooth adapter, as BlueZ names it.
     pub bt_adapter: String,
     /// The screen the settings page picked, out of `/etc/cp2cl/config.json`.
-    /// `main` fills it in; empty is the car's own screen.
+    /// `main` fills it in at startup and `carlife::gadget` again for each
+    /// session; empty is the car's own screen.
     pub screen: crate::settings::Screen,
 }
 
@@ -149,7 +146,6 @@ impl Config {
     pub fn from_env() -> Self {
         let bt_adapter = env_or("CP2CL_BT_ADAPTER", "hci0");
         Self {
-            name: hostname(),
             // Wireless is what this is for: the board is reached as an
             // accessory over Bluetooth and Wi-Fi. `CP2CL_WIRELESS=0` is the way
             // back to the cable, for a machine with no radio to use.

@@ -363,7 +363,7 @@ impl ClOutlet {
     /// The video half, for the CarLife session. One car, one owner: a second
     /// call gets nothing.
     pub fn take_video(&self) -> Option<mpsc::Receiver<Vec<u8>>> {
-        self.video_rx.lock().ok()?.take()
+        Some(emptied(self.video_rx.lock().ok()?.take()?))
     }
 
     /// Given back when a session ends so the next one can use it.
@@ -375,7 +375,7 @@ impl ClOutlet {
 
     /// The media half. Taken and given back on the same terms as the video one.
     pub fn take_media(&self) -> Option<mpsc::Receiver<Media>> {
-        self.media_rx.lock().ok()?.take()
+        Some(emptied(self.media_rx.lock().ok()?.take()?))
     }
 
     pub fn return_media(&self, rx: mpsc::Receiver<Media>) {
@@ -386,7 +386,7 @@ impl ClOutlet {
 
     /// The navigation half, on the same terms as the two above.
     pub fn take_navi(&self) -> Option<mpsc::Receiver<Navi>> {
-        self.navi_rx.lock().ok()?.take()
+        Some(emptied(self.navi_rx.lock().ok()?.take()?))
     }
 
     pub fn return_navi(&self, rx: mpsc::Receiver<Navi>) {
@@ -398,7 +398,7 @@ impl ClOutlet {
     /// What the phone is playing. Taken and given back on the same terms as the
     /// three above.
     pub fn take_playing(&self) -> Option<mpsc::Receiver<Playing>> {
-        self.playing_rx.lock().ok()?.take()
+        Some(emptied(self.playing_rx.lock().ok()?.take()?))
     }
 
     pub fn return_playing(&self, rx: mpsc::Receiver<Playing>) {
@@ -410,7 +410,7 @@ impl ClOutlet {
     /// Where the phone is going. Taken and given back on the same terms as the
     /// four above.
     pub fn take_guidance(&self) -> Option<mpsc::Receiver<Guidance>> {
-        self.guidance_rx.lock().ok()?.take()
+        Some(emptied(self.guidance_rx.lock().ok()?.take()?))
     }
 
     pub fn return_guidance(&self, rx: mpsc::Receiver<Guidance>) {
@@ -418,6 +418,11 @@ impl ClOutlet {
             *guard = Some(rx);
         }
     }
+}
+
+fn emptied<T>(mut rx: mpsc::Receiver<T>) -> mpsc::Receiver<T> {
+    while rx.try_recv().is_ok() {}
+    rx
 }
 
 /// Whether one of the car's channels is being fed from this stream.
@@ -726,6 +731,24 @@ mod tests {
             }
             other => panic!("expected sound on the media channel, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_session_takes_its_queues_empty() {
+        let outlet = ClOutlet::new();
+        let sink = outlet.sink();
+        let rx = outlet.take_video().expect("nothing has taken it");
+        sink.push(StreamEvent::VideoFrame {
+            keyframe: true,
+            data: vec![1, 2, 3],
+        });
+        outlet.return_video(rx);
+
+        let mut next = outlet.take_video().expect("nothing has taken it");
+        assert!(
+            next.try_recv().is_err(),
+            "the frame the last session left is not the next one's"
+        );
     }
 
     /// A prompt is a stream of its own, and it goes to the car's other channel

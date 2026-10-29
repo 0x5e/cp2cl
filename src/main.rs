@@ -41,7 +41,7 @@ use tracing_subscriber::prelude::*;
 use crate::airplay::clock::SyncedClock;
 use crate::airplay::pairing::Pairings;
 use crate::airplay::{AudioClock, EventSink, MicSink, ScreenParams, SharedChannel, SharedScreen};
-use crate::config::Config;
+use crate::config::{hostname, Config};
 use crate::sink::{AudioCodec, ClOutlet, ClSink, MediaSink};
 
 #[tokio::main]
@@ -159,9 +159,11 @@ async fn main() -> Result<()> {
     let status = Arc::new(web::Status::new());
     status.with(|s| {
         s.carplay.wireless = cfg.wireless;
-        s.carplay.name = cfg.name.clone();
+        s.carplay.name = hostname();
         s.carplay.bt_mac = config::bt_address(&cfg.bt_adapter);
     });
+
+    let (replug, replug_requested) = tokio::sync::mpsc::channel(1);
 
     // Bound before the streams are: a page that cannot be reached is worth
     // saying so about at startup rather than when someone goes looking for it.
@@ -170,7 +172,7 @@ async fn main() -> Result<()> {
     match TcpListener::bind(web::ADDR).await {
         Ok(listener) => {
             tracing::info!("web.listening url=http://{}/", web::ADDR);
-            tokio::spawn(web::serve(listener, status.clone()));
+            tokio::spawn(web::serve(listener, status.clone(), replug));
         }
         Err(e) => tracing::warn!("web.listen_failed addr={} err={e:#}", web::ADDR),
     }
@@ -406,6 +408,7 @@ async fn main() -> Result<()> {
             &desktop,
             reported,
             handed,
+            replug_requested,
         )
         .await
         {

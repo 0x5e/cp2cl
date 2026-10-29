@@ -36,7 +36,7 @@ use tokio::time::Instant;
 use super::{auth, frame, gps, guide, names, proto};
 use crate::airplay::{info, EventSink, ScreenParams, SharedChannel};
 use crate::commands::{Command, TouchContact, PHONE_DROP, PHONE_HOOK_SWITCH, PHONE_MUTE};
-use crate::config::{bt_address, Config};
+use crate::config::{bt_address, hostname, Config};
 use crate::navigation::{turn_kind, Guidance};
 use crate::playing::{Playing, Track};
 use crate::sink::{ClOutlet, Media, Navi};
@@ -1053,8 +1053,8 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 self.send(FOREGROUND, &[]).await?;
                 let body = proto::device_info(&proto::DeviceInfo {
                     os: "Android".into(),
-                    brand: self.cfg.name.clone(),
-                    model: self.cfg.name.clone(),
+                    brand: hostname(),
+                    model: hostname(),
                     release: "10".into(),
                     sdk_int: 29,
                     bt_address: bt_address(&self.cfg.bt_adapter),

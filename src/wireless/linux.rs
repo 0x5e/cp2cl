@@ -19,7 +19,7 @@ use tokio::sync::broadcast;
 use tokio::time::sleep;
 
 use super::{page, parse_mac, power, radios_present, ready, run_session, short, Handover};
-use crate::config::{bt_address, Config};
+use crate::config::{bt_address, hostname, Config};
 use crate::led::Signals;
 use crate::session::{carry_artwork, Ended};
 use crate::sink::ClSink;
@@ -116,7 +116,7 @@ pub async fn watch(
             android_auto: false,
         };
         let (conn, mut incoming, held) =
-            match livi_runtime::bt::start(&cfg.bt_adapter, &cfg.name, wireless).await {
+            match livi_runtime::bt::start(&cfg.bt_adapter, &hostname(), wireless).await {
                 Ok(started) => started,
                 Err(e) => {
                     tracing::error!(
@@ -141,7 +141,7 @@ pub async fn watch(
         // listening — it is also what puts the controllers back at the end.
         tracing::info!(
             "bt.service_up adapter={} name={:?} action=pair_phone",
-            cfg.bt_adapter, cfg.name
+            cfg.bt_adapter, hostname()
         );
 
         // The controller has nothing to do once the phone has moved its session
