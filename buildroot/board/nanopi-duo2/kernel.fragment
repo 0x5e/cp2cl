@@ -21,8 +21,21 @@ CONFIG_BRCMUTIL=m
 CONFIG_SERIAL_8250=y
 CONFIG_SERIAL_8250_NR_UARTS=8
 CONFIG_SERIAL_8250_RUNTIME_UARTS=8
+CONFIG_SERIAL_DEV_BUS=y
+CONFIG_USB_MUSB_HDRC=y
 CONFIG_USB_MUSB_SUNXI=y
+CONFIG_NOP_USB_XCEIV=y
 CONFIG_PHY_SUN4I_USB=y
 CONFIG_SUNXI_SRAM=y
 CONFIG_LEDS_TRIGGER_TIMER=y
 CONFIG_KEYBOARD_GPIO=y
+
+# The Bluetooth half of the AP6212, on UART2 through serdev. btbcm asks for
+# brcm/BCM43430A1.hcd as it probes; built in, it asks at device_initcall, before
+# the root is mounted, and gets -ENOENT. The controller is then left unpatched,
+# and an unpatched BCM43430A1 answers READ_BD_ADDR with AA:AA:AA:AA:AA:AA — an
+# address btbcm marks invalid (btbcm_check_bdaddr), so BlueZ keeps its adapter
+# under /var/lib/bluetooth/AA:AA:AA:AA:AA:AA/ and the saved pairings are never
+# read. /etc/init.d/S10radio loads the modules once the blobs can be read.
+CONFIG_BT_HCIUART=m
+CONFIG_BT_HCIUART_BCM=y
