@@ -499,7 +499,7 @@ installed onto it. One command, from the checkout:
 
 ```bash
 make firmware
-# dist/buildroot-2026.02.3-cp2cl-v0.11.0-<sha>.img.gz
+# dist/buildroot-2025.02.19-cp2cl-v0.11.0-<sha>.img.gz
 ```
 
 Unpack it and write the `.img` to a card, then put the card in the board. The

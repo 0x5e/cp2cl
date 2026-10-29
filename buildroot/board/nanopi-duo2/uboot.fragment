@@ -8,3 +8,8 @@ CONFIG_BOOTDELAY=0
 # its default is `usb start`, a scan of the USB controllers for boot media that
 # might be a stick, and the boot media here is the card.
 CONFIG_PREBOOT=""
+
+# A host tool that signs UEFI capsules. EFI_LOADER is on in this configuration,
+# so it is built by default — and on U-Boot 2025.01 it links gnutls, which
+# nothing else in this image uses. Nothing here signs a capsule.
+# CONFIG_TOOLS_MKEFICAPSULE is not set

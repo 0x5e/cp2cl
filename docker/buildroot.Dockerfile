@@ -3,9 +3,11 @@
 #
 # The version is pinned rather than latest: the image a board runs should be
 # reproducible from a checkout, and "whatever the mirror had that day" is not.
+# It is the LTS series rather than the current stable, because a card that has
+# to be right in three years wants the release that still gets fixes then.
 FROM debian:bookworm-slim
 
-ARG BUILDROOT_VERSION=2026.02.3
+ARG BUILDROOT_VERSION=2025.02.19
 
 # dosfstools and mtools are genimage's, not Buildroot's: the boot partition is a
 # vfat image, and genimage shells out to mkdosfs and mcopy to make one. diffutils

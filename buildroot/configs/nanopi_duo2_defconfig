@@ -1,7 +1,7 @@
 # NanoPi Duo2 — Allwinner H3, 512 MB, AP6212 (2.4 GHz 1x1 + BCM43430 Bluetooth).
 #
-# Mainline U-Boot and mainline Linux, not the vendor's 4.14 BSP: Buildroot 2026.02
-# offers GCC 13, 14 and 15, and a 4.14 kernel compiles with none of them. Mainline
+# Mainline U-Boot and mainline Linux, not the vendor's 4.14 BSP: Buildroot 2025.02
+# offers GCC 12, 13 and 14, and a 4.14 kernel compiles with none of them. Mainline
 # has the board's device tree and a U-Boot defconfig that names it.
 #
 # The target is a writable ext4 with no udev. It was a read-only squashfs, on the
@@ -15,8 +15,10 @@ BR2_ARM_FPU_VFPV4=y
 BR2_TOOLCHAIN_BUILDROOT_MUSL=y
 # Pinned rather than "same as the kernel": with a custom kernel version the
 # headers version is not known early enough for the feature symbols that
-# packages depend on, and bluez5-utils silently disappears from the menu.
-BR2_KERNEL_HEADERS_6_18=y
+# packages depend on, and bluez5-utils silently disappears from the menu. 6.12
+# is the newest series this Buildroot offers, and older than the kernel on
+# purpose: what the headers have to carry is musl's and BlueZ's needs.
+BR2_KERNEL_HEADERS_6_12=y
 
 BR2_TARGET_GENERIC_HOSTNAME="CarPlayBox"
 BR2_TARGET_GENERIC_ISSUE="cp2cl"
@@ -43,9 +45,9 @@ BR2_TARGET_ROOTFS_EXT2_LABEL="rootfs"
 
 # `sunxi` rather than `sunxi_defconfig`: Buildroot appends the suffix itself.
 #
-# 6.18 is the current longterm, not Buildroot's own default (6.19, a plain stable
-# that is replaced every few months). A car that has to be right in three years
-# wants the branch that still gets fixes then.
+# 6.18 is the current longterm, not Buildroot's own default (6.12, the previous
+# longterm, whose upstream support ends about a year earlier). A car that has to
+# be right in three years wants the branch that still gets fixes then.
 # For every package that has a directory under it, not just the one below: the
 # patch in the tree so far is the kernel's device tree, which is the only place
 # the Bluetooth UART speed can be raised — mainline has no fragment for dts.
@@ -80,8 +82,8 @@ BR2_TARGET_UBOOT_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_CP2CL_PATH)/board/nanopi-
 BR2_TARGET_UBOOT_NEEDS_DTC=y
 BR2_TARGET_UBOOT_NEEDS_PYTHON3=y
 BR2_TARGET_UBOOT_NEEDS_PYLIBFDT=y
-# U-Boot's own tools include openssl/evp.h unconditionally in 2026.01, so the
-# build needs host-openssl even though nothing here signs a FIT image.
+# U-Boot's own tools include openssl/evp.h unconditionally, so the build needs
+# host-openssl even though nothing here signs a FIT image.
 BR2_TARGET_UBOOT_NEEDS_OPENSSL=y
 BR2_TARGET_UBOOT_FORMAT_CUSTOM=y
 BR2_TARGET_UBOOT_FORMAT_CUSTOM_NAME="u-boot-sunxi-with-spl.bin"
