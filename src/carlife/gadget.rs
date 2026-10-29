@@ -28,7 +28,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::airplay::{EventSink, SharedChannel};
-use crate::config::{hostname, Config};
+use crate::config::{dt_vendor, hostname, Config};
 use crate::web::Status;
 
 use super::aio::{Context as AioContext, IoEvent};
@@ -86,7 +86,7 @@ pub async fn run<F>(
 where
     F: FnMut(bool),
 {
-    let identity = desc::Identity::phone(&hostname());
+    let identity = desc::Identity::phone(&hostname(), &dt_vendor());
     let (usb, endpoints) = Usb::open(&identity)?;
     let Endpoints {
         control,

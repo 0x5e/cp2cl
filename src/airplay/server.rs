@@ -29,7 +29,7 @@ use super::pairing::{PairSetup, PairVerify, Pairings, VerifyKeys};
 use super::rtsp::{self, Request, Response, OCTET_CONTENT_TYPE, PAIRING_CONTENT_TYPE};
 use super::screen::{self, VideoReceiver};
 use super::tunnel;
-use crate::config::{bt_address, hostname, Config};
+use crate::config::{bt_address, dt_vendor, hostname, Config};
 use crate::led::{Carplay, Signals};
 use crate::sink::{AudioCodec, MediaSink, StreamEvent, StreamId};
 use crate::web::{Audio, Mic, Screen, Status};
@@ -1016,6 +1016,7 @@ impl Session {
         let plist = info::build(&info::Static {
             bt_mac: bt_address(&self.cfg.bt_adapter),
             name: hostname(),
+            manufacturer: dt_vendor(),
             width,
             height,
             fps,

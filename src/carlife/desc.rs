@@ -210,20 +210,20 @@ pub struct Identity {
 }
 
 impl Identity {
-    /// What the device presents before any handshake: an Android phone, which is
-    /// what a head unit expects to find on its port and what it does the
-    /// handshake with. The manufacturer is named because hosts that decide what
-    /// they are looking at by the strings read that one.
+    /// What the device presents before any handshake, which is what a head unit
+    /// expects to find on its port and what it does the handshake with. The maker
+    /// is the caller's: hosts that decide what they are looking at by the strings
+    /// read that one.
     ///
-    /// The serial is what the machine is called: a head unit that keeps a device
-    /// apart from the next one it sees has this string to do it with, and a name
-    /// that is the same on every board is no use for that.
-    pub fn phone(name: &str) -> Self {
+    /// The product and the serial are what the machine is called: a head unit
+    /// that keeps a device apart from the next one it sees has these strings to
+    /// do it with, and a name that is the same on every board is no use for that.
+    pub fn phone(name: &str, manufacturer: &str) -> Self {
         Self {
             vid: PHONE_VID,
             pid: PHONE_PID,
-            manufacturer: "Google".to_string(),
-            product: "Android".to_string(),
+            manufacturer: manufacturer.to_string(),
+            product: name.to_string(),
             serial: name.to_string(),
         }
     }
@@ -390,17 +390,20 @@ mod tests {
 
     #[test]
     fn the_accessory_form_is_the_same_device_under_other_numbers() {
-        let phone = Identity::phone("nanopi-duo2");
+        let phone = Identity::phone("nanopi-duo2", "friendlyarm");
         assert!(!phone.is_accessory(), "a phone is not an accessory yet");
 
         let accessory = phone.accessory();
         assert_eq!((accessory.vid, accessory.pid), (0x18d1, 0x2d00));
         assert!(accessory.is_accessory());
         assert_eq!(
-            accessory.manufacturer, "Google",
+            accessory.manufacturer, "friendlyarm",
             "a phone keeps its manufacturer across the switch, and so does this"
         );
-        assert_eq!(accessory.product, "Android", "and the name it enumerated under");
+        assert_eq!(
+            accessory.product, "nanopi-duo2",
+            "and the name it enumerated under"
+        );
         assert_eq!(accessory.serial, "nanopi-duo2", "and the serial");
     }
 }

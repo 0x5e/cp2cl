@@ -6,10 +6,11 @@
 //! `screen` is not from the environment: it is `/etc/cp2cl/config.json`, read at
 //! the start of each session. See `crate::settings`.
 //!
-//! Two values are not settings at all, because they are properties of the
+//! Three values are not settings at all, because they are properties of the
 //! machine rather than choices: the name it goes by is the hostname
-//! (`hostname`), and its Bluetooth address is read off the controller
-//! (`bt_address`). Both are read where they are used.
+//! (`hostname`), its Bluetooth address is read off the controller
+//! (`bt_address`), and its maker out of the device tree (`dt_vendor`). All
+//! three are read where they are used.
 
 use std::path::{Path, PathBuf};
 
@@ -83,6 +84,9 @@ const NO_ADDRESS: &str = "00:11:22:33:44:55";
 /// go in the identification, and this is the program's own name.
 const DEFAULT_NAME: &str = "cp2cl";
 
+/// What a machine with no device tree to ask reports as its maker.
+const DEFAULT_VENDOR: &str = "Unknown";
+
 /// A Bluetooth controller's own address, which is the only place one is written
 /// down — the phone checks it against the one it paired with, so a made-up value
 /// is rejected where it matters.
@@ -113,6 +117,29 @@ fn read_hostname(path: &Path) -> String {
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| DEFAULT_NAME.to_string())
+}
+
+/// The board's maker: the vendor half of the first `compatible` entry. Read
+/// where it is used, like the two above, and returned as the board writes it.
+pub(crate) fn dt_vendor() -> String {
+    read_dt_vendor(Path::new("/sys/firmware/devicetree/base/compatible"))
+}
+
+/// Split from the fixed path so that a machine with no device tree is something
+/// a test can reach.
+fn read_dt_vendor(path: &Path) -> String {
+    let raw = std::fs::read(path).unwrap_or_default();
+    vendor_from_compatible(&raw).unwrap_or_else(|| DEFAULT_VENDOR.to_string())
+}
+
+/// `compatible` is a NUL-separated list of `<vendor>,<board>` entries, most
+/// specific first, so the vendor is the prefix of the first one.
+fn vendor_from_compatible(raw: &[u8]) -> Option<String> {
+    let first = raw.split(|b| *b == 0).next()?;
+    let entry = std::str::from_utf8(first).ok()?;
+    let (vendor, _board) = entry.split_once(',')?;
+    let vendor = vendor.trim();
+    (!vendor.is_empty()).then(|| vendor.to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -172,5 +199,18 @@ mod tests {
     #[test]
     fn a_machine_that_cannot_say_what_it_is_called_still_goes_by_a_name() {
         assert_eq!(read_hostname(Path::new("no-such-file")), DEFAULT_NAME);
+    }
+
+    #[test]
+    fn a_machine_with_no_device_tree_still_reports_a_maker() {
+        assert_eq!(read_dt_vendor(Path::new("no-such-file")), DEFAULT_VENDOR);
+    }
+
+    #[test]
+    fn the_maker_is_the_prefix_of_the_first_compatible_entry() {
+        let raw = b"rockchip,rk3566\0rockchip,rk356x\0";
+        assert_eq!(vendor_from_compatible(raw).as_deref(), Some("rockchip"));
+        assert_eq!(vendor_from_compatible(b"\0"), None, "an empty first entry");
+        assert_eq!(vendor_from_compatible(b"no-comma"), None);
     }
 }
