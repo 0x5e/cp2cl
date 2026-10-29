@@ -86,6 +86,16 @@ endif
 # stamps — so both go, and the rsync lands ahead of the install in the same run.
 BR_REFRESH := rm -f /build/build/cp2cl-*/.stamp_rsynced /build/build/cp2cl-*/.stamp_target_installed
 
+# A change of Buildroot release is not a change of configuration: host/ and
+# build/ belong to the release that made them, and their stamps make the new one
+# skip the installs it needs — a host python without its installer modules stops
+# the build at the first python package. Nothing but dl/ survives a release
+# change, and the stamp is the release rather than a file in board/, which only
+# decides the tree.
+BR_RELEASE := { [ -e /build/.br-$(BR_VERSION) ] || { \
+	find /build -mindepth 1 -maxdepth 1 ! -name dl -exec rm -rf {} + \
+	&& touch /build/.br-$(BR_VERSION); }; }
+
 .PHONY: all app test image firmware buildroot-image patched
 
 # Both products: the program the board runs, and the image it runs from.
@@ -158,7 +168,8 @@ firmware: app buildroot-image
 		-v "$(CURDIR)":/src:ro \
 		-e BR2_DL_DIR=/build/dl \
 		$(BR_IMAGE) sh -c 'chown $(BR_UID):$(BR_UID) /build \
-			&& su -s /bin/sh builder -c "make -C /opt/buildroot O=/build BR2_EXTERNAL=/src/buildroot $(BOARD)_defconfig \
+			&& su -s /bin/sh builder -c "$(BR_RELEASE) \
+				&& make -C /opt/buildroot O=/build BR2_EXTERNAL=/src/buildroot $(BOARD)_defconfig \
 				&& $(BR_FRESH) \
 				&& $(BR_REFRESH) \
 				&& make -C /opt/buildroot O=/build -j$$(nproc)"'
