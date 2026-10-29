@@ -474,15 +474,18 @@ The board runs an image this repository builds, not a distribution with things
 installed onto it. One command, from the checkout:
 
 ```bash
-make firmware
-# dist/buildroot-2025.02.19-cp2cl-v0.11.0-<sha>.img.gz
+make firmware                  # NanoPi Duo2, the default
+make firmware BOARD=ufi001c    # UFI001C
+# dist/buildroot-2025.02.19-cp2cl-nanopi_duo2-v0.11.0-<sha>.img.gz
 ```
 
 Unpack it and write the `.img` to a card, then put the card in the board. The
 file is gzipped because it is what is handed out: the card is 73 MB and the
 copy that travels is 15 MB. The name is the version the page shows, spelled as a
-file name has to: the Buildroot release, the tag on the commit (`dev` when it
-carries none), the short commit, and `-dirty` when the tree does not match it.
+file name has to: the Buildroot release, the board, the tag on the commit (`dev`
+when it carries none), the short commit, and `-dirty` when the tree does not
+match it.
+
 Everything the board runs is
 in it: the access point, the program, and the init scripts that start them in the
 order they have to happen. It comes out at 73 MB — an 8 MB boot partition with a
@@ -491,6 +494,15 @@ matters is the root's: it is a filesystem to be worked in, and the 36 MB left
 over is what a binary, a key or a log has to fit in. The build runs in a container —
 there is no Linux machine here and Buildroot does not run on macOS — and the
 first one takes a while, since it compiles a toolchain and a kernel.
+
+The UFI001C is handed out as a `.tar.gz` instead: `cp2cl-ufi001c.img` (the root
+filesystem, with the kernel in it), `boot.img`, `lk2nd-msm8916.img` and a
+`flash-edl.sh` that writes the rootfs with `edl w userdata`. Its stock partition
+table stays — lk2nd, aboot and the modem calibration partitions are on it — so
+there is no card image to write and no GPT to get wrong. The kernel is not in
+the boot partition: it is 16 MiB, lk2nd takes the first 512 KiB, and lk2nd reads
+the kernel out of the root filesystem instead. The image is 128 MB while the
+partition is GiB-sized, and the filesystem grows to fill it on the first boot.
 
 **`buildroot/` is an external tree, not Buildroot.** Buildroot itself is not in
 this repository: the build image clones a pinned release into `/opt/buildroot`, and
@@ -637,6 +649,10 @@ name. What is assumed is the kernel, named under
 the access point. The one step that belongs to the vendor image rather than to us
 — unloading the `g_mass_storage` that image loads onto this port, which would hold
 the controller — is done by the program, and is a no-op where it is not loaded.
+
+On the UFI001C both radios sit behind WCNSS and the port is ChipIdea with the
+role decided by the PMIC, not by a `mode` file; `buildroot/README.md` §4 is the
+list of what that changes.
 
 ### Running it on the board
 
@@ -972,7 +988,7 @@ this a derivative work, so cp2cl inherits that.
 | `assets/web/vendor/weui.min.css` | its stylesheet, vendored so the page needs no network |
 | `Makefile` | the binary for the board, the tests, and the card image — each in its own container |
 | `docker/` | the image that cross-compiles for the board, and the CMake toolchain it needs |
-| `buildroot/` | the external tree the image is built from: one package, one board, the kernel fragments and the init scripts |
+| `buildroot/` | the external tree the image is built from: one package, the boards, the kernel fragments and the init scripts |
 
 ## Expected behaviour, not bugs
 

@@ -1,0 +1,53 @@
+#!/bin/sh
+#
+# The LEDs, once the boot has settled: green beats while the access point is
+# beaconing, red stays on as the power light. The board has no console, so this
+# is the only thing that says the box is alive without a network.
+#
+# The triggers are the kernel's, not a loop here: heartbeat and default-on cost
+# no userspace time and keep working if cp2cl or hostapd hangs.
+
+LOG=/var/log
+
+green_led() { ls -d /sys/class/leds/*green* 2>/dev/null | head -n 1; }
+red_led()   { ls -d /sys/class/leds/*red* 2>/dev/null | head -n 1; }
+
+say() {
+	[ -w "$LOG" ] && echo "led:     $*" >> "$LOG/boot.log"
+}
+
+start() {
+	printf 'Setting LEDs: '
+
+	red=$(red_led)
+	if [ -n "$red" ]; then
+		echo none > "$red/trigger" 2>/dev/null
+		echo 1 > "$red/brightness" 2>/dev/null
+	fi
+
+	green=$(green_led)
+	if [ -n "$green" ]; then
+		# `/run/hostapd.pid` is written by S55ap only after hostapd has set the
+		# interface up and reported back, so it is the one thing that means the
+		# access point is on air rather than merely started.
+		if [ -s /run/hostapd.pid ]; then
+			echo heartbeat > "$green/trigger" 2>/dev/null
+			say "green=heartbeat"
+		else
+			echo none > "$green/trigger" 2>/dev/null
+			echo 0 > "$green/brightness" 2>/dev/null
+			say "green=off no-hostapd"
+		fi
+	fi
+
+	echo "ok"
+}
+
+case "$1" in
+	start) start ;;
+	stop|restart|reload) ;;
+	*)
+		echo "Usage: $0 {start}"
+		exit 1
+		;;
+esac

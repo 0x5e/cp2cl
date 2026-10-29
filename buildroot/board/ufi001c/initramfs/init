@@ -1,0 +1,88 @@
+#!/bin/busybox sh
+#
+# PID 1 of the ramdisk lk2nd hands the kernel -- the one in the rootfs at
+# /boot/initramfs.cpio.gz, and the same bytes inside boot.img.
+#
+# The kernel cannot find root by UUID: root= is read by init/do_mounts.c, which
+# knows PARTUUID=, PARTLABEL=, /dev/<name> and major:minor and nothing else.
+# The rootfs this tree ships lands on whichever partition the board calls
+# userdata (or system, on a table that has one), so the name is not known here
+# either.
+#
+# What is known is the ext2 volume label the image is built with
+# (BR2_TARGET_ROOTFS_EXT2_LABEL), because the label belongs to the filesystem
+# and not to what has been installed into it: it is readable from the superblock
+# before anything is mounted, and it does not move when a package is added or
+# dropped. postmarketOS locates its root the same way -- pmos_root= or
+# pmos_root_uuid= on the command line, else any partition labelled pmOS_root --
+# and never by looking for a file inside the rootfs.
+#
+# Everything is busybox: the ramdisk carries one static-ish binary and musl, and
+# no other tools.
+
+/bin/busybox --install -s /bin 2>/dev/null
+export PATH=/bin
+export HOME=/
+
+# The ramdisk carries three files and a directory or two; everything the mount
+# calls below need has to be made first. The root of an initramfs is a ramfs, so
+# this sticks.
+mkdir -p /proc /sys /dev /mnt
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+
+# The 16-byte s_volume_name field of the ext2 superblock, in hex: the label
+# followed by NUL padding, and a shell variable cannot hold a NUL, so the field
+# is compared as od prints it. The label itself is a defconfig value
+# (BR2_TARGET_ROOTFS_EXT2_LABEL) and is written down nowhere else -- post-build.sh
+# substitutes it here, so this file is a template until the package is built. Left
+# unsubstituted, the comparison matches no partition and the boot stops with the
+# partition list on the console rather than mounting something else.
+ROOT_LABEL_HEX=@ROOT_LABEL_HEX@
+
+# The ext2 superblock sits at byte 1024 of the filesystem and s_volume_name is
+# 16 bytes at superblock offset 0x78, so the field starts at 1024 + 0x78 = 1144.
+# bs=1 because 1144 is not a multiple of anything worth aligning to; it is 16
+# single-byte reads on a partition whose first block is already in RAM.
+volume_label() {
+	dd if="$1" bs=1 skip=1144 count=16 2>/dev/null | od -An -tx1 | tr -d ' \n'
+}
+
+# ext2 as well as ext4: the rootfs this board boots is ext2, because lk2nd has
+# to read the kernel out of it and lk2nd understands nothing else. The kernel
+# mounts it through the ext4 driver, which is built with CONFIG_EXT4_USE_FOR_EXT2
+# and answers to both names.
+find_root() {
+	for dev in /dev/mmcblk0p* /dev/sd*; do
+		[ -b "$dev" ] || continue
+		[ "$(volume_label "$dev")" = "$ROOT_LABEL_HEX" ] || continue
+		mount -t ext4 -o ro "$dev" /mnt 2>/dev/null || continue
+		echo "cp2cl: root filesystem on $dev"
+		return 0
+	done
+	return 1
+}
+
+# eMMC partitions show up from the mmc driver asynchronously; 10 s is well past
+# the point where a card that is going to appear has appeared.
+i=0
+until find_root; do
+	i=$((i + 1))
+	if [ "$i" -ge 10 ]; then
+		echo "cp2cl: no partition is labelled rootfs; partitions seen:"
+		cat /proc/partitions
+		echo "cp2cl: dropping to a shell on the console"
+		exec /bin/sh
+	fi
+	sleep 1
+done
+
+mount -o remount,rw /mnt
+mkdir -p /mnt/proc /mnt/sys /mnt/dev
+mount -o move /proc /mnt/proc
+mount -o move /sys /mnt/sys
+mount -o move /dev /mnt/dev
+
+exec switch_root /mnt /sbin/init

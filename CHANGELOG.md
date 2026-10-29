@@ -4,6 +4,17 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## 未发布
+
+### 新增
+
+- 支持 UFI001C（MSM8916 + WCN3620）：新增该板的 buildroot 配置、内核片段、WCNSS 固件加载与指示灯。rootfs 单独成镜像，用 `edl w userdata` 刷入；内核不在 16 MiB 的 boot 分区里，由 lk2nd 从根文件系统的 `/extlinux/extlinux.conf` 读起。
+- UFI001C 的根文件系统在刷机后的第一次启动里在线扩容到分区末尾，红灯 200 毫秒亮灭闪烁，扩容成功即重启，Wi-Fi、蓝牙与 cp2cl 都等到重启之后才启动。`/var/lib/rootfs-resized` 标记使之后的开机不再扩容。
+
+### 变更
+
+- `make firmware BOARD=<板名>` 选择目标板，构建镜像同时带 aarch64 与 armv7 交叉工具链。
+
 ## v0.13.1 alpha — 2026-10-31
 
 ### 变更

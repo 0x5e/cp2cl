@@ -1,0 +1,77 @@
+#!/bin/sh
+#
+# The radios, in one place: the WCNSS remote processor first, then Bluetooth.
+#
+# qcom_wcnss_pil is the only module the kernel side needs. Everything else in
+# the chain is linked into the image and probes when the pieces it waits for
+# appear: wcnss_ctrl when the SMD channel shows up, wcn36xx and btqcomsmd when
+# wcnss_ctrl populates their device tree nodes.
+#
+# modprobe rather than insmod: the chain is qcom_wcnss_pil -> qcom_rproc_common,
+# qcom_mdt_loader, qcom_pil_info, and btqcomsmd -> bluetooth. The order is in
+# modules.dep, which the build installs; the depmod below is for an image whose
+# module tree was replaced on the board and no longer matches it.
+#
+# Nothing here waits for wlan0: the interface appears a few seconds after the
+# firmware is up, and cp2cl waits for it itself. What is left is the log line
+# for a boot where one of them did not load.
+
+LOG=/var/log
+MODDIR=/lib/modules/$(uname -r)
+
+log() {
+	echo "$*"
+	[ -w "$LOG" ] && echo "radio: $*" >> "$LOG/radio.log"
+}
+
+start() {
+	printf 'Loading radios: '
+
+	ERR=/dev/null
+	if [ -w "$LOG" ]; then
+		: > "$LOG/radio.log"
+		ERR=$LOG/radio.log
+	fi
+
+	if [ ! -f "$MODDIR/modules.dep" ]; then
+		depmod -a 2>>"$ERR" || log "depmod failed"
+	fi
+
+	failed=0
+	for m in qcom_wcnss_pil btqcomsmd rfcomm; do
+		if modprobe "$m" 2>>"$ERR"; then
+			log "loaded $m"
+		else
+			log "modprobe $m failed"
+			failed=1
+		fi
+	done
+
+	if [ "$failed" = 1 ]; then
+		echo "failed"
+		return 1
+	fi
+	echo "ok"
+}
+
+stop() {
+	printf 'Unloading radios: '
+	for m in btqcomsmd qcom_wcnss_pil; do
+		rmmod "$m" 2>/dev/null
+	done
+	echo "ok"
+}
+
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart|reload)
+		"$0" stop
+		sleep 1
+		"$0" start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+		;;
+esac

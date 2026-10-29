@@ -1,0 +1,111 @@
+#!/bin/sh
+#
+# The WCNSS firmware is not in this rootfs. It ships on the stock firmware
+# partitions of the eMMC — `modem` holds wcnss.mdt and its fragments, `persist`
+# holds the board's NV blob — and postmarketOS loads it from there at boot rather
+# than repackaging blobs per device. This is that loader (msm-firmware-loader,
+# MIT), cut down to the partitions this board has and the one layout the WCNSS
+# drivers expect.
+#
+# It runs before S10radio, because qcom_wcnss_pil requests wcnss.mdt from probe
+# and firmware_class reads its search path once per request: the path has to
+# point at a directory with the blobs in it before the module is loaded.
+#
+# Nothing is copied. The links go into a tmpfs, the blobs stay on their
+# partitions read-only, and the kernel is told to look there.
+
+BASEDIR=/lib/firmware/msm-firmware-loader
+LOG=/var/log
+
+# Partitions worth mounting: `modem` has WCNSS and the modem firmware, `persist`
+# has the calibration data, `apnhlos`/`bluetooth` exist on other msm8916 devices
+# and cost nothing to include.
+PARTITIONS="apnhlos bluetooth modem persist"
+
+log() {
+	echo "$*"
+	[ -w "$LOG" ] && echo "firmware: $*" >> "$LOG/radio.log"
+}
+
+start() {
+	printf 'Loading WCNSS firmware: '
+
+	[ -d "$BASEDIR" ] || mkdir -p "$BASEDIR"
+	mount -t tmpfs -o mode=755,nodev,noexec,nosuid none "$BASEDIR" || {
+		echo "failed (mount)"
+		return 1
+	}
+	mkdir -p "$BASEDIR/mnt" "$BASEDIR/target"
+
+	# /dev/disk/by-partlabel does not exist here — no udev — so the names come
+	# out of sysfs, one directory per partition.
+	mounted=0
+	for part in /sys/block/mmcblk*/mmcblk*p*; do
+		[ -r "$part/uevent" ] || continue
+		dev=$(sed -n 's/^DEVNAME=//p' "$part/uevent")
+		name=$(sed -n 's/^PARTNAME=//p' "$part/uevent")
+		[ -n "$name" ] || continue
+		case " $PARTITIONS " in
+		*" $name "*) ;;
+		*) continue ;;
+		esac
+		mkdir -p "$BASEDIR/mnt/$name"
+		if mount -o ro,nodev,noexec,nosuid "/dev/$dev" "$BASEDIR/mnt/$name"; then
+			mounted=$((mounted + 1))
+			log "mounted $name as /dev/$dev"
+		else
+			log "$name (/dev/$dev) would not mount"
+		fi
+	done
+
+	# A GPT carries the names in /sys/.../uevent; an MBR table has none, and
+	# every partition above is then skipped without a word. What follows would
+	# still print "ok" over a firmware path that holds nothing, and the only
+	# trace would be wcnss_pil failing minutes later in the radio log.
+	if [ "$mounted" = 0 ]; then
+		log "no partition named one of: $PARTITIONS -- under /sys/block/mmcblk*"
+		echo "no partitions"
+		return 1
+	fi
+
+	# The blobs live under image/ on every one of these partitions. Linking them
+	# flat is what the drivers ask for: wcnss.mdt by name, not by path.
+	for blob in "$BASEDIR"/mnt/*/image/*; do
+		[ -e "$blob" ] || continue
+		ln -sf "$blob" "$BASEDIR/target/${blob##*/}"
+	done
+
+	# The NV blob is looked up as wlan/prima/WCNSS_qcom_wlan_nv.bin, which is the
+	# name in drivers/soc/qcom/wcnss_ctrl.c, not the flat one above.
+	nv=
+	if [ -f "$BASEDIR/mnt/persist/WCNSS_qcom_wlan_nv.bin" ]; then
+		nv="$BASEDIR/mnt/persist/WCNSS_qcom_wlan_nv.bin"
+	elif [ -e "$BASEDIR/target/WCNSS_qcom_wlan_nv.bin" ]; then
+		nv="$BASEDIR/target/WCNSS_qcom_wlan_nv.bin"
+	fi
+	if [ -n "$nv" ]; then
+		mkdir -p "$BASEDIR/target/wlan/prima"
+		ln -sf "$nv" "$BASEDIR/target/wlan/prima/WCNSS_qcom_wlan_nv.bin"
+	else
+		log "no WCNSS_qcom_wlan_nv.bin on modem or persist"
+	fi
+
+	# Some kernels ask for .mbn where the partition has .mdt. One link each.
+	for mdt in "$BASEDIR"/target/*.mdt; do
+		[ -e "$mdt" ] || continue
+		ln -sf "$mdt" "${mdt%.mdt}.mbn"
+	done
+
+	printf '%s' "$BASEDIR/target" > /sys/module/firmware_class/parameters/path
+
+	echo "ok"
+}
+
+case "$1" in
+	start) start ;;
+	stop|restart|reload) ;;
+	*)
+		echo "Usage: $0 {start}"
+		exit 1
+		;;
+esac
