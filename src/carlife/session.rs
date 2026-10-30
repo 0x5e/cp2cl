@@ -1853,21 +1853,22 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         }
     }
 
-    /// What a phone sends as a song starts, in the order it sends it.
+    /// What a phone sends as a song starts, in the order it reaches the car.
     ///
-    /// The module that plays the song first — idle and then running — and then
-    /// the player it is played on: the format, a stop, and the same format
-    /// again. The stop is what puts down a player the car may still be holding
-    /// from the song before. Five messages, one after the other, so a car that
-    /// takes the module running as the start of the song hears it before the
-    /// first sample rather than a reading later.
+    /// The player first — the format, a stop, and the same format again, the
+    /// stop being what puts down a player the car may still be holding from the
+    /// song before — and then the module that plays it, idle and then running.
+    /// The module statuses come last because that is where they land when a
+    /// phone sends them: they go through the command channel's queue while the
+    /// media messages are written to their socket directly, so a start that
+    /// names the module first arrives with it last.
     async fn start_song(&mut self, (rate, channels): (u32, u16)) -> Result<()> {
-        self.report_music(proto::MUSIC_IDLE).await?;
-        self.report_music(proto::MUSIC_RUNNING).await?;
         let body = proto::media_init(rate, channels);
         self.send(MEDIA_INIT, &body).await?;
         self.send(MEDIA_STOP, &[]).await?;
-        self.send(MEDIA_INIT, &body).await
+        self.send(MEDIA_INIT, &body).await?;
+        self.report_music(proto::MUSIC_IDLE).await?;
+        self.report_music(proto::MUSIC_RUNNING).await
     }
 
     /// One thing the phone's audio produced, on the media channel.
@@ -3284,8 +3285,8 @@ mod tests {
             car.introduce("20062100").await;
 
             // The music: the stream opens, and then there is sound on it. A
-            // start is what a phone sends as one — the module idle and then
-            // running, then the player set up, put down and set up again.
+            // start is what a phone sends as one — the player set up, put down
+            // and set up again, and then the module idle and running.
             sink.push(StreamEvent::AudioConfig {
                 stream: stream(102, 1),
                 codec: AudioCodec::AacLc {
@@ -3294,6 +3295,13 @@ mod tests {
                 },
                 name: "media".into(),
             });
+            let init = car.expect(MEDIA_INIT).await;
+            assert_eq!(init.body, proto::media_init(44_100, 2));
+            // The player is put down and set up again before the song goes on:
+            // what a phone does, and what the car is given.
+            car.expect(MEDIA_STOP).await;
+            let again = car.expect(MEDIA_INIT).await;
+            assert_eq!(again.body, proto::media_init(44_100, 2));
             let idle = car.expect(MODULE_STATUS).await;
             assert_eq!(
                 idle.body,
@@ -3304,13 +3312,6 @@ mod tests {
                 running.body,
                 proto::module_status(proto::MUSIC_MODULE, proto::MUSIC_RUNNING)
             );
-            let init = car.expect(MEDIA_INIT).await;
-            assert_eq!(init.body, proto::media_init(44_100, 2));
-            // The player is put down and set up again before the song goes on:
-            // what a phone does, and what the car is given.
-            car.expect(MEDIA_STOP).await;
-            let again = car.expect(MEDIA_INIT).await;
-            assert_eq!(again.body, proto::media_init(44_100, 2));
 
             sink.push(StreamEvent::AudioPacket {
                 stream: stream(102, 1),
@@ -3378,12 +3379,12 @@ mod tests {
                 },
                 name: "media".into(),
             });
-            car.expect(MODULE_STATUS).await;
-            car.expect(MODULE_STATUS).await;
             let init = car.expect(MEDIA_INIT).await;
             assert_eq!(init.body, proto::media_init(48_000, 2));
             car.expect(MEDIA_STOP).await;
             car.expect(MEDIA_INIT).await;
+            car.expect(MODULE_STATUS).await;
+            car.expect(MODULE_STATUS).await;
             car.expect_silence(Duration::from_millis(200)).await;
         });
 
@@ -3684,11 +3685,11 @@ mod tests {
                 },
                 name: "media".into(),
             });
-            car.expect(MODULE_STATUS).await;
-            car.expect(MODULE_STATUS).await;
             car.expect(MEDIA_INIT).await;
             car.expect(MEDIA_STOP).await;
             car.expect(MEDIA_INIT).await;
+            car.expect(MODULE_STATUS).await;
+            car.expect(MODULE_STATUS).await;
 
             // The song is already playing when the phone first says where it
             // is: the song starting is not a resume, and the module was told
@@ -3715,6 +3716,10 @@ mod tests {
                 playing: Some(true),
             }));
             car.expect(MEDIA_RESUME_PLAY).await;
+            let init = car.expect(MEDIA_INIT).await;
+            assert_eq!(init.body, proto::media_init(44_100, 2));
+            car.expect(MEDIA_STOP).await;
+            car.expect(MEDIA_INIT).await;
             let idle = car.expect(MODULE_STATUS).await;
             assert_eq!(
                 idle.body,
@@ -3725,10 +3730,6 @@ mod tests {
                 running.body,
                 proto::module_status(proto::MUSIC_MODULE, proto::MUSIC_RUNNING)
             );
-            let init = car.expect(MEDIA_INIT).await;
-            assert_eq!(init.body, proto::media_init(44_100, 2));
-            car.expect(MEDIA_STOP).await;
-            car.expect(MEDIA_INIT).await;
 
             // A reading that says where the song is without saying whether it
             // moved is not a change of play state either.
@@ -4251,11 +4252,11 @@ mod tests {
                 },
                 name: "media".into(),
             });
-            car.expect(MODULE_STATUS).await;
-            car.expect(MODULE_STATUS).await;
             car.expect(MEDIA_INIT).await;
             car.expect(MEDIA_STOP).await;
             car.expect(MEDIA_INIT).await;
+            car.expect(MODULE_STATUS).await;
+            car.expect(MODULE_STATUS).await;
 
             // One byte past the media channel's body cap.
             sink.push(StreamEvent::AudioPacket {
