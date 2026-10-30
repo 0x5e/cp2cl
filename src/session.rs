@@ -42,7 +42,6 @@ use tokio::sync::{broadcast, mpsc};
 use crate::artwork::{self, Fitted};
 use crate::carlife::proto;
 use crate::config::{bt_address, hostname, Config};
-use crate::navigation::Guidance;
 use crate::playing::{Playing, Position, Track};
 use crate::sink::ClSink;
 use crate::web::Status;
@@ -62,14 +61,6 @@ const RESTART_PAUSE: Duration = Duration::from_millis(750);
 /// is subscribed to with everything else at the start of a session — see LIVI's
 /// `bringup::subscriptions` — and arrives as one more incoming message.
 const NOW_PLAYING: u16 = 0x5001;
-
-/// iAP2's two route-guidance messages, which the car's turn-by-turn strip is
-/// drawn from: the route as a whole — its state, the distance to the next turn,
-/// and which of its turns is the current one — and one turn of it at a time, by
-/// index. Subscribed to with everything else at the start of a session, like
-/// `NOW_PLAYING` above, and reconciled on the other side; see `crate::navigation`.
-const ROUTE_GUIDANCE: u16 = 0x5201;
-const ROUTE_GUIDANCE_MANEUVER: u16 = 0x5202;
 
 /// Why a bringup ended, which is what says whether to start another.
 pub(crate) enum Ended {
@@ -509,18 +500,6 @@ pub(crate) async fn run_bringup(
                     frame.len()
                 ),
             },
-            // And where it is going. The two messages are sent one at a time and
-            // each describes part of the route, so neither is worth anything on
-            // its own: they are handed on as they arrive and put back together
-            // by whoever draws the strip. See `crate::navigation`.
-            Some(BringupEvent::Incoming {
-                msg_id: ROUTE_GUIDANCE | ROUTE_GUIDANCE_MANEUVER,
-                frame,
-            }) => {
-                if let Some(update) = Guidance::from_iap2(&frame) {
-                    panel.guidance(update);
-                }
-            }
             Some(_) => {}
             // The bringup task ended without saying so, which only happens when
             // it was torn down; there is nothing left to watch.

@@ -16,7 +16,6 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::{mpsc, watch};
 
-use crate::navigation::Guidance;
 use crate::playing::Playing;
 
 /// What the audio pipeline agreed to deliver, which decides how the frames are
@@ -276,10 +275,10 @@ const CL_BACKLOG: usize = 8;
 /// and keeping them apart here is what lets a prompt arrive without the music
 /// stopping.
 ///
-/// There are two more queues beside them for what the phone is playing and for
-/// where it is going — see `playing` and `guidance` — because a session takes
-/// those and gives them back on exactly these terms, and nothing about that
-/// changes for them being records rather than streams.
+/// There is one more queue beside them for what the phone is playing — see
+/// `playing` — because a session takes it and gives it back on exactly these
+/// terms, and nothing about that changes for it being a record rather than a
+/// stream.
 pub struct ClOutlet {
     video_tx: mpsc::Sender<Vec<u8>>,
     video_rx: Mutex<Option<mpsc::Receiver<Vec<u8>>>>,
@@ -289,8 +288,6 @@ pub struct ClOutlet {
     navi_rx: Mutex<Option<mpsc::Receiver<Navi>>>,
     playing_tx: mpsc::Sender<Playing>,
     playing_rx: Mutex<Option<mpsc::Receiver<Playing>>>,
-    guidance_tx: mpsc::Sender<Guidance>,
-    guidance_rx: Mutex<Option<mpsc::Receiver<Guidance>>>,
     /// Whether the phone's screen stream is open. Written by the sink, which is
     /// what sees it open and close, and read for the two things that turn on it:
     /// what the car is being shown — a screen that is not open has no pictures,
@@ -306,7 +303,6 @@ impl ClOutlet {
         let (media_tx, media_rx) = mpsc::channel(CL_BACKLOG);
         let (navi_tx, navi_rx) = mpsc::channel(CL_BACKLOG);
         let (playing_tx, playing_rx) = mpsc::channel(CL_BACKLOG);
-        let (guidance_tx, guidance_rx) = mpsc::channel(CL_BACKLOG);
         // Nothing has opened a screen yet: the first thing a phone does is
         // arrive, and this says so when it does.
         let (screen_tx, screen_rx) = watch::channel(false);
@@ -319,8 +315,6 @@ impl ClOutlet {
             navi_rx: Mutex::new(Some(navi_rx)),
             playing_tx,
             playing_rx: Mutex::new(Some(playing_rx)),
-            guidance_tx,
-            guidance_rx: Mutex::new(Some(guidance_rx)),
             screen_tx,
             screen_rx,
         }
@@ -330,15 +324,14 @@ impl ClOutlet {
     ///
     /// One object takes all of them: a video event and an audio event differ in
     /// which channel they end up on and in nothing else, and both channels are
-    /// the same connection to the same car. What the phone is playing, and where
-    /// it is going, go through the same object for the same reason.
+    /// the same connection to the same car. What the phone is playing goes
+    /// through the same object for the same reason.
     pub fn sink(&self) -> Arc<ClSink> {
         Arc::new(ClSink {
             video: self.video_tx.clone(),
             media: self.media_tx.clone(),
             navi: self.navi_tx.clone(),
             playing: self.playing_tx.clone(),
-            guidance: self.guidance_tx.clone(),
             screen: self.screen_tx.clone(),
             pending: Mutex::new(Vec::new()),
             media_stream: Mutex::new(None),
@@ -350,7 +343,6 @@ impl ClOutlet {
             no_navi_reader: AtomicBool::new(false),
             navi_behind: AtomicBool::new(false),
             playing_dropped: AtomicBool::new(false),
-            guidance_dropped: AtomicBool::new(false),
         })
     }
 
@@ -406,18 +398,6 @@ impl ClOutlet {
             *guard = Some(rx);
         }
     }
-
-    /// Where the phone is going. Taken and given back on the same terms as the
-    /// four above.
-    pub fn take_guidance(&self) -> Option<mpsc::Receiver<Guidance>> {
-        Some(emptied(self.guidance_rx.lock().ok()?.take()?))
-    }
-
-    pub fn return_guidance(&self, rx: mpsc::Receiver<Guidance>) {
-        if let Ok(mut guard) = self.guidance_rx.lock() {
-            *guard = Some(rx);
-        }
-    }
 }
 
 fn emptied<T>(mut rx: mpsc::Receiver<T>) -> mpsc::Receiver<T> {
@@ -457,7 +437,6 @@ pub struct ClSink {
     media: mpsc::Sender<Media>,
     navi: mpsc::Sender<Navi>,
     playing: mpsc::Sender<Playing>,
-    guidance: mpsc::Sender<Guidance>,
     /// Whether the phone's screen stream is open, for the side that decides what
     /// the car is shown while it is not. Written by the airplay pump that opens
     /// and closes the stream, read by the CarLife session.
@@ -482,8 +461,6 @@ pub struct ClSink {
     navi_behind: AtomicBool,
     /// And once for what the phone is playing, which is dropped in its own way.
     playing_dropped: AtomicBool,
-    /// And once for where it is going, which is dropped the same way.
-    guidance_dropped: AtomicBool,
 }
 
 impl ClSink {
@@ -556,20 +533,6 @@ impl ClSink {
             && !self.playing_dropped.swap(true, Ordering::Relaxed)
         {
             tracing::warn!("carlife.media_dropped reason=no_reader");
-        }
-    }
-
-    /// Where the phone is going, on its way to the car's turn-by-turn strip.
-    ///
-    /// Dropped on exactly the terms of the one above, and for the same reason: a
-    /// description of a route is a record rather than a flow, so a car that is
-    /// not reading is not behind — the phone describes the route again as it
-    /// goes, and the newest description is the one worth having.
-    pub fn guidance(&self, item: Guidance) {
-        if self.guidance.try_send(item).is_err()
-            && !self.guidance_dropped.swap(true, Ordering::Relaxed)
-        {
-            tracing::warn!("carlife.navi_dropped reason=no_reader");
         }
     }
 }

@@ -20,7 +20,6 @@ mod commands;
 mod config;
 mod led;
 mod logging;
-mod navigation;
 mod playing;
 mod session;
 mod settings;

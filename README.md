@@ -877,38 +877,6 @@ never come, which costs the session rather than the message.
 The play position is not sent: `MSG_CMD_MEDIA_PROGRESS_BAR` is left alone, though
 the phone does describe where the song has got to.
 
-## Navigation
-
-The car's turn-by-turn strip is told what the phone is guiding towards. iOS
-describes a route over iAP2 as two messages — `RouteGuidanceUpdate` (0x5201)
-carries the state of the route as a whole and names which of its turns is the
-current one, while `RouteGuidanceManeuverUpdate` (0x5202) describes one turn at a
-time, by index, with that turn's type and the road it leads onto.
-
-`src/navigation.rs` is where the two shapes are reconciled: `Guidance::from_iap2`
-reads one of the phone's messages, `merge` folds it into what is known, and
-`current` answers which turn the strip is about. The CarLife session sends
-`MSG_CMD_NAVI_NEXT_TURN_INFO` when the turn changes and `MSG_CMD_MODULE_STATUS`
-when the route starts or stops.
-
-The strip gets the turn kind, the road it leads onto, and how far away it is.
-Two of the car's six fields are left empty rather than written as zero.
-`totalDistance` is a second distance to the same turn — the guide's "total"
-against the "remaining" — and iAP2 describes only one distance to a turn, so
-there is nothing to put in it. `time` is the seconds to the turn, and the phone's
-own countdown is to the destination: a countdown to the wrong place is worse than
-no countdown.
-
-`turn_kind` is deliberately incomplete. The phone's `EManeuverType` has 54 values
-and the car's `TurnKind` has 58; a kind is named only where the two vocabularies
-mean the same thing. Ramps, motorway changes and arrivals have no counterpart in
-the car's list, and are left unnamed rather than rounded to the nearest arrow.
-
-The strip is only sent once the car has asked for it, with
-`MSG_CMD_CARLIFE_DATA_SUBSCRIBE_START`; before that the module state alone is
-sent, because that is the phone saying something about itself rather than data
-the car subscribes to.
-
 ## Navigation prompts
 
 The spoken prompt is a second, separate thing: it arrives as audio, not as
@@ -1011,7 +979,6 @@ this a derivative work, so cp2cl inherits that.
 | `src/sink.rs` | what a stream *is* — codec and description as well as bytes — and the two channels the car drains |
 | `src/playing.rs` | what the phone is playing, as the fields the car's panel is told |
 | `src/artwork.rs` | the cover art, made small enough for the car's one media message |
-| `src/navigation.rs` | where the phone is going, as the fields the car's turn-by-turn strip is told |
 | `src/commands.rs` | the vocabulary of input |
 | `src/settings.rs` | `/etc/cp2cl/config.json`: the screen the settings page picks, the choices it picks from, and the file as it is written |
 | `src/web/status.rs` | the snapshot both halves report into, and the JSON behind `/api/status` |

@@ -392,8 +392,8 @@ pub fn module_statuses(states: &[(i32, i32)]) -> Vec<u8> {
 /// one, so its state is only ever the idle one — see `modules_at_rest`.
 pub const PHONE_MODULE: i32 = 1;
 
-/// `CARLIFE_NAVI_MODULE_ID`: the navigation module, the one module this device
-/// has a state of its own for.
+/// `CARLIFE_NAVI_MODULE_ID`: the navigation module. Nothing here guides a route,
+/// so its state is only ever the idle one — see `modules_at_rest`.
 pub const NAVI_MODULE: i32 = 2;
 
 /// `CARLIFE_MUSIC_MODULE_ID`: the module playing the song, whose state follows
@@ -410,11 +410,9 @@ pub const VR_MODULE: i32 = 4;
 pub const MUSIC_IDLE: i32 = 0;
 pub const MUSIC_RUNNING: i32 = 1;
 
-/// `NaviState`. `IDLE` is a navigation that is not running and `START` one that
-/// is. The third, `STOP`, is a navigation the phone has ended — which the phone
-/// this side bridges has no way to say, so it is never sent.
+/// `NaviState.IDLE`: a navigation that is not running, which is the only state
+/// this side has anything to say about a navigation module.
 pub const NAVI_IDLE: i32 = 0;
-pub const NAVI_START: i32 = 1;
 
 /// `PhoneState.IDLE` and `VRState.IDLE`: the state the two modules above are in
 /// whenever this side has anything to say about them.
@@ -433,49 +431,6 @@ pub fn modules_at_rest() -> Vec<u8> {
         (MUSIC_MODULE, MUSIC_IDLE),
         (VR_MODULE, MODULE_IDLE),
     ])
-}
-
-/// `ActionType`: what a turn message does to the car's strip.
-pub const ACTION_SHOW: i32 = 1;
-pub const ACTION_UPDATE: i32 = 2;
-pub const ACTION_HIDE: i32 = 3;
-
-/// What the car's turn-by-turn strip is to show.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct NextTurn {
-    /// The car's own `TurnKind`, once `crate::navigation::turn_kind` has put
-    /// the phone's `EManeuverType` into the car's vocabulary.
-    pub kind: Option<i32>,
-    /// The road the turn leads onto.
-    pub road: Option<String>,
-    /// Metres to the turn.
-    pub remain_m: Option<i32>,
-}
-
-/// `MSG_CMD_NAVI_NEXT_TURN_INFO` — the turn the car's strip is to show, or the
-/// word to take it down. The guide calls this one the simple guidance and has
-/// it refreshed whenever the next turn changes (guide §13.1).
-///
-/// `CarlifeNaviNextTurnInfo` is six fields and the guide calls every one of them
-/// required. Three are written here. `totalDistance` (field 4) and `time`
-/// (field 6) are not, because the phone has nothing behind them, and `naviTurn`
-/// (field 2) is only written when the two vocabularies have a word in common —
-/// see `crate::navigation` for both. The car's own parser reads a body that
-/// stops early and hands its callbacks the defaults, so an absent field is the
-/// same empty value, said honestly.
-pub fn navi_next_turn_info(action: i32, turn: &NextTurn) -> Vec<u8> {
-    let mut out = Vec::new();
-    put_int(&mut out, 1, action);
-    if let Some(kind) = turn.kind {
-        put_int(&mut out, 2, kind);
-    }
-    if let Some(road) = turn.road.as_deref() {
-        put_str(&mut out, 3, road);
-    }
-    if let Some(metres) = turn.remain_m {
-        put_int(&mut out, 5, metres);
-    }
-    out
 }
 
 /// `MSG_CMD_CARLIFE_DATA_SUBSCRIBE_DONE` — this device's answer to the car's
@@ -787,12 +742,6 @@ pub fn decode_data_subscribe(body: &[u8]) -> Vec<i32> {
     }
     out
 }
-
-/// `CARLIFE_DATA_TURNBYTURN`: the turn-by-turn strip, which is the one of the
-/// two subscribed kinds of data this device produces. The other is the assistant
-/// guide — speed cameras and the like — which has nothing behind it on the
-/// CarPlay side; see `crate::navigation`.
-pub const DATA_TURN_BY_TURN: i32 = 0;
 
 /// `MSG_CMD_VIDEO_ENCODER_FRAME_RATE_CHANGE`.
 pub fn decode_frame_rate(body: &[u8]) -> Option<i32> {
@@ -1249,50 +1198,12 @@ mod tests {
         assert_eq!(body[14], 0xc8);
     }
 
-    #[test]
-    fn the_strip_is_told_the_turn_field_by_field() {
-        let turn = NextTurn {
-            kind: Some(0x07),
-            road: Some("Elbchaussee".into()),
-            remain_m: Some(350),
-        };
-        let body = navi_next_turn_info(ACTION_SHOW, &turn);
-
-        assert_eq!(int_of(&body, 1), Some(1));
-        assert_eq!(int_of(&body, 2), Some(0x07));
-        assert_eq!(str_of(&body, 3), Some("Elbchaussee"));
-        assert_eq!(int_of(&body, 5), Some(350));
-
-        // The two the phone has nothing behind are absent rather than zero, and
-        // so is a kind the two vocabularies have no word in common for.
-        assert_eq!(int_of(&body, 4), None);
-        assert_eq!(int_of(&body, 6), None);
-        let wordless = navi_next_turn_info(
-            ACTION_UPDATE,
-            &NextTurn {
-                kind: None,
-                ..turn.clone()
-            },
-        );
-        assert_eq!(int_of(&wordless, 2), None);
-        assert_eq!(str_of(&wordless, 3), Some("Elbchaussee"));
-    }
-
-    /// Taking the strip down is the one field that says so: there is no turn to
-    /// describe and nothing about the last one is still true.
-    #[test]
-    fn taking_the_strip_down_is_the_action_on_its_own() {
-        let body = navi_next_turn_info(ACTION_HIDE, &NextTurn::default());
-        assert_eq!(body, vec![0x08, 0x03]);
-        assert_eq!(int_of(&body, 1), Some(3));
-    }
-
     /// The car reads this one as a *list* of module statuses, so a bare pair of
     /// ints would be read as a count and nothing else — the message would arrive
     /// and mean nothing.
     #[test]
     fn the_module_state_goes_out_as_the_list_the_car_reads_it_as() {
-        let body = module_status(NAVI_MODULE, NAVI_START);
+        let body = module_status(MUSIC_MODULE, MUSIC_RUNNING);
 
         let mut fields = Fields::new(&body);
         assert_eq!(
@@ -1306,8 +1217,8 @@ mod tests {
         let Some(Field::Bytes { number: 2, value }) = fields.next_field() else {
             panic!("the entry is a nested message, not a scalar");
         };
-        assert_eq!(int_of(value, 1), Some(i64::from(NAVI_MODULE)));
-        assert_eq!(int_of(value, 2), Some(i64::from(NAVI_START)));
+        assert_eq!(int_of(value, 1), Some(i64::from(MUSIC_MODULE)));
+        assert_eq!(int_of(value, 2), Some(i64::from(MUSIC_RUNNING)));
         assert_eq!(fields.next_field(), None, "and nothing after it");
     }
 

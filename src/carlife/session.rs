@@ -37,7 +37,6 @@ use super::{auth, frame, gps, guide, names, proto};
 use crate::airplay::{info, EventSink, ScreenParams, SharedChannel};
 use crate::commands::{Command, TouchContact, PHONE_DROP, PHONE_HOOK_SWITCH, PHONE_MUTE};
 use crate::config::{bt_address, hostname, Config};
-use crate::navigation::{turn_kind, Guidance};
 use crate::playing::{Playing, Track};
 use crate::sink::{ClOutlet, Media, Navi};
 use crate::web::{Size, Statistic, Status};
@@ -74,7 +73,6 @@ const VIDEO_ENCODER_FRAME_RATE_CHANGE_DONE: u32 = 0x0001_000D;
 const SCREEN_ON: u32 = 0x0001_0018;
 const FOREGROUND: u32 = 0x0001_001B;
 const MODULE_STATUS: u32 = 0x0001_0026;
-const NAVI_NEXT_TURN_INFO: u32 = 0x0001_0030;
 const CAR_DATA_SUBSCRIBE: u32 = 0x0001_0031;
 const CAR_DATA_SUBSCRIBE_START: u32 = 0x0001_0033;
 const MEDIA_INFO: u32 = 0x0001_0035;
@@ -354,12 +352,11 @@ where
     // not missed.
     let mut desktop = desktop.subscribe();
 
-    // A session is what drains the bridge, so it takes all five receiving halves
+    // A session is what drains the bridge, so it takes all four receiving halves
     // for as long as it runs: one channel carries pictures, two the phone's
-    // sound — the music and the navigation prompt — and the last two what the
-    // phone says about itself, the song it is playing and the route it is
-    // guiding along. The car unplugged and plugged back in is a new session and
-    // a new call to this function, which is why the halves are given back on the
+    // sound — the music and the navigation prompt — and the last what the phone
+    // is playing. The car unplugged and plugged back in is a new session and a
+    // new call to this function, which is why the halves are given back on the
     // way out rather than dropped with everything else.
     // A panel that has just been plugged in has no song on it: what the last
     // session was showing belongs to a car that is no longer here, and the page
@@ -370,37 +367,34 @@ where
     // keyframe can be asked for at all. It is the sink's own state, watched
     // rather than copied: the stream opens and closes on the other side of the
     // bridge.
-    let (mut video, mut media, mut navi, mut playing, mut guidance, source, phone_screen) =
-        match frames {
-            Frames::Live(outlet) => match outlet.take_video() {
-                Some(rx) => (
-                    Some(rx),
-                    outlet.take_media(),
-                    outlet.take_navi(),
-                    outlet.take_playing(),
-                    outlet.take_guidance(),
-                    Source::Live,
-                    Some(outlet.screen()),
-                ),
-                None => {
-                    tracing::warn!("carlife.video_source_taken action=heartbeat_only");
-                    (None, None, None, None, None, Source::None, None)
-                }
-            },
-            Frames::Cycle(units) => (
-                None,
-                None,
-                None,
-                None,
-                None,
-                Source::Cycle {
-                    units: units.clone(),
-                    next: 0,
-                },
-                None,
+    let (mut video, mut media, mut navi, mut playing, source, phone_screen) = match frames {
+        Frames::Live(outlet) => match outlet.take_video() {
+            Some(rx) => (
+                Some(rx),
+                outlet.take_media(),
+                outlet.take_navi(),
+                outlet.take_playing(),
+                Source::Live,
+                Some(outlet.screen()),
             ),
-            Frames::None => (None, None, None, None, None, Source::None, None),
-        };
+            None => {
+                tracing::warn!("carlife.video_source_taken action=heartbeat_only");
+                (None, None, None, None, Source::None, None)
+            }
+        },
+        Frames::Cycle(units) => (
+            None,
+            None,
+            None,
+            None,
+            Source::Cycle {
+                units: units.clone(),
+                next: 0,
+            },
+            None,
+        ),
+        Frames::None => (None, None, None, None, Source::None, None),
+    };
 
     // Reads are their own task. A frame can be six hundred kilobytes and the
     // video tick fires while one is arriving, so the read cannot live inside a
@@ -446,15 +440,6 @@ where
         playhead: None,
         progress_sent: None,
         media_streaming: false,
-        // A route is described by the phone in messages of its own, so the
-        // session starts knowing nothing about one and hears about it as it
-        // goes. A car that plugs in mid-route is a car the phone describes the
-        // whole route to again, because a new CarLife session is a new CarPlay
-        // one.
-        guidance: Guidance::default(),
-        subscribed: false,
-        navi: None,
-        shown: None,
         // Built in beside the icon and the page, so the same key answers every
         // session — a car plugged out and back in finds what the first one did.
         auth,
@@ -566,20 +551,6 @@ where
                 // told, which is the last song there was.
                 None => playing = None,
             },
-            // Where the phone is going, on the command channel. Written as it
-            // arrives, like the three above: the phone is what decides when the
-            // route changes, and what the strip is told is the whole of what is
-            // known, so a message is only sent when it says something new.
-            moving = recv_guidance(&mut guidance) => match moving {
-                Some(update) => {
-                    if let Err(e) = session.send_guidance(update).await {
-                        break Err(e);
-                    }
-                }
-                // The CarPlay side has gone; the strip keeps what it was last
-                // told, which is the last turn there was.
-                None => guidance = None,
-            },
             // A tap on the phone's icon for us. The phone shows that icon in
             // place of the car's own interface, so the car is told to show it.
             _ = desktop.recv() => {
@@ -626,9 +597,6 @@ where
         }
         if let Some(rx) = playing {
             outlet.return_playing(rx);
-        }
-        if let Some(rx) = guidance {
-            outlet.return_guidance(rx);
         }
     }
     // The car has gone, and its position went with it: a phone still connected
@@ -807,14 +775,6 @@ async fn recv_playing(playing: &mut Option<mpsc::Receiver<Playing>>) -> Option<P
     }
 }
 
-/// The same, for where the phone is going.
-async fn recv_guidance(guidance: &mut Option<mpsc::Receiver<Guidance>>) -> Option<Guidance> {
-    match guidance {
-        Some(rx) => rx.recv().await,
-        None => std::future::pending().await,
-    }
-}
-
 /// Where in the song it is playing, and whether it is still moving through it.
 ///
 /// The phone says a position when it says anything at all about playback, and
@@ -896,24 +856,6 @@ struct Session<'a, W> {
     /// first one is worth a line: the channel takes no reply, so a sample
     /// written is the only evidence this side has that the sound is on the wire.
     media_streaming: bool,
-    /// The route the phone is guiding along, folded together from the two
-    /// messages it describes one with — see `crate::navigation`, which is also
-    /// where the phone's turn types become the car's.
-    guidance: Guidance,
-    /// Whether the car has asked to be told about the route. It asks with
-    /// `MSG_CMD_CARLIFE_DATA_SUBSCRIBE_START` and stops asking with the `_STOP`
-    /// that follows it, and no turn is sent before it does: the strip is the
-    /// car's, and a car that has not asked for one is a car with nowhere to put
-    /// it. The navigation module's own state is not behind this — see
-    /// `publish_hud`.
-    subscribed: bool,
-    /// The navigation state the car was last told, so it is told again only when
-    /// it changes. `None` is a car that has not been told yet.
-    navi: Option<i32>,
-    /// The turn the car's strip was last told to show, and `None` when it was
-    /// last told to take one down. The action of the next message follows from
-    /// what this holds and what is known now.
-    shown: Option<proto::NextTurn>,
     /// The key the car's challenge is answered with, when one was built in.
     /// `None` is a session that cannot answer it, which is said out loud when the
     /// car asks.
@@ -1500,7 +1442,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             }
             // The car asking whether this device can tell it about a route. The
             // answer is owed per module, and the car is the one that decides what
-            // to do with it — so it is told exactly what this side has.
+            // to do with it.
             HU_DATA_SUBSCRIBE => {
                 let asked = proto::decode_data_subscribe(&message.body);
                 tracing::info!(
@@ -1509,16 +1451,15 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     asked.len(),
                     listed(&asked)
                 );
-                let answer: Vec<(i32, bool)> = asked
-                    .iter()
-                    .map(|module| (*module, *module == proto::DATA_TURN_BY_TURN))
-                    .collect();
+                // Nothing here produces subscribed data, so the answer is the
+                // same for every module the car asks about.
+                let answer: Vec<(i32, bool)> = asked.iter().map(|module| (*module, false)).collect();
                 let body = proto::data_subscribe_done(&answer);
                 self.send(DATA_SUBSCRIBE_DONE, &body).await?;
             }
-            // And the car asking to be sent it, or to stop being sent it. Both
-            // are answered by what the strip is told next rather than by a
-            // message of their own.
+            // And the car asking to be sent it, or to stop being sent it. There
+            // is nothing to send either way, so the message is recorded and the
+            // car is left with whatever it was drawing.
             HU_DATA_SUBSCRIBE_START | HU_DATA_SUBSCRIBE_STOP => {
                 let asked = proto::decode_data_subscribe(&message.body);
                 let wanted = message.service_type == HU_DATA_SUBSCRIBE_START;
@@ -1529,13 +1470,6 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     listed(&asked),
                     if wanted { "subscribe" } else { "unsubscribe" }
                 );
-                if asked.contains(&proto::DATA_TURN_BY_TURN) {
-                    self.subscribed = wanted;
-                }
-                // Now rather than at the next change of route: a car that asks
-                // mid-route is owed the turn it is already on, and one that has
-                // stopped asking is owed the strip taken down.
-                self.publish_hud().await?;
             }
             // The car taking the audio into its own hands: it asks for one of
             // the phone's modules to be stopped, paused or resumed. Only the song
@@ -2397,118 +2331,6 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         Ok(())
     }
 
-    /// One thing the phone said about the route it is guiding along.
-    ///
-    /// The phone describes a route in messages of its own, each carrying one
-    /// part of it, so what arrives is folded into what is known and the car is
-    /// told the whole of it when that changes. See `crate::navigation` for the
-    /// folding and for the one table that knows both vocabularies.
-    async fn send_guidance(&mut self, update: Guidance) -> Result<()> {
-        self.guidance.merge(update);
-        self.publish_hud().await
-    }
-
-    /// Whatever the car's turn-by-turn strip is owed right now, and nothing when
-    /// it is owed nothing.
-    ///
-    /// Two messages, neither sent twice with the same content.
-    /// `MSG_CMD_MODULE_STATUS` is the state of this device's navigation module,
-    /// which is the phone's own business rather than part of the data a car
-    /// subscribes to, so it goes out whether or not a strip was asked for.
-    /// `MSG_CMD_NAVI_NEXT_TURN_INFO` is the turn itself, and its action follows
-    /// from what the strip was last told: the first turn put up is a `SHOW`, one
-    /// that replaces a turn already there is an `UPDATE`, and a strip with
-    /// nothing left to show is taken down with a `HIDE`.
-    async fn publish_hud(&mut self) -> Result<()> {
-        if let Some(running) = self.guidance.running() {
-            let state = if running {
-                proto::NAVI_START
-            } else {
-                proto::NAVI_IDLE
-            };
-            if self.navi != Some(state) {
-                self.navi = Some(state);
-                tracing::info!(
-                    "carlife.msg.send service_type={} cnt=1 moduleID_0={}({}) statusID_0={state}({})",
-                    names::ServiceType(MODULE_STATUS),
-                    proto::NAVI_MODULE,
-                    names::module(proto::NAVI_MODULE),
-                    names::module_state(proto::NAVI_MODULE, state)
-                );
-                let body = proto::module_status(proto::NAVI_MODULE, state);
-                self.send(MODULE_STATUS, &body).await?;
-            }
-        }
-
-        let wanted = self.turn_to_show();
-        let action = match (&self.shown, &wanted) {
-            // Nothing was up and there is nothing to put up.
-            (None, None) => return Ok(()),
-            (None, Some(_)) => proto::ACTION_SHOW,
-            // The route is over, or the car has stopped asking: either way there
-            // is nothing left to show.
-            (Some(_), None) => proto::ACTION_HIDE,
-            // The same turn described again, with nothing about it changed.
-            (Some(shown), Some(turn)) if shown == turn => return Ok(()),
-            (Some(_), Some(_)) => proto::ACTION_UPDATE,
-        };
-        self.shown = match action {
-            proto::ACTION_HIDE => None,
-            _ => wanted,
-        };
-
-        let nothing = proto::NextTurn::default();
-        let turn = self.shown.as_ref().unwrap_or(&nothing);
-        let action_name = match action {
-            proto::ACTION_SHOW => "show",
-            proto::ACTION_UPDATE => "update",
-            _ => "hide",
-        };
-        if action == proto::ACTION_HIDE {
-            tracing::info!(
-                "carlife.msg.send service_type={} action={action}({action_name})",
-                names::ServiceType(NAVI_NEXT_TURN_INFO)
-            );
-        } else {
-            tracing::info!(
-                "carlife.msg.send service_type={} action={action}({action_name}) naviTurn={:?} \
-                 roadName={:?} remaindistance={:?}",
-                names::ServiceType(NAVI_NEXT_TURN_INFO),
-                turn.kind.map(|k| format!("0x{k:02X}")),
-                turn.road,
-                turn.remain_m
-            );
-        }
-        let body = proto::navi_next_turn_info(action, turn);
-        self.send(NAVI_NEXT_TURN_INFO, &body).await
-    }
-
-    /// The turn the strip is to show, or nothing when there is none to show.
-    ///
-    /// Three things have to hold. The car has to have asked for the data, the
-    /// phone has to say a route is being guided, and the guidance has to point
-    /// at a turn the phone has described. Anything less is a strip with nothing
-    /// behind it, and the car's own field for each of them is written only when
-    /// there is something to put in it.
-    fn turn_to_show(&self) -> Option<proto::NextTurn> {
-        if !self.subscribed || self.guidance.running() != Some(true) {
-            return None;
-        }
-        let turn = self.guidance.current()?;
-        Some(proto::NextTurn {
-            kind: turn.kind.and_then(turn_kind),
-            road: turn.onto.clone(),
-            // Metres either way, so only the width of the two numbers differs.
-            // The car's field is an `int32` and the phone's a `uint32`; a
-            // distance that does not fit is a distance this side does not have
-            // rather than one it rounds.
-            remain_m: self
-                .guidance
-                .distance_m()
-                .and_then(|metres| i32::try_from(metres).ok()),
-        })
-    }
-
     /// How long until the next tick: a frame's worth of time when there is a
     /// picture to send on a schedule and one has been agreed, otherwise the
     /// heartbeat's.
@@ -2895,13 +2717,6 @@ mod tests {
         async fn ask(&mut self, modules: &[i32]) -> frame::Message {
             self.send(HU_DATA_SUBSCRIBE, &module_list(modules)).await;
             self.expect(DATA_SUBSCRIBE_DONE).await
-        }
-
-        /// The car asking whether this device can tell it about a route, and
-        /// then asking to be told.
-        async fn subscribe(&mut self, modules: &[i32]) {
-            self.ask(modules).await;
-            self.send(HU_DATA_SUBSCRIBE_START, &module_list(modules)).await;
         }
 
         /// Nothing at all on the pipe for this long.
@@ -4565,172 +4380,9 @@ mod tests {
         car.await.unwrap();
     }
 
-    /// The strip is the whole point of the subscription. The phone's two
-    /// route-guidance messages say nothing about a strip and the car's two say
-    /// nothing about a route, so this is the join between them — and what the
-    /// car is told changes exactly when the strip it would draw does.
-    #[tokio::test]
-    async fn the_cars_strip_is_told_the_turn_the_phone_is_guiding_to() {
-        let cfg = Config::from_env();
-        let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
-
-        let outlet = Arc::new(ClOutlet::new());
-        let frames = Frames::Live(outlet.clone());
-        let sink = outlet.sink();
-
-        let car = tokio::spawn(async move {
-            let mut car = Car { pipe };
-            car.introduce("20062100").await;
-            car.subscribe(&[proto::DATA_TURN_BY_TURN]).await;
-
-            // The phone describes a turn before it says which one is current,
-            // and until it says, there is no strip to draw.
-            sink.guidance(Guidance::about_a_turn(1, Some(1), Some("Elbchaussee")));
-            car.expect_silence(Duration::from_millis(300)).await;
-
-            // Now the route: a left turn, 350 m away.
-            sink.guidance(Guidance::about_the_route(Some(1), Some(350), Some(vec![1])));
-            let state = car.expect(MODULE_STATUS).await;
-            assert_eq!(
-                state.body,
-                proto::module_status(proto::NAVI_MODULE, proto::NAVI_START)
-            );
-            let shown = car.expect(NAVI_NEXT_TURN_INFO).await;
-            assert_eq!(
-                shown.body,
-                proto::navi_next_turn_info(
-                    proto::ACTION_SHOW,
-                    &proto::NextTurn {
-                        kind: Some(0x07),
-                        road: Some("Elbchaussee".into()),
-                        remain_m: Some(350),
-                    }
-                )
-            );
-
-            // The same turn, closer: an update and not a second show.
-            sink.guidance(Guidance::about_the_route(Some(1), Some(120), None));
-            let updated = car.expect(NAVI_NEXT_TURN_INFO).await;
-            assert_eq!(
-                updated.body,
-                proto::navi_next_turn_info(
-                    proto::ACTION_UPDATE,
-                    &proto::NextTurn {
-                        kind: Some(0x07),
-                        road: Some("Elbchaussee".into()),
-                        remain_m: Some(120),
-                    }
-                )
-            );
-
-            // And the same turn again is not worth a third message.
-            sink.guidance(Guidance::about_the_route(None, Some(120), None));
-            car.expect_silence(Duration::from_millis(300)).await;
-
-            // The route is over: the module is idle and the strip comes down.
-            sink.guidance(Guidance::about_the_route(Some(0), None, None));
-            let idle = car.expect(MODULE_STATUS).await;
-            assert_eq!(
-                idle.body,
-                proto::module_status(proto::NAVI_MODULE, proto::NAVI_IDLE)
-            );
-            let hidden = car.expect(NAVI_NEXT_TURN_INFO).await;
-            assert_eq!(
-                hidden.body,
-                proto::navi_next_turn_info(proto::ACTION_HIDE, &proto::NextTurn::default())
-            );
-        });
-
-        run(
-            device,
-            &frames,
-            &cfg,
-            None,
-            &mut screen,
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
-        )
-        .await
-            .expect("the session ends cleanly");
-        car.await.unwrap();
-    }
-
-    /// The strip is behind the car's subscription; the navigation module's own
-    /// state is not. The first is data the car asked to be told, and the second
-    /// is the phone saying something about itself, which the car hears either
-    /// way — and a car with no strip to fill is a car with nowhere to put one.
-    #[tokio::test]
-    async fn the_strip_is_not_sent_until_the_car_asks_for_it() {
-        let cfg = Config::from_env();
-        let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
-
-        let outlet = Arc::new(ClOutlet::new());
-        let frames = Frames::Live(outlet.clone());
-        let sink = outlet.sink();
-
-        let car = tokio::spawn(async move {
-            let mut car = Car { pipe };
-            car.introduce("20062100").await;
-
-            // A whole route, described and being guided, with nobody having
-            // asked: a right turn onto the B27, 90 m away.
-            sink.guidance(Guidance::about_a_turn(1, Some(2), Some("B27")));
-            sink.guidance(Guidance::about_the_route(Some(1), Some(90), Some(vec![1])));
-
-            let state = car.expect(MODULE_STATUS).await;
-            assert_eq!(
-                state.body,
-                proto::module_status(proto::NAVI_MODULE, proto::NAVI_START)
-            );
-            car.expect_silence(Duration::from_millis(300)).await;
-
-            // And the moment the car asks, the turn it is already on.
-            car.subscribe(&[proto::DATA_TURN_BY_TURN]).await;
-            let shown = car.expect(NAVI_NEXT_TURN_INFO).await;
-            assert_eq!(
-                shown.body,
-                proto::navi_next_turn_info(
-                    proto::ACTION_SHOW,
-                    &proto::NextTurn {
-                        kind: Some(0x03),
-                        road: Some("B27".into()),
-                        remain_m: Some(90),
-                    }
-                )
-            );
-            // The state it was already told is not said twice.
-            car.expect_silence(Duration::from_millis(300)).await;
-        });
-
-        run(
-            device,
-            &frames,
-            &cfg,
-            None,
-            &mut screen,
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
-        )
-        .await
-            .expect("the session ends cleanly");
-        car.await.unwrap();
-    }
-
-    /// The car's question is about what this device can do, so it is answered
-    /// per module — including the one there is nothing behind, which is not a
-    /// thing to claim.
+    /// The car's question is about what this device can do, and nothing here
+    /// produces what it is asking about: every module is answered for, and the
+    /// answer is the same for all of them.
     #[tokio::test]
     async fn the_cars_question_about_what_this_device_can_provide_is_answered() {
         let cfg = Config::from_env();
@@ -4742,12 +4394,9 @@ mod tests {
             car.introduce("20062100").await;
 
             // The two the guide names, in the order it names them: the simple
-            // guidance is what this device produces, the assistant guide is not.
-            let answer = car.ask(&[proto::DATA_TURN_BY_TURN, 1]).await;
-            assert_eq!(
-                answer.body,
-                proto::data_subscribe_done(&[(proto::DATA_TURN_BY_TURN, true), (1, false)])
-            );
+            // guidance and the assistant guide.
+            let answer = car.ask(&[0, 1]).await;
+            assert_eq!(answer.body, proto::data_subscribe_done(&[(0, false), (1, false)]));
 
             // And a module neither side has a name for is not one to claim
             // either.
@@ -5068,116 +4717,6 @@ mod tests {
         let said = feed.location.borrow().1.clone();
         assert!(said.contains(",0,00,"), "the position was taken back: {said}");
         assert!(!said.contains("3019.0728"), "and none is left: {said}");
-    }
-
-    /// A turn the two vocabularies have no word in common for goes out without
-    /// one. The road and the distance are still true, and an arrow would not be.
-    #[tokio::test]
-    async fn a_turn_the_car_has_no_word_for_is_sent_without_one() {
-        let cfg = Config::from_env();
-        let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
-
-        let outlet = Arc::new(ClOutlet::new());
-        let frames = Frames::Live(outlet.clone());
-        let sink = outlet.sink();
-
-        let car = tokio::spawn(async move {
-            let mut car = Car { pipe };
-            car.introduce("20062100").await;
-            car.subscribe(&[proto::DATA_TURN_BY_TURN]).await;
-
-            // Leaving a motorway: iAP2's own type 8, which the car's list of
-            // turns has no arrow for.
-            sink.guidance(Guidance::about_a_turn(1, Some(8), Some("B27")));
-            sink.guidance(Guidance::about_the_route(Some(1), Some(400), Some(vec![1])));
-            car.expect(MODULE_STATUS).await;
-            let shown = car.expect(NAVI_NEXT_TURN_INFO).await;
-            assert_eq!(
-                shown.body,
-                proto::navi_next_turn_info(
-                    proto::ACTION_SHOW,
-                    &proto::NextTurn {
-                        kind: None,
-                        road: Some("B27".into()),
-                        remain_m: Some(400),
-                    }
-                )
-            );
-        });
-
-        run(
-            device,
-            &frames,
-            &cfg,
-            None,
-            &mut screen,
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
-        )
-        .await
-            .expect("the session ends cleanly");
-        car.await.unwrap();
-    }
-
-    /// A car that stops asking has the strip taken down — and is told nothing
-    /// else, because the navigation it stopped being told about is still
-    /// running.
-    #[tokio::test]
-    async fn the_strip_is_taken_down_when_the_car_stops_asking_for_it() {
-        let cfg = Config::from_env();
-        let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
-
-        let outlet = Arc::new(ClOutlet::new());
-        let frames = Frames::Live(outlet.clone());
-        let sink = outlet.sink();
-
-        let car = tokio::spawn(async move {
-            let mut car = Car { pipe };
-            car.introduce("20062100").await;
-            car.subscribe(&[proto::DATA_TURN_BY_TURN]).await;
-
-            sink.guidance(Guidance::about_a_turn(1, Some(2), Some("B27")));
-            sink.guidance(Guidance::about_the_route(Some(1), Some(90), Some(vec![1])));
-            car.expect(MODULE_STATUS).await;
-            car.expect(NAVI_NEXT_TURN_INFO).await;
-
-            car.send(
-                HU_DATA_SUBSCRIBE_STOP,
-                &module_list(&[proto::DATA_TURN_BY_TURN]),
-            )
-            .await;
-            let hidden = car.expect(NAVI_NEXT_TURN_INFO).await;
-            assert_eq!(
-                hidden.body,
-                proto::navi_next_turn_info(proto::ACTION_HIDE, &proto::NextTurn::default())
-            );
-            car.expect_silence(Duration::from_millis(300)).await;
-        });
-
-        run(
-            device,
-            &frames,
-            &cfg,
-            None,
-            &mut screen,
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
-        )
-        .await
-            .expect("the session ends cleanly");
-        car.await.unwrap();
     }
 
     #[tokio::test]
@@ -5580,10 +5119,6 @@ mod tests {
             .take_playing()
             .expect("what the phone is playing was handed back");
         outlet.return_playing(rx);
-        let rx = outlet
-            .take_guidance()
-            .expect("where the phone is going was handed back");
-        outlet.return_guidance(rx);
     }
 
     #[tokio::test]
