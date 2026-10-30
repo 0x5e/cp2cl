@@ -2000,12 +2000,30 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         }
     }
 
+    /// What a phone sends as a song starts, in the order it sends it.
+    ///
+    /// The module that plays the song first — idle and then running — and then
+    /// the player it is played on: the format, a stop, and the same format
+    /// again. The stop is what puts down a player the car may still be holding
+    /// from the song before. Five messages, one after the other, so a car that
+    /// takes the module running as the start of the song hears it before the
+    /// first sample rather than a reading later.
+    async fn start_song(&mut self, (rate, channels): (u32, u16)) -> Result<()> {
+        self.report_music(proto::MUSIC_IDLE).await?;
+        self.report_music(proto::MUSIC_RUNNING).await?;
+        let body = proto::media_init(rate, channels);
+        self.send(MEDIA_INIT, &body).await?;
+        self.send(MEDIA_STOP, &[]).await?;
+        self.send(MEDIA_INIT, &body).await
+    }
+
     /// One thing the phone's audio produced, on the media channel.
     ///
-    /// The car is told the format before it is given any samples, and only when
-    /// it changes: the message is what sets a player up, and the same one twice
-    /// is a player set up for a stream that did not begin. A stream that opens
-    /// after a silence is the case this is here for.
+    /// A stream that opens is a song starting, and gets what a start gets. The
+    /// second message for a stream already open in the format it names is the
+    /// same player announced twice, and says nothing: a stream that opens after
+    /// a silence — which is every start, since the silence put the format down —
+    /// is the case this is here for.
     async fn send_media(&mut self, item: Media) -> Result<()> {
         match item {
             Media::Format { rate, channels } => {
@@ -2020,8 +2038,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 self.media_format = Some((rate, channels));
                 self.status
                     .with(|s| s.carlife.media = Some((rate, channels)));
-                let body = proto::media_init(rate, channels);
-                self.send(MEDIA_INIT, &body).await
+                self.start_song((rate, channels)).await
             }
             Media::Pcm {
                 timestamp_ms,
@@ -2180,41 +2197,28 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 //     position.elapsed_ms,
                 //     position.playing.is_some()
                 // );
-                // A change of play state is what the car's own pause and play
-                // messages are for, and the state of the module playing the
-                // song is the same news on the command channel. The phone
-                // repeats the state with every reading, so only a change of it
-                // is worth a message.
+                // A change of play state is the media channel's news: the car's
+                // own pause, and a resume only after a pause — a song that
+                // started with the channel is not one being resumed, and was
+                // told as the stream opened. The phone repeats the state with
+                // every reading, so only a change of it is worth a message.
                 if let Some(playing) = position.playing {
                     if playing == was_moving {
                         return Ok(());
                     }
-                    let state = if playing {
-                        proto::MUSIC_RUNNING
-                    } else {
-                        proto::MUSIC_IDLE
-                    };
-                    tracing::info!(
-                        "carlife.msg.send service_type={} cnt=1 moduleID_0={}({}) \
-                         statusID_0={state}({})",
-                        names::ServiceType(MODULE_STATUS),
-                        proto::MUSIC_MODULE,
-                        names::module(proto::MUSIC_MODULE),
-                        names::module_state(proto::MUSIC_MODULE, state)
-                    );
-                    // The first reading is not a resume: a song that starts
-                    // with the channel being set up is already described by
-                    // `MEDIA_INIT` and the samples that follow it.
-                    if had_reading {
-                        let message = if playing {
-                            MEDIA_RESUME_PLAY
-                        } else {
-                            MEDIA_PAUSE
-                        };
-                        self.send(message, &[]).await?;
+                    if playing && had_reading {
+                        self.send(MEDIA_RESUME_PLAY, &[]).await?;
+                        // And then a start again, everything a start gets: a
+                        // player the car put down for the pause is one it is
+                        // given back the way it was given it. A resume with no
+                        // stream open has no format to announce, and is the
+                        // message on its own.
+                        if let Some(format) = self.media_format {
+                            self.start_song(format).await?;
+                        }
+                    } else if !playing {
+                        self.send(MEDIA_PAUSE, &[]).await?;
                     }
-                    let body = proto::module_status(proto::MUSIC_MODULE, state);
-                    self.send(MODULE_STATUS, &body).await?;
                     self.status.with(|s| s.now_playing.playing = Some(playing));
                 }
                 return Ok(());
@@ -2261,6 +2265,24 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         }
         self.publish_song();
         self.write_media().await
+    }
+
+    /// Tells the car what the module playing the song is doing.
+    ///
+    /// One message per state, on the command channel, and the line the log
+    /// carries for it — in the car's own field names, so the two can be read
+    /// side by side. Both states of a start go out this way, one after the
+    /// other, before the media channel is told anything.
+    async fn report_music(&mut self, state: i32) -> Result<()> {
+        tracing::info!(
+            "carlife.msg.send service_type={} cnt=1 moduleID_0={}({}) statusID_0={state}({})",
+            names::ServiceType(MODULE_STATUS),
+            proto::MUSIC_MODULE,
+            names::module(proto::MUSIC_MODULE),
+            names::module_state(proto::MUSIC_MODULE, state)
+        );
+        let body = proto::module_status(proto::MUSIC_MODULE, state);
+        self.send(MODULE_STATUS, &body).await
     }
 
     /// Puts the song on the status page, which is the one place anyone but the
@@ -3532,7 +3554,9 @@ mod tests {
             let mut car = Car { pipe };
             car.introduce("20062100").await;
 
-            // The music: the stream opens, and then there is sound on it.
+            // The music: the stream opens, and then there is sound on it. A
+            // start is what a phone sends as one — the module idle and then
+            // running, then the player set up, put down and set up again.
             sink.push(StreamEvent::AudioConfig {
                 stream: stream(102, 1),
                 codec: AudioCodec::AacLc {
@@ -3541,8 +3565,23 @@ mod tests {
                 },
                 name: "media".into(),
             });
+            let idle = car.expect(MODULE_STATUS).await;
+            assert_eq!(
+                idle.body,
+                proto::module_status(proto::MUSIC_MODULE, proto::MUSIC_IDLE)
+            );
+            let running = car.expect(MODULE_STATUS).await;
+            assert_eq!(
+                running.body,
+                proto::module_status(proto::MUSIC_MODULE, proto::MUSIC_RUNNING)
+            );
             let init = car.expect(MEDIA_INIT).await;
             assert_eq!(init.body, proto::media_init(44_100, 2));
+            // The player is put down and set up again before the song goes on:
+            // what a phone does, and what the car is given.
+            car.expect(MEDIA_STOP).await;
+            let again = car.expect(MEDIA_INIT).await;
+            assert_eq!(again.body, proto::media_init(44_100, 2));
 
             sink.push(StreamEvent::AudioPacket {
                 stream: stream(102, 1),
@@ -3598,6 +3637,25 @@ mod tests {
                 stream: stream(102, 2),
             });
             car.expect(MEDIA_STOP).await;
+
+            // A stream that opens again after the silence is another start, and
+            // is given everything a start is given — the module told again with
+            // it, because the module the car has was told for the song before.
+            sink.push(StreamEvent::AudioConfig {
+                stream: stream(102, 4),
+                codec: AudioCodec::AacLc {
+                    rate: 48_000,
+                    channels: 2,
+                },
+                name: "media".into(),
+            });
+            car.expect(MODULE_STATUS).await;
+            car.expect(MODULE_STATUS).await;
+            let init = car.expect(MEDIA_INIT).await;
+            assert_eq!(init.body, proto::media_init(48_000, 2));
+            car.expect(MEDIA_STOP).await;
+            car.expect(MEDIA_INIT).await;
+            car.expect_silence(Duration::from_millis(200)).await;
         });
 
         run(
@@ -3867,10 +3925,12 @@ mod tests {
         car.await.unwrap();
     }
 
-    /// A pause and a resume are messages of their own on the media channel, and
-    /// the state of the module playing the song goes out on the command channel
-    /// with them. The first reading is not a resume, and a reading that repeats
-    /// the state is nothing at all.
+    /// A pause and a resume, and what a start is. The stream opening is a start:
+    /// the module idle and then running, the player set up, put down and set up
+    /// again. A pause is the media channel's own message and nothing else, and a
+    /// resume is that message followed by the whole of a start — a player the
+    /// car put down for the pause is given back the way it was given. A reading
+    /// that repeats the state is nothing at all.
     #[tokio::test]
     async fn the_car_is_told_when_the_song_stops_and_starts() {
         let cfg = Config::from_env();
@@ -3886,38 +3946,60 @@ mod tests {
             let mut car = Car { pipe };
             car.introduce("20062100").await;
 
+            // The stream opens: the song has started, and the car is told so.
+            sink.push(StreamEvent::AudioConfig {
+                stream: stream(102, 1),
+                codec: AudioCodec::AacLc {
+                    rate: 44_100,
+                    channels: 2,
+                },
+                name: "media".into(),
+            });
+            car.expect(MODULE_STATUS).await;
+            car.expect(MODULE_STATUS).await;
+            car.expect(MEDIA_INIT).await;
+            car.expect(MEDIA_STOP).await;
+            car.expect(MEDIA_INIT).await;
+
             // The song is already playing when the phone first says where it
-            // is: the module goes running, and the song starting is not a
-            // resume.
+            // is: the song starting is not a resume, and the module was told
+            // before the first sample went out.
             sink.playing(Playing::Position(Position {
                 elapsed_ms: 0,
                 playing: Some(true),
             }));
-            let running = car.expect(MODULE_STATUS).await;
-            assert_eq!(
-                running.body,
-                proto::module_status(proto::MUSIC_MODULE, proto::MUSIC_RUNNING)
-            );
+            car.expect_silence(Duration::from_millis(200)).await;
 
-            // Paused: the media channel is told, and the module goes idle.
+            // Paused: the media channel is told, and the module is left alone —
+            // it is still the one the song on the panel is from.
             sink.playing(Playing::Position(Position {
                 elapsed_ms: 42_000,
                 playing: Some(false),
             }));
             car.expect(MEDIA_PAUSE).await;
-            let idle = car.expect(MODULE_STATUS).await;
-            assert_eq!(
-                idle.body,
-                proto::module_status(proto::MUSIC_MODULE, proto::MUSIC_IDLE)
-            );
+            car.expect_silence(Duration::from_millis(200)).await;
 
-            // And playing again is a resume.
+            // And playing again is a resume: the message that says so, and then
+            // everything a start is given, in the order a start gives it.
             sink.playing(Playing::Position(Position {
                 elapsed_ms: 42_000,
                 playing: Some(true),
             }));
             car.expect(MEDIA_RESUME_PLAY).await;
-            car.expect(MODULE_STATUS).await;
+            let idle = car.expect(MODULE_STATUS).await;
+            assert_eq!(
+                idle.body,
+                proto::module_status(proto::MUSIC_MODULE, proto::MUSIC_IDLE)
+            );
+            let running = car.expect(MODULE_STATUS).await;
+            assert_eq!(
+                running.body,
+                proto::module_status(proto::MUSIC_MODULE, proto::MUSIC_RUNNING)
+            );
+            let init = car.expect(MEDIA_INIT).await;
+            assert_eq!(init.body, proto::media_init(44_100, 2));
+            car.expect(MEDIA_STOP).await;
+            car.expect(MEDIA_INIT).await;
 
             // A reading that says where the song is without saying whether it
             // moved is not a change of play state either.
@@ -4440,6 +4522,10 @@ mod tests {
                 },
                 name: "media".into(),
             });
+            car.expect(MODULE_STATUS).await;
+            car.expect(MODULE_STATUS).await;
+            car.expect(MEDIA_INIT).await;
+            car.expect(MEDIA_STOP).await;
             car.expect(MEDIA_INIT).await;
 
             // One byte past the media channel's body cap.
