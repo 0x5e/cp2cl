@@ -89,10 +89,11 @@ const MEDIA_PAUSE: u32 = 0x0003_0003;
 const MEDIA_RESUME_PLAY: u32 = 0x0003_0004;
 const MEDIA_DATA: u32 = 0x0003_0006;
 
-/// The picture the panel is given for a song whose app sent no cover: the
-/// reference app's own placeholder, a note on a dark blue field, which is what
-/// it falls back to rather than sending a cover field with nothing in it.
-const PLACEHOLDER_ART: &str = "icons/iv_music_pic.jpg";
+/// The picture the panel is given for a song whose app sent no cover: two
+/// beamed notes on a dark field, cut out of the phone's own screen where it
+/// draws the same thing. An app with no cover is not a song with no picture, so
+/// this goes out instead of a cover field with nothing in it.
+const PLACEHOLDER_ART: &str = "icons/iv_music_pic.png";
 
 // The navigation prompt has a channel of its own, with the same three messages
 // in the same order. See the guide's §10.4 and CarLifeVehicleLib's
@@ -2162,14 +2163,13 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         self.status.cover_changed(self.cover().to_vec());
     }
 
-    /// The cover for the song: the phone's, or the reference app's placeholder
-    /// when the phone sent none.
+    /// The cover for the song: the phone's, or the built-in placeholder when the
+    /// phone sent none.
     ///
     /// A song whose app has no cover is not a song without a picture on the
-    /// panel — the reference app sends its own placeholder rather than a field
-    /// with nothing in it, and so does this. `crate::artwork` decides the size
-    /// of a cover the phone sent; the placeholder is small and fixed, and goes
-    /// as it was built in.
+    /// panel — a field with nothing in it is not a cover, so the placeholder
+    /// goes out instead. `crate::artwork` decides the size of a cover the phone
+    /// sent; the placeholder is small and fixed, and goes as it was built in.
     fn cover(&self) -> &[u8] {
         match self.art.as_deref() {
             Some(art) if !art.is_empty() => art,
@@ -2451,11 +2451,10 @@ mod tests {
     }
 
     /// The placeholder goes out where a cover would, so it has to be a file the
-    /// car can draw: a JPEG, which is what a cover is on this wire and what the
-    /// reference app compresses every one of its own to.
+    /// car can draw — a PNG, as it was cut out of the phone's screen.
     #[test]
     fn the_placeholder_is_a_picture() {
-        assert_eq!(&placeholder()[..2], b"\xff\xd8");
+        assert_eq!(&placeholder()[..4], b"\x89PNG");
     }
 
     #[test]
