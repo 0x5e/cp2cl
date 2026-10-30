@@ -1,15 +1,23 @@
-//! `/etc/cp2cl/config.json`: the screen the settings page picks, read at the
-//! start of each session. Either field may be absent, and an absent one is 默认
-//! — the channel table's value, or the car's where the table has none. See
-//! `carlife::session::screen_in_place_of`.
+//! `/etc/cp2cl/config.json`: everything the operator tunes, read once at startup
+//! and written back when the page saves a screen. What the file holds is
+//! [`crate::config::Config`], and this is the reading and writing of it.
 //!
-//! Read as it is written: a size the page does not offer is served all the same.
-//! Only half a pair or a zero is dropped. The file is created at startup when it
-//! is not there.
+//! Every field may be absent, and an absent one is the default: a machine with
+//! no file at all runs on those, and a hand-written file says only what it means
+//! to change. The screen's default is 默认 — the channel table's value, or the
+//! car's where the table has none. See `carlife::session::screen_in_place_of`.
+//!
+//! Read as it is written: a size the page does not offer is served all the same,
+//! and a value that cannot be used is reported and left at its default. Only
+//! half a pair or a zero is dropped. The file is created at startup when it is
+//! not there.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
+use tracing::level_filters::LevelFilter;
+
+use crate::config::Config;
 
 /// The file, under [`crate::config::DATA_DIR`].
 const FILE: &str = "config.json";
@@ -33,7 +41,7 @@ pub struct Resolution {
     pub height: u32,
 }
 
-/// What the file says, with every field optional: `None` is 默认.
+/// What the file says about the screen, every field optional: `None` is 默认.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Screen {
     /// Both halves or neither.
@@ -68,15 +76,15 @@ fn path() -> PathBuf {
 }
 
 /// The file as it stands; anything unreadable is the defaults.
-pub fn load() -> Screen {
+pub fn load() -> Config {
     read(&path())
 }
 
 /// The same, creating the file when it is not there.
-pub fn load_or_create() -> Screen {
+pub fn load_or_create() -> Config {
     let path = path();
     if !path.exists() {
-        match save(&Screen::default()) {
+        match save(&Config::default()) {
             Ok(()) => tracing::info!("settings.created path={}", path.display()),
             // Read-only `/etc` is a machine that runs on the defaults.
             Err(e) => tracing::warn!("settings.create_failed path={} err={e}", path.display()),
@@ -85,13 +93,23 @@ pub fn load_or_create() -> Screen {
     read(&path)
 }
 
+/// How much the terminal shows, read on its own rather than with the rest.
+///
+/// It has to be known before the subscriber that filters the terminal is built,
+/// and that is what makes it the one setting read before there is anywhere to
+/// report a file that could not be read. The read that follows has a log to say
+/// it in.
+pub fn log_filter() -> LevelFilter {
+    load().log_level
+}
+
 /// The file, replaced in one step.
-pub fn save(screen: &Screen) -> std::io::Result<()> {
+pub fn save(config: &Config) -> std::io::Result<()> {
     let path = path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let mut text = serde_json::to_string_pretty(&json(screen))?;
+    let mut text = serde_json::to_string_pretty(&json(config))?;
     text.push('\n');
     // Beside it rather than in `/tmp`: a rename across filesystems is a copy.
     let staged = path.with_extension("json.tmp");
@@ -99,25 +117,34 @@ pub fn save(screen: &Screen) -> std::io::Result<()> {
     std::fs::rename(&staged, &path)
 }
 
-fn read(path: &Path) -> Screen {
+/// The file with the page's screen in it. The page edits a size and a rate and
+/// nothing else, so everything else in the file is kept as it stands.
+pub fn save_screen(screen: &Screen) -> std::io::Result<()> {
+    let mut config = load();
+    config.screen = *screen;
+    save(&config)
+}
+
+fn read(path: &Path) -> Config {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Screen::default(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Config::default(),
         Err(e) => {
             tracing::warn!("settings.read_failed path={} err={e}", path.display());
-            return Screen::default();
+            return Config::default();
         }
     };
     let Ok(value) = serde_json::from_str::<Value>(&text) else {
         tracing::warn!("settings.read_failed path={} err=not_json", path.display());
-        return Screen::default();
+        return Config::default();
     };
     from_value(&value)
 }
 
 /// The settings a JSON document holds. Nothing is checked against what the page
 /// offers: only half a pair or a zero is dropped, because those serve nothing.
-fn from_value(value: &Value) -> Screen {
+fn from_value(value: &Value) -> Config {
+    let defaults = Config::default();
     let screen = &value["screen"];
     let width = number(screen, "width");
     let height = number(screen, "height");
@@ -139,7 +166,75 @@ fn from_value(value: &Value) -> Screen {
         }
         None => None,
     };
-    Screen { resolution, fps }
+    Config {
+        screen: Screen { resolution, fps },
+        log_level: level(value, defaults.log_level),
+        wireless: flag(value, "wireless", defaults.wireless),
+        wifi_iface: text(value, "wifi_iface", &defaults.wifi_iface),
+        bt_adapter: text(value, "bt_adapter", &defaults.bt_adapter),
+    }
+}
+
+/// The terminal's filter, from `log_level`.
+fn level(object: &Value, default: LevelFilter) -> LevelFilter {
+    match &object["log_level"] {
+        Value::Null => default,
+        value => match value.as_str().and_then(level_of) {
+            Some(level) => level,
+            None => {
+                tracing::warn!("settings.ignored field=log_level value={value}");
+                default
+            }
+        },
+    }
+}
+
+/// The four levels the terminal can be held to, by name. `trace` is not one of
+/// them: nothing writes it, and it is below the copy under `/var/log` too.
+fn level_of(text: &str) -> Option<LevelFilter> {
+    Some(match text.trim().to_ascii_lowercase().as_str() {
+        "error" => LevelFilter::ERROR,
+        "warn" => LevelFilter::WARN,
+        "info" => LevelFilter::INFO,
+        "debug" => LevelFilter::DEBUG,
+        _ => return None,
+    })
+}
+
+/// The name a level is written by, in the file and in the log line that says
+/// which one is in force. It is one of the four above.
+pub(crate) fn level_name(level: LevelFilter) -> &'static str {
+    match level {
+        LevelFilter::ERROR => "error",
+        LevelFilter::WARN => "warn",
+        LevelFilter::DEBUG => "debug",
+        // `level_of` is the only way a level gets in, so nothing else is here.
+        _ => "info",
+    }
+}
+
+/// A yes or no, from a field that has to be a JSON boolean to be one.
+fn flag(object: &Value, key: &str, default: bool) -> bool {
+    match &object[key] {
+        Value::Null => default,
+        Value::Bool(flag) => *flag,
+        value => {
+            tracing::warn!("settings.ignored field={key} value={value}");
+            default
+        }
+    }
+}
+
+/// A name, from a field that has to be a non-empty string to be one.
+fn text(object: &Value, key: &str, default: &str) -> String {
+    match &object[key] {
+        Value::Null => default.to_string(),
+        Value::String(text) if !text.trim().is_empty() => text.trim().to_string(),
+        value => {
+            tracing::warn!("settings.ignored field={key} value={value}");
+            default.to_string()
+        }
+    }
 }
 
 fn number(object: &Value, key: &str) -> Option<u32> {
@@ -149,13 +244,17 @@ fn number(object: &Value, key: &str) -> Option<u32> {
 }
 
 /// The file's shape, as it is written.
-fn json(screen: &Screen) -> Value {
+fn json(config: &Config) -> Value {
     json!({
         "screen": {
-            "width": screen.resolution.map(|r| r.width),
-            "height": screen.resolution.map(|r| r.height),
-            "fps": screen.fps,
-        }
+            "width": config.screen.resolution.map(|r| r.width),
+            "height": config.screen.resolution.map(|r| r.height),
+            "fps": config.screen.fps,
+        },
+        "log_level": level_name(config.log_level),
+        "wireless": config.wireless,
+        "wifi_iface": config.wifi_iface,
+        "bt_adapter": config.bt_adapter,
     })
 }
 
@@ -238,25 +337,62 @@ mod tests {
         }
     }
 
+    /// 一份只有屏幕设成 `screen` 的文件。
+    fn with(screen: Screen) -> Config {
+        Config {
+            screen,
+            ..Config::default()
+        }
+    }
+
     /// 写下去的就是读回来的；留空的那一项不在文件里。
     #[test]
     fn what_is_written_is_what_is_read() {
-        assert_eq!(from_value(&json(&full())), full());
+        assert_eq!(from_value(&json(&with(full()))), with(full()));
 
         let rate_only = Screen {
             resolution: None,
             fps: Some(30),
         };
-        assert_eq!(from_value(&json(&rate_only)), rate_only);
-        assert_eq!(json(&rate_only)["screen"]["width"], Value::Null);
+        assert_eq!(from_value(&json(&with(rate_only))).screen, rate_only);
+        assert_eq!(json(&with(rate_only))["screen"]["width"], Value::Null);
 
         let nothing = Screen::default();
-        assert_eq!(from_value(&json(&nothing)), nothing);
+        assert_eq!(from_value(&json(&with(nothing))).screen, nothing);
         assert!(nothing.is_empty());
 
         // 日志里的一行，写法与渠道表一致。
         assert_eq!(full().to_string(), "1920x720@60");
         assert_eq!(nothing.to_string(), "default@default");
+    }
+
+    /// 四个字段按名字读，写什么是什么；没写的、写错的都是默认。
+    #[test]
+    fn the_four_settings_are_read_by_their_names() {
+        let written = json!({
+            "log_level": "debug",
+            "wireless": false,
+            "wifi_iface": "wlan1",
+            "bt_adapter": "hci1",
+        });
+        let read = from_value(&written);
+        assert_eq!(read.log_level, LevelFilter::DEBUG);
+        assert!(!read.wireless);
+        assert_eq!(read.wifi_iface, "wlan1");
+        assert_eq!(read.bt_adapter, "hci1");
+        assert_eq!(read.screen, Screen::default(), "没写的屏幕是 默认");
+
+        // 写错的字段留在默认上，其余照读。
+        let wrong = json!({ "log_level": "loud", "wireless": "no", "wifi_iface": "" });
+        let read = from_value(&wrong);
+        assert_eq!(read.log_level, LevelFilter::INFO);
+        assert!(read.wireless);
+        assert_eq!(read.wifi_iface, "wlan0");
+
+        // 一个空文档就是整套默认。
+        assert_eq!(from_value(&json!({})), Config::default());
+        assert_eq!(json(&Config::default())["log_level"], "info");
+        assert_eq!(json(&Config::default())["wireless"], json!(true));
     }
 
     /// 文件按写下来的读：页面不提供的尺寸与帧率照样生效。
@@ -266,7 +402,7 @@ mod tests {
             "screen": { "width": 1024, "height": 768, "fps": 24 }
         });
         assert_eq!(
-            from_value(&edited),
+            from_value(&edited).screen,
             Screen {
                 resolution: Some(Resolution {
                     width: 1024,
@@ -279,7 +415,7 @@ mod tests {
 
         let half = json!({ "screen": { "width": 1920, "fps": 30 } });
         assert_eq!(
-            from_value(&half),
+            from_value(&half).screen,
             Screen {
                 resolution: None,
                 fps: Some(30)
@@ -289,14 +425,14 @@ mod tests {
 
         let zero = json!({ "screen": { "width": 0, "height": 720, "fps": 0 } });
         assert_eq!(
-            from_value(&zero),
+            from_value(&zero).screen,
             Screen::default(),
             "a zero serves nothing"
         );
 
         // 空文档，与根本不是这个形状的。
-        assert_eq!(from_value(&json!({})), Screen::default());
-        assert_eq!(from_value(&json!({ "screen": 3 })), Screen::default());
+        assert_eq!(from_value(&json!({})).screen, Screen::default());
+        assert_eq!(from_value(&json!({ "screen": 3 })).screen, Screen::default());
     }
 
     /// 页面能写下来的就是文件能放下的：手改的值存得回去。
@@ -304,7 +440,7 @@ mod tests {
     fn the_page_writes_what_can_be_a_setting() {
         let body = |value: Value| serde_json::to_vec(&value).unwrap();
 
-        assert_eq!(parse(&body(json(&full()))), Ok(full()));
+        assert_eq!(parse(&body(json(&with(full())))), Ok(full()));
         assert_eq!(parse(&body(json!({ "screen": {} }))), Ok(Screen::default()));
         assert_eq!(
             parse(&body(json!({ "screen": { "fps": 30 } }))),
@@ -323,7 +459,7 @@ mod tests {
             fps: Some(24),
         };
         assert_eq!(
-            parse(&body(json(&edited))),
+            parse(&body(json(&with(edited)))),
             Ok(edited),
             "a size and a rate the page does not list are the file's own"
         );
@@ -368,15 +504,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let missing = dir.join("not-here.json");
-        assert_eq!(read(&missing), Screen::default());
+        assert_eq!(read(&missing), Config::default());
 
         let garbage = dir.join("garbage.json");
         std::fs::write(&garbage, "{ not json").unwrap();
-        assert_eq!(read(&garbage), Screen::default());
+        assert_eq!(read(&garbage), Config::default());
 
         let good = dir.join("good.json");
-        std::fs::write(&good, json(&full()).to_string()).unwrap();
-        assert_eq!(read(&good), full());
+        std::fs::write(&good, json(&with(full())).to_string()).unwrap();
+        assert_eq!(read(&good), with(full()));
 
         std::fs::remove_dir_all(&dir).ok();
     }

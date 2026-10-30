@@ -110,8 +110,7 @@ CarLife path resolves a name.
 The result is `dist/cp2cl`, staged from
 `target/armv7-unknown-linux-musleabihf/release/cp2cl`. Copy it to
 the board and run it there; it needs no files of its own, and everything it takes
-from outside comes from the environment — see
-[Running it on the board](#running-it-on-the-board).
+from outside comes from `/etc/cp2cl/config.json` — see [Settings](#settings).
 
 ### What the phone renders at
 
@@ -250,19 +249,35 @@ Both absences are logged rather than fatal, and everything else — the device, 
 streams, the status page — works without them. A run from a checkout looks in the
 same place, so it needs the three files copied there or it runs without them.
 
-## Environment
+## Settings
 
-| Variable | Default | Meaning |
+Everything the operator tunes is `/etc/cp2cl/config.json`, read once at startup.
+Any field may be left out, and a machine with no file at all runs on the defaults:
+
+| Field | Default | Meaning |
 |---|---|---|
-| `CP2CL_LOG_LEVEL` | `info` | log level: `error`, `warn`, `info`, `debug` |
-| `CP2CL_WIRELESS` | on | take CarPlay over Wi-Fi instead of USB; `0` for the cable |
-| `CP2CL_WIFI_IFACE` | `wlan0` | the interface the access point runs on |
-| `CP2CL_BT_ADAPTER` | `hci0` | which Bluetooth adapter |
-| `CP2CL_INPUT_FILE` | — | test video stream file |
+| `log_level` | `"info"` | how much the terminal shows: `error`, `warn`, `info`, `debug` |
+| `wireless` | `true` | take CarPlay over Wi-Fi instead of USB; `false` for the cable |
+| `wifi_iface` | `"wlan0"` | the interface the access point runs on |
+| `bt_adapter` | `"hci0"` | which Bluetooth adapter |
+| `screen` | — | the size and rate the page picks; see [What the phone renders at](#what-the-phone-renders-at) |
 
-On the board every one of these is an environment variable of the process: the
-program is started by hand and the only file it reads for itself is
-`/etc/cp2cl/config.json`, which it also writes — see [Running it on the
+```json
+{
+  "log_level": "debug",
+  "wireless": false,
+  "wifi_iface": "wlan0",
+  "bt_adapter": "hci0"
+}
+```
+
+A value that cannot be used — a level that is not one of the four, a field of the
+wrong type — is reported in the log and left at its default, so a file with a
+mistake in it still starts. The file is created with the defaults on the first run
+when it is not there.
+
+There is no environment variable: the program is started by hand and this is the
+only file it reads for itself, which it also writes — see [Running it on the
 board](#running-it-on-the-board). What the accessory is called and where it
 is reachable are not settings: both come off the machine, the name being its
 hostname and its address being read from the Bluetooth adapter, and the network
@@ -274,7 +289,7 @@ composed by the program, and what it is made of is in `src/carlife/desc.rs` — 
 ## Wireless CarPlay
 
 Wireless CarPlay is what the program starts in: the handshake goes over
-Bluetooth rather than the cable. `CP2CL_WIRELESS=0` puts it back on USB. The
+Bluetooth rather than the cable. `"wireless": false` puts it back on USB. The
 phone is paired in the operating system first — this program pairs nothing — and
 then finds the iAP2 service we publish. Bluetooth carries only that beginning: the
 moment we answer `CarPlayStartSession` with a Wi-Fi network and our link-local
@@ -285,7 +300,7 @@ What it needs:
 
 * the phone and this machine paired in the OS, on the same Wi-Fi — one that lets
   devices reach each other, so not a guest network with client isolation
-* an access point on the interface `CP2CL_WIFI_IFACE` names.
+* an access point on the interface `wifi_iface` names.
   `CarPlayStartSession` has to say which network the phone should join and where
   we are on it, and all of that is read from `/etc/hostapd`: whichever
   configuration in there is an access point on that interface — the one hostapd
@@ -308,7 +323,7 @@ controller has to advertise itself as in-car audio/video, or the phone does not
 treat the machine as a car. And a channel that opens but never carries anything
 usually means the phone's service records are stale.
 
-`CP2CL_LOG_LEVEL=debug` brings up the per-event detail.
+`"log_level": "debug"` in the configuration brings up the per-event detail.
 
 ## CarLife
 
@@ -322,7 +337,7 @@ for it on a desk.
 
 That also means the car is the only thing that starts a session — but it is not
 the only thing that can watch one. [The status page](#the-status-page) shows both
-halves as they stand, and `CP2CL_LOG_LEVEL` is where a run is read in full.
+halves as they stand, and `log_level` is where a run is read in full.
 
 What is there: the USB interface the car enumerates, the AOA control requests,
 the session a head unit drives — the version handshake, device information,
@@ -351,47 +366,8 @@ so everything up to the picture can be exercised without one:
 ```
 
 The video channel then carries the phone's frames, which needs both a phone and a
-car session. To drive the channel with no CarPlay in the picture at all, point it
-at a file instead:
-
-```bash
-CP2CL_INPUT_FILE=/root/moving.h264 ./cp2cl
-```
-
-Any annex-B stream will do. Its access units go out one per tick, at the rate the
-car agreed to, and the file starts over at the end — so a file with a stream in it
-makes the picture move:
-
-```bash
-ffmpeg -f lavfi -i testsrc2=size=1280x720:rate=60 -t 30 \
-  -c:v libx264 -profile:v baseline -pix_fmt yuv420p -preset veryfast \
-  -g 60 -f h264 moving.h264
-```
-
-That is thirty seconds of 1280x720 at 60 fps: 1800 access units, an IDR with its
-parameter sets every second, no B-frames and nothing to reorder, which is the shape
-a CarPlay stream arrives in. `testsrc2` draws a frame counter into the picture, so
-a picture that is moving is a number that is counting. The profile is what a head
-unit's decoder is surest of, and `-pix_fmt yuv420p` is not optional with it —
-baseline has no 4:4:4, and libx264 refuses the combination. The level is left to
-libx264, which picks 3.2 for this size and rate; naming a lower one is a refusal
-rather than a smaller stream.
-
-A file holding a single access unit is the other case worth having, and it is what
-the instructions below use: one picture, sent again and again, which is nothing a
-person would watch but is enough to prove the channel and the car's decoder end to
-end. Any annex-B stream works, including one frame of one:
-
-```bash
-ffmpeg -f lavfi -i testsrc=size=1280x720:rate=30 -frames:v 1 -c:v libx264 \
-  -profile:v baseline -x264-params keyint=1 -f h264 idr.h264
-```
-
-The frame rate lives in the raw stream's SPS and nowhere else, so `ffplay` falls
-back on a guess when it is handed the file on its own. `ffplay -framerate 60
-moving.h264` is what plays it at the speed the car sees it. With no file to read,
-the video channel carries heartbeats only, which still shows the session coming up
-and the encoder negotiation happening.
+car session. With neither, the channel carries heartbeats only, which still shows
+the session coming up and the encoder negotiation happening.
 
 What to watch for, in the order it happens. The first line that does not appear
 is where it stopped:
@@ -534,7 +510,7 @@ the board calls itself, so the network and the board are one name — what the
 file holds is what a board whose radio never appeared goes on air with. Changing
 it is also how the network the phone is told to join is changed, and where on it
 we are — wireless CarPlay reads its own configuration out of `/etc/hostapd`,
-taking the file that names the interface `CP2CL_WIFI_IFACE` defaults to, so the
+taking the file that names the interface `wifi_iface` defaults to, so the
 two cannot drift apart. See [Wireless CarPlay](#wireless-carplay).
 
 **The boot is six scripts and no service manager.**
@@ -544,7 +520,7 @@ two cannot drift apart. See [Wireless CarPlay](#wireless-carplay).
 | `S00diag` | writes what the boot had to say to `/var/log`, then samples the radio for two minutes |
 | `S10radio` | loads the Wi-Fi and Bluetooth modules, and returns |
 | `S12name` | names the board after `wlan0`'s address and restarts, once, on the first boot |
-| `S50cp2cl` | the program, which sets no environment and reads no settings file |
+| `S50cp2cl` | the program, which sets no environment and reads `/etc/cp2cl/config.json` |
 | `S50dropbear` | dropbear, for the console the image does not otherwise have |
 | `S55ap` | hostapd on `wlan0` at `192.168.4.1/24`, then dnsmasq for the leases |
 
@@ -631,7 +607,7 @@ point, and can be logged into.
 **If the port stays empty, the reason is on the program's own output.** It says
 what it could not do: no configfs, a controller already held, a mount that did not
 happen, an endpoint that would not open. A device that enumerates and then goes
-quiet is a head unit waiting for an answer, which `CP2CL_LOG_LEVEL=debug` prints
+quiet is a head unit waiting for an answer, which `"log_level": "debug"` prints
 request by request.
 
 **The access point advertises no gateway, and answers DNS for one question.**
@@ -653,7 +629,7 @@ apart, so change them together.
 SSID and passphrase; nothing else here is board-specific. A second board is a
 `buildroot/configs/<board>_defconfig` and a `buildroot/board/<board>/` directory,
 and `make firmware BOARD=<board>` builds it. The interface the file names is the
-one wireless CarPlay looks for, so `CP2CL_WIFI_IFACE` has to name it too when it
+one wireless CarPlay looks for, so `wifi_iface` has to name it too when it
 is not `wlan0`. The controller is the first one under `/sys/class/udc`, so
 `musb-hdrc.4.auto` is not assumed, and neither is `usb0` or any other interface
 name. What is assumed is the kernel, named under
@@ -693,10 +669,10 @@ the program itself, but a gadget left by an earlier arrangement is not, and a un
 holding one is not something to stop over the link it carries. That is what
 [the reboot after installing](#setting-the-board-up) is for.
 
-**Output is `tracing`, to the terminal.** `CP2CL_LOG_LEVEL` is the one control over it
+**Output is `tracing`, to the terminal.** `log_level` is the one control over it
 and there is no journal to read: the log is the answer to whether the board came
 up, whether the device was composed, and what a head unit asked. See
-[Environment](#environment) for the rest.
+[Settings](#settings) for the rest.
 
 ### Authentication
 
@@ -980,7 +956,7 @@ this a derivative work, so cp2cl inherits that.
 | `src/playing.rs` | what the phone is playing, as the fields the car's panel is told |
 | `src/artwork.rs` | the cover art, made small enough for the car's one media message |
 | `src/commands.rs` | the vocabulary of input |
-| `src/settings.rs` | `/etc/cp2cl/config.json`: the screen the settings page picks, the choices it picks from, and the file as it is written |
+| `src/settings.rs` | `/etc/cp2cl/config.json`: what the operator tunes, the screen the settings page picks and the choices it picks from |
 | `src/web/status.rs` | the snapshot both halves report into, and the JSON behind `/api/status` |
 | `src/web/device.rs` | the board's own CPU and memory, read from `/proc` on a task of its own |
 | `src/web/mod.rs` | the status page's router and listener |

@@ -19,7 +19,6 @@
 //! by `auth`; what that needs and what happens without it is documented there.
 
 use std::fmt::Write as _;
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -180,62 +179,15 @@ const TTS_IDLE: Duration = Duration::from_millis(700);
 const MIN_FPS: i32 = 3;
 const MAX_FPS: i32 = 60;
 
-/// Where the video channel's pictures come from. A file the operator names is
-/// the whole source when there is one; otherwise the source is the CarPlay
-/// session, and `None` is what a run with neither falls back to.
+/// Where the video channel's pictures come from: the CarPlay session, or — in a
+/// run with no phone behind it — nothing but heartbeats.
 pub enum Frames {
     /// Nothing but heartbeats: the session is up and the car is kept waiting.
     None,
-    /// The access units of a file, in the order the file holds them, at the
-    /// agreed rate, started over at the end.
-    ///
-    /// A file with one access unit in it is the case the bench is run on when
-    /// there is no phone: one picture, sent again and again, which is nothing a
-    /// person would watch but is a real H.264 stream all the same, and proves the
-    /// channel and the car's decoder end to end with no encoder in the picture. A
-    /// file with a stream in it is what makes the picture move. `CP2CL_INPUT_FILE`
-    /// names the file.
-    Cycle(Vec<Vec<u8>>),
     /// The CarPlay side, as it arrives. Frames are written to the car as they
     /// come in rather than on the session's own clock: they are a coded stream,
     /// and it is the phone's encoder that decides the rate.
     Live(Arc<ClOutlet>),
-}
-
-impl Frames {
-    /// The access units of `path`, in file order.
-    ///
-    /// A file that cannot be read is worth a warning and not a failure: the
-    /// session is still useful without it, and saying so beats refusing to start.
-    pub fn from_file(path: &Path) -> Self {
-        match std::fs::read(path) {
-            Ok(bytes) if !bytes.is_empty() => {
-                let units = access_units(&bytes);
-                if units.is_empty() {
-                    tracing::warn!(
-                        "carlife.video_source_empty file={path:?} action=heartbeat_only"
-                    );
-                    return Self::None;
-                }
-                tracing::info!(
-                    "carlife.video_source file={path:?} bytes={} access_units={}",
-                    bytes.len(),
-                    units.len()
-                );
-                Self::Cycle(units)
-            }
-            Ok(_) => {
-                tracing::warn!("carlife.video_source_empty file={path:?} action=heartbeat_only");
-                Self::None
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "carlife.video_source_unreadable file={path:?} err={e} action=heartbeat_only"
-                );
-                Self::None
-            }
-        }
-    }
 }
 
 /// Splits an annex-B stream into access units, one per coded picture.
@@ -382,17 +334,6 @@ where
                 (None, None, None, None, Source::None, None)
             }
         },
-        Frames::Cycle(units) => (
-            None,
-            None,
-            None,
-            None,
-            Source::Cycle {
-                units: units.clone(),
-                next: 0,
-            },
-            None,
-        ),
         Frames::None => (None, None, None, None, Source::None, None),
     };
 
@@ -632,8 +573,6 @@ enum ChunkOrEnd {
 /// about it: the receiving half is not here, because it belongs to the `select!`.
 enum Source {
     None,
-    /// The file's access units, and which of them goes out next.
-    Cycle { units: Vec<Vec<u8>>, next: usize },
     Live,
 }
 
@@ -1784,12 +1723,6 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             // still alive, because it is what notices when that changes.
             return Ok(());
         };
-        // The file's next picture, taken before it is written: the write wants
-        // the session mutably and the file is part of the session.
-        if let Some(unit) = self.next_file_unit() {
-            let elapsed = started_at.elapsed().as_millis() as u32;
-            return self.send_frame(VIDEO_DATA, elapsed, &unit).await;
-        }
         match &self.source {
             // Pictures arrive on the phone's own clock, so there is nothing for
             // the tick to send while they do. A heartbeat goes out once they
@@ -1823,8 +1756,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     /// Whether the phone's screen stream is open.
     ///
     /// A session with no phone behind it has nothing to wait for, and is open:
-    /// a file or a run with no pictures at all is not a car sitting in front of
-    /// a guide.
+    /// nothing to show but a guide is not a car sitting in front of one.
     fn phone_screen_open(&self) -> bool {
         match self.phone_screen.as_ref() {
             Some(screen) => *screen.borrow(),
@@ -1839,7 +1771,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
 
     /// The guide's next frame, or nothing when there is no guide to show.
     ///
-    /// Taken before it is written, for the reason the file's frame is: the write
+    /// Taken before it is written, for the reason the phone's frame is: the write
     /// wants the session mutably and the guide is part of the session.
     fn next_guide_unit(&mut self) -> Option<Vec<u8>> {
         self.guide.as_mut().map(guide::Guide::next)
@@ -1869,20 +1801,6 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 PROBE_WAIT.as_millis()
             ),
         }
-    }
-
-    /// The file's next access unit, moving the file past it, or nothing at all
-    /// when the pictures are coming from somewhere else.
-    ///
-    /// The end of the file is the start of it: a file that ran out would leave
-    /// the channel with heartbeats and a picture that stopped.
-    fn next_file_unit(&mut self) -> Option<Vec<u8>> {
-        let Source::Cycle { units, next } = &mut self.source else {
-            return None;
-        };
-        let unit = units[*next].clone();
-        *next = (*next + 1) % units.len();
-        Some(unit)
     }
 
     /// One access unit from the CarPlay side, on the video channel.
@@ -2340,11 +2258,8 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     /// panel showing an instruction.
     fn period(&self) -> Duration {
         let rate = self.screen_in_force.map(|screen| screen.frame_rate);
-        match (&self.source, self.started_at, rate) {
-            (Source::Cycle { .. }, Some(_), Some(fps)) if fps > 0 => {
-                Duration::from_millis(1000 / fps as u64)
-            }
-            (Source::Live, Some(_), Some(fps)) if fps > 0 && self.guiding() => {
+        match (self.started_at, rate) {
+            (Some(_), Some(fps)) if fps > 0 && self.guiding() => {
                 Duration::from_millis(1000 / fps as u64)
             }
             _ => HEARTBEAT,
@@ -2834,7 +2749,7 @@ mod tests {
         run(
             device,
             &Frames::None,
-            &Config::from_env(),
+            &Config::default(),
             None,
             &mut |_, _, _| {},
             no_icon(),
@@ -2869,7 +2784,7 @@ mod tests {
         run(
             device,
             &Frames::None,
-            &Config::from_env(),
+            &Config::default(),
             None,
             &mut |_, _, _| {},
             no_icon(),
@@ -2921,7 +2836,7 @@ mod tests {
         use base64::Engine as _;
 
         let (pem, key) = a_key_of_its_own();
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let challenge = "9f2c1a_4.6.0";
@@ -2973,7 +2888,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_handshake_is_answered_and_the_session_is_reported_up_then_down() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let switches = Arc::new(Mutex::new(Vec::new()));
         let seen = switches.clone();
@@ -3011,7 +2926,7 @@ mod tests {
     /// else knows how big it is, so it is the car that decides.
     #[tokio::test]
     async fn the_cars_screen_is_reported_to_the_other_half() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         // Deliberately unlike the fallback, so a report of the fallback would
@@ -3060,7 +2975,7 @@ mod tests {
     /// its own.
     #[tokio::test]
     async fn a_preconfigured_number_is_served_the_size_the_table_names() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
 
@@ -3117,7 +3032,7 @@ mod tests {
                 }),
                 fps: Some(60),
             },
-            ..Config::from_env()
+            ..Config::default()
         };
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
@@ -3179,7 +3094,7 @@ mod tests {
                 }),
                 fps: None,
             },
-            ..Config::from_env()
+            ..Config::default()
         };
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
@@ -3224,7 +3139,7 @@ mod tests {
                 resolution: None,
                 fps: Some(60),
             },
-            ..Config::from_env()
+            ..Config::default()
         };
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
@@ -3317,7 +3232,7 @@ mod tests {
     /// holds this: it compares the answer with the request field by field.
     #[tokio::test]
     async fn a_frame_rate_above_thirty_is_agreed_to_rather_than_cut_down() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let mut screen = |_width: u32, _height: u32, _fps: u32| {};
@@ -3356,7 +3271,7 @@ mod tests {
     /// message, and the phone's own voice streams are not the car's music.
     #[tokio::test]
     async fn the_media_channel_is_told_the_format_before_it_is_given_any_sound() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let mut screen = |_width: u32, _height: u32, _fps: u32| {};
@@ -3496,7 +3411,7 @@ mod tests {
     /// frames themselves, and an end that leaves the music's channel alone.
     #[tokio::test]
     async fn the_prompt_is_announced_and_ended_on_its_own_channel() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let mut screen = |_width: u32, _height: u32, _fps: u32| {};
@@ -3573,7 +3488,7 @@ mod tests {
     /// the prompt is over. So silence ends it — once, and no more.
     #[tokio::test]
     async fn a_prompt_that_goes_quiet_is_ended_for_it() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let mut screen = |_width: u32, _height: u32, _fps: u32| {};
@@ -3646,7 +3561,7 @@ mod tests {
     /// with the cover art joined onto the song it belongs to when it lands.
     #[tokio::test]
     async fn the_cars_panel_is_told_the_song_that_is_playing() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let mut screen = |_width: u32, _height: u32, _fps: u32| {};
@@ -3748,7 +3663,7 @@ mod tests {
     /// that repeats the state is nothing at all.
     #[tokio::test]
     async fn the_car_is_told_when_the_song_stops_and_starts() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let mut screen = |_width: u32, _height: u32, _fps: u32| {};
@@ -3847,7 +3762,7 @@ mod tests {
     /// thrown away when the song turns up.
     #[tokio::test]
     async fn a_cover_that_arrives_before_the_song_is_kept_for_it() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let mut screen = |_width: u32, _height: u32, _fps: u32| {};
@@ -3908,7 +3823,7 @@ mod tests {
     /// the song it belongs to has not gone anywhere.
     #[tokio::test]
     async fn a_line_of_lyrics_keeps_the_cover() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let mut screen = |_width: u32, _height: u32, _fps: u32| {};
@@ -3975,7 +3890,7 @@ mod tests {
     /// which is what a phone with no cover of its own sends.
     #[tokio::test]
     async fn an_empty_cover_puts_the_last_one_down() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let mut screen = |_width: u32, _height: u32, _fps: u32| {};
@@ -4032,7 +3947,7 @@ mod tests {
     /// the page is given the same picture the car is.
     #[tokio::test]
     async fn a_song_with_a_length_puts_the_last_cover_down() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let mut screen = |_width: u32, _height: u32, _fps: u32| {};
@@ -4105,7 +4020,7 @@ mod tests {
     /// worse than one the car never updated.
     #[tokio::test]
     async fn the_play_state_on_its_own_is_not_a_song() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let mut screen = |_width: u32, _height: u32, _fps: u32| {};
@@ -4168,7 +4083,7 @@ mod tests {
     /// own panel does with the same messages.
     #[tokio::test]
     async fn every_word_from_the_phone_goes_out_at_once() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let mut screen = |_width: u32, _height: u32, _fps: u32| {};
@@ -4261,7 +4176,7 @@ mod tests {
     /// the panel loses the picture, not the song.
     #[tokio::test]
     async fn a_cover_too_large_for_the_cars_message_is_left_out() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let mut screen = |_width: u32, _height: u32, _fps: u32| {};
@@ -4316,7 +4231,7 @@ mod tests {
     /// of the two.
     #[tokio::test]
     async fn a_message_larger_than_its_channel_allows_is_dropped() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let mut screen = |_width: u32, _height: u32, _fps: u32| {};
@@ -4385,7 +4300,7 @@ mod tests {
     /// answer is the same for all of them.
     #[tokio::test]
     async fn the_cars_question_about_what_this_device_can_provide_is_answered() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
 
@@ -4452,7 +4367,7 @@ mod tests {
     /// the same, because nothing that takes a report is behind having asked.
     #[tokio::test]
     async fn a_car_below_protocol_three_is_not_asked_for_its_data_but_is_heard() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let status = Arc::new(Status::new());
@@ -4502,7 +4417,7 @@ mod tests {
     /// the car, and the fix is worth having either way.
     #[tokio::test]
     async fn the_cars_position_is_asked_for_and_reported() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let status = Arc::new(Status::new());
@@ -4585,7 +4500,7 @@ mod tests {
     /// sending half — which is the one handed in here.
     #[tokio::test]
     async fn the_cars_position_is_handed_to_the_phone() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let vehicle = Arc::new(Vehicle::default());
@@ -4633,7 +4548,7 @@ mod tests {
     /// was given for as long as it stays connected.
     #[tokio::test]
     async fn a_lost_fix_takes_the_position_back() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let vehicle = Arc::new(Vehicle::default());
@@ -4680,7 +4595,7 @@ mod tests {
     /// there, on a wireless link that outlives the car's.
     #[tokio::test]
     async fn the_position_goes_when_the_car_does() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let vehicle = Arc::new(Vehicle::default());
@@ -4717,50 +4632,6 @@ mod tests {
         let said = feed.location.borrow().1.clone();
         assert!(said.contains(",0,00,"), "the position was taken back: {said}");
         assert!(!said.contains("3019.0728"), "and none is left: {said}");
-    }
-
-    #[tokio::test]
-    async fn the_files_access_units_go_out_in_order_and_start_over_at_the_end() {
-        let cfg = Config::from_env();
-        let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-
-        let car = tokio::spawn(async move {
-            let mut car = Car { pipe };
-            car.handshake(asked()).await;
-            car.start_the_encoder().await;
-            // A file two units long: the third picture out is the first again.
-            for expected in [
-                [0x00, 0x00, 0x00, 0x01, 0x65],
-                [0x00, 0x00, 0x00, 0x01, 0x41],
-                [0x00, 0x00, 0x00, 0x01, 0x65],
-            ] {
-                let picture = car.expect(VIDEO_DATA).await;
-                assert_eq!(picture.body, expected);
-                assert!(picture.timestamp_ms.is_some());
-            }
-        });
-
-        let frames = Frames::Cycle(vec![
-            vec![0x00, 0x00, 0x00, 0x01, 0x65],
-            vec![0x00, 0x00, 0x00, 0x01, 0x41],
-        ]);
-        run(
-            device,
-            &frames,
-            &cfg,
-            None,
-            &mut |_, _, _| {},
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
-        )
-        .await
-            .expect("the session ends cleanly");
-        car.await.unwrap();
     }
 
     #[test]
@@ -4800,7 +4671,7 @@ mod tests {
 
     #[tokio::test]
     async fn nothing_is_sent_on_the_video_channel_until_the_car_starts_it() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
 
@@ -4811,7 +4682,7 @@ mod tests {
             car.expect_silence(Duration::from_millis(500)).await;
         });
 
-        let frames = Frames::Cycle(vec![vec![0x00, 0x00, 0x00, 0x01, 0x65]]);
+        let frames = Frames::None;
         run(
             device,
             &frames,
@@ -4837,7 +4708,7 @@ mod tests {
     /// whether or not the machine it runs on was built with a key.
     #[tokio::test]
     async fn a_challenge_with_no_key_behind_it_is_left_alone() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let status = Arc::new(Status::new());
@@ -4880,7 +4751,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_frame_from_the_carplay_side_goes_out_as_it_arrives() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let outlet = Arc::new(ClOutlet::new());
@@ -4971,7 +4842,7 @@ mod tests {
     /// look stuck.
     #[tokio::test]
     async fn the_guide_is_what_the_car_is_shown_until_the_phones_screen_opens() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let outlet = Arc::new(ClOutlet::new());
@@ -5022,7 +4893,7 @@ mod tests {
     /// pictures, which is the whole of the switch between the two.
     #[tokio::test]
     async fn the_phones_pictures_take_over_from_the_guide() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let outlet = Arc::new(ClOutlet::new());
@@ -5075,7 +4946,7 @@ mod tests {
 
     #[tokio::test]
     async fn every_channel_is_given_back_when_the_session_ends() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
         let outlet = Arc::new(ClOutlet::new());
@@ -5123,7 +4994,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_panel_key_is_read_rather_than_dropped_on_the_floor() {
-        let cfg = Config::from_env();
+        let cfg = Config::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let mut carplay = |_: bool| {};
 

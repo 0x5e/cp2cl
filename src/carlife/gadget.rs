@@ -158,7 +158,7 @@ where
                         // never says anything has to be read against.
                         tracing::info!("usb.enumerated action=start_session {}", udc.link());
                         let cfg = Config {
-                            screen: crate::settings::load(),
+                            screen: crate::settings::load().screen,
                             ..(*cfg).clone()
                         };
                         if let Err(e) = session::run(

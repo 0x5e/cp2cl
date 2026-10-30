@@ -137,10 +137,6 @@ the core; none is loaded on this chip.
 
 `AF_INET6` is mandatory, not optional.
 
-### 2.6 Environment
-
-    CP2CL_INPUT_FILE=<unset>
-
 ## 3. Everything else
 
 ### 3.1 Mounts

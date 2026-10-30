@@ -180,7 +180,7 @@ async fn save(body: Bytes) -> Response {
             return json_answer(StatusCode::BAD_REQUEST, json!({ "error": e }));
         }
     };
-    match crate::settings::save(&screen) {
+    match crate::settings::save_screen(&screen) {
         Ok(()) => {
             tracing::info!("web.settings_saved screen={screen} effect=restart");
             json_answer(StatusCode::OK, json!({ "ok": true }))

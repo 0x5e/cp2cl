@@ -4,7 +4,7 @@
 //! Nothing here draws anything itself. Three pieces run concurrently:
 //!
 //! * a session watcher that carries iAP2 over Bluetooth — or over USB, when
-//!   `CP2CL_WIRELESS=0` — and starts CarPlay,
+//!   `wireless` is off in `/etc/cp2cl/config.json` — and starts CarPlay,
 //! * an airplay receiver that accepts the phone's return call and decrypts its
 //!   media,
 //! * the CarLife session, which presents this device to a head unit as a phone
@@ -40,30 +40,31 @@ use tracing_subscriber::prelude::*;
 use crate::airplay::clock::SyncedClock;
 use crate::airplay::pairing::Pairings;
 use crate::airplay::{AudioClock, EventSink, MicSink, ScreenParams, SharedChannel, SharedScreen};
-use crate::config::{hostname, Config};
+use crate::config::hostname;
 use crate::sink::{AudioCodec, ClOutlet, ClSink, MediaSink};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Everything the program prints goes through this, so `CP2CL_LOG_LEVEL` is the
-    // only knob for how much of it is shown, and the levels are the usual ones:
-    // `error` is something we set out to do and could not, `warn` is something
-    // dropped or unexpected that we carried on from, `info` is the life of a
-    // session — connecting, pairing, streams opening and closing — and `debug`
-    // is the per-event detail that would otherwise drown all of it.
-    // It is installed before the config is read on purpose: a setting that
-    // cannot be used is reported by a log line, and that line needs somewhere
-    // to go.
+    // Everything the program prints goes through this, so `log_level` in
+    // `/etc/cp2cl/config.json` is the only knob for how much of it is shown, and
+    // the levels are the usual ones: `error` is something we set out to do and
+    // could not, `warn` is something dropped or unexpected that we carried on
+    // from, `info` is the life of a session — connecting, pairing, streams
+    // opening and closing — and `debug` is the per-event detail that would
+    // otherwise drown all of it.
+    // That one setting is read here, before the subscriber exists, which is why
+    // it is the only one read before there is anywhere to report a file that
+    // could not be read; the read that follows says so.
     //
     // It goes to two places, and it is the same lines in both: the terminal,
     // coloured, and a copy under `/var/log` that is not, which is what the status
     // page reads and what is still there of a run that has ended. See
     // `logging::Journal` for how the copy is kept to size.
     //
-    // The terminal is held to `CP2CL_LOG_LEVEL`, the copy is not: a run cannot
-    // be dialled up to `debug` after the fact, so what is left on disk is what
-    // a question about that run is answered from, and it is asked once the run
-    // is over. `trace` is below both of them — nothing writes it, and what did
+    // The terminal is held to `log_level`, the copy is not: a run cannot be
+    // dialled up to `debug` after the fact, so what is left on disk is what a
+    // question about that run is answered from, and it is asked once the run is
+    // over. `trace` is below both of them — nothing writes it, and what did
     // would be the internals of other people's crates.
     let journal = logging::Journal::open();
     let unnoticed = journal.reason().map(str::to_owned);
@@ -71,7 +72,7 @@ async fn main() -> Result<()> {
         .with(
             tracing_subscriber::fmt::layer()
                 .event_format(logging::Line)
-                .with_filter(config::log_filter()),
+                .with_filter(settings::log_filter()),
         )
         .with(
             tracing_subscriber::fmt::layer()
@@ -87,18 +88,14 @@ async fn main() -> Result<()> {
 
     // Read once: what is saved while this run is up reaches the phone on the
     // next one.
-    let screen = settings::load_or_create();
-    let cfg = Arc::new(Config {
-        screen,
-        ..Config::from_env()
-    });
+    let cfg = Arc::new(settings::load_or_create());
 
     tracing::info!("main.started name=cp2cl");
     // Which build this run is, said once and at the top: every question about a
     // log begins with "which build was that", and the answer is not in the lines
     // that follow. It is the same string the page shows, from the same place.
     tracing::info!("main.version software={:?}", web::device::SOFTWARE);
-    tracing::info!("main.screen {screen}");
+    tracing::info!("main.screen {}", cfg.screen);
 
     // The settings this run was handed, because "why is nothing happening" is
     // nearly always one of them. The two halves of the program log different
@@ -106,10 +103,11 @@ async fn main() -> Result<()> {
     // the car before it says anything at all — so a log that does not name its
     // own mode is one that cannot be read.
     tracing::info!(
-        "main.config wireless={} wifi_iface={} bt_adapter={}",
+        "main.config wireless={} wifi_iface={} bt_adapter={} log_level={}",
         cfg.wireless,
         cfg.wifi_iface,
-        cfg.bt_adapter
+        cfg.bt_adapter,
+        settings::level_name(cfg.log_level)
     );
 
     // The board's lights and its one button. All three are best-effort: an
@@ -349,13 +347,9 @@ async fn main() -> Result<()> {
             let _ = nudge.send(());
         }
     };
-    // A file the operator names is the whole source then, and nothing the phone
-    // sends reaches the car's decoder — which is how the channel and that
-    // decoder are exercised without one.
-    let frames = match &cfg.input_file {
-        Some(path) => carlife::session::Frames::from_file(path),
-        None => carlife::session::Frames::Live(outlet),
-    };
+    // The phone's own frames are what the channel carries: there is no other
+    // source of pictures in the program.
+    let frames = carlife::session::Frames::Live(outlet);
 
     // The car names its screen over the CarLife session, and the name is what the
     // phone is asked to render at, so this is where the two halves meet. A size

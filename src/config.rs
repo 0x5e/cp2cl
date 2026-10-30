@@ -1,10 +1,8 @@
-//! Everything the operator can tune, read once from the environment.
+//! Everything the operator can tune, read once from `/etc/cp2cl/config.json`.
 //!
-//! Nothing here is required: the defaults build a working wired session and hand
-//! it to whatever head unit turns up. See README for the full table.
-//!
-//! `screen` is not from the environment: it is `/etc/cp2cl/config.json`, read at
-//! the start of each session. See `crate::settings`.
+//! Nothing here is required: the defaults build a working wireless session and
+//! hand it to whatever head unit turns up. See README for the full table, and
+//! `crate::settings` for the file this is read out of and written back to.
 //!
 //! Three values are not settings at all, because they are properties of the
 //! machine rather than choices: the name it goes by is the hostname
@@ -15,36 +13,6 @@
 use std::path::{Path, PathBuf};
 
 use tracing::level_filters::LevelFilter;
-
-fn env(key: &str) -> Option<String> {
-    std::env::var(key)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-fn env_or(key: &str, default: &str) -> String {
-    env(key).unwrap_or_else(|| default.to_string())
-}
-
-/// `CP2CL_LOG_LEVEL`, or `info`.
-///
-/// Read on its own rather than with the rest, because it has to be known before
-/// the config is: a setting that could not be used is reported by a log line,
-/// and that line needs a subscriber to already exist. That is also why a value
-/// that is not one of the four levels falls back on `info` without saying so —
-/// there is nothing yet to say it to.
-///
-/// A level and nothing else. `tracing-subscriber`'s environment filter also
-/// takes directives — `crate=debug`, `crate[span]=trace` — and parsing them is
-/// what a regex engine was built into the binary for; there is one knob here and
-/// it names one of four levels. A value that is not one of them is `info`.
-pub fn log_filter() -> LevelFilter {
-    match env("CP2CL_LOG_LEVEL") {
-        Some(level) => level.parse().unwrap_or(LevelFilter::INFO),
-        None => LevelFilter::INFO,
-    }
-}
 
 /// Where the program keeps what it has to remember — the identity it presents to
 /// the phone now, its settings once there are any — and where it reads the
@@ -142,7 +110,12 @@ fn vendor_from_compatible(raw: &[u8]) -> Option<String> {
     (!vendor.is_empty()).then(|| vendor.to_string())
 }
 
-#[derive(Debug, Clone)]
+/// Everything the operator can tune, and nothing that is not a choice.
+///
+/// The field names are the file's: a field is `log_level`, `wireless`,
+/// `wifi_iface` or `bt_adapter` in `/etc/cp2cl/config.json`, and absent from it
+/// is what `Default` says.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// Take CarPlay over Bluetooth and Wi-Fi instead of the cable.
     ///
@@ -156,32 +129,24 @@ pub struct Config {
     /// phone is told to connect back to, and which hostapd configuration in
     /// `/etc/hostapd` is the one being read.
     pub wifi_iface: String,
-    /// The CarLife video channel takes its pictures from this file instead of
-    /// from the CarPlay session, when the operator names one. Nothing to do with
-    /// a phone: it is how the channel and the car's decoder are exercised
-    /// without one.
-    pub input_file: Option<PathBuf>,
     /// Linux only: the Bluetooth adapter, as BlueZ names it.
     pub bt_adapter: String,
-    /// The screen the settings page picked, out of `/etc/cp2cl/config.json`.
-    /// `main` fills it in at startup and `carlife::gadget` again for each
-    /// session; empty is the car's own screen.
+    /// How much goes to the terminal: `error`, `warn`, `info` or `debug`. The
+    /// copy under `/var/log` is not held to it — see `crate::logging`.
+    pub log_level: LevelFilter,
+    /// The screen the settings page picked. `main` reads it at startup and
+    /// `carlife::gadget` again for each session; empty is the car's own screen.
     pub screen: crate::settings::Screen,
 }
 
-impl Config {
-    pub fn from_env() -> Self {
-        let bt_adapter = env_or("CP2CL_BT_ADAPTER", "hci0");
+impl Default for Config {
+    /// A wireless accessory at `info`, on the interfaces this board has.
+    fn default() -> Self {
         Self {
-            // Wireless is what this is for: the board is reached as an
-            // accessory over Bluetooth and Wi-Fi. `CP2CL_WIRELESS=0` is the way
-            // back to the cable, for a machine with no radio to use.
-            wireless: std::env::var("CP2CL_WIRELESS")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(true),
-            wifi_iface: env_or("CP2CL_WIFI_IFACE", "wlan0"),
-            input_file: env("CP2CL_INPUT_FILE").map(PathBuf::from),
-            bt_adapter,
+            wireless: true,
+            wifi_iface: "wlan0".to_string(),
+            bt_adapter: "hci0".to_string(),
+            log_level: LevelFilter::INFO,
             screen: crate::settings::Screen::default(),
         }
     }

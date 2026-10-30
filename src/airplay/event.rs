@@ -298,8 +298,8 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
         //
         // Touch is left out of it: a finger drag is one line per pointer move,
         // and every one of them says the same thing — a coordinate on the
-        // screen the car was answered with. `CP2CL_LOG_LEVEL=debug` brings the
-        // keys and the wheel back.
+        // screen the car was answered with. `"log_level": "debug"` in the
+        // configuration brings the keys and the wheel back.
         if !matches!(cmd, Command::Touch(_)) {
             tracing::debug!("carplay.event.sending cmd={cmd:?}");
         }

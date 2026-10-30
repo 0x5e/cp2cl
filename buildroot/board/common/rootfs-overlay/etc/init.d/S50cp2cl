@@ -5,9 +5,9 @@
 # after it — the program waits for the three itself and says in its log what it
 # was waiting for. What it reads out of /etc/hostapd is a file, not the daemon.
 #
-# The program has no settings file and needs no environment: every value it
-# takes from outside has a default in it, and the state it keeps — the identity
-# it presents to the phone — lives in /etc/cp2cl, which it creates itself.
+# The program needs no environment: every value it takes from outside is in
+# /etc/cp2cl/config.json, which it creates itself out of the defaults, and so is
+# the state it keeps — the identity it presents to the phone.
 case "$1" in
 	start)
 		printf 'Starting cp2cl: '
