@@ -467,6 +467,7 @@ where
         // Nothing is assumed about the datum before the car has named one, and a
         // fix that arrives before it would not be subscribed to anyway.
         gcj02: false,
+        car_version: None,
         vehicle,
         up: false,
         last_touch: None,
@@ -940,6 +941,13 @@ struct Session<'a, W> {
     /// car names one of the two when it is asked to start reporting, and the
     /// phone's maps are in the datum the satellites are in.
     gcj02: bool,
+    /// The protocol version the car named when it opened the session, major and
+    /// then minor, as it sent them. The major number is what decides whether the
+    /// car is asked which of its own data it can report: a car speaking 2 or
+    /// below is not asked, because the question is not in that version. `None`
+    /// is a car that has not named one, and it is left unasked for the same
+    /// reason.
+    car_version: Option<(i32, i32)>,
     /// The iAP2 side's sending half, shared with whichever session is up: a
     /// position only reaches the phone through it.
     vehicle: Arc<Vehicle>,
@@ -1038,6 +1046,10 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 );
                 self.status
                     .with(|s| s.carlife.protocol = Some((major, minor)));
+                // Kept here rather than read back out of the page: what depends
+                // on it is a message sent once, minutes before anything looks at
+                // the page.
+                self.car_version = Some((major, minor));
                 let body = proto::protocol_version_match_status(proto::MATCH);
                 self.send(MATCH_STATUS, &body).await?;
             }
@@ -1079,9 +1091,17 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // its feature switches, and which of its own data it can report.
                 // The second is asked whether or not a route ever starts — the
                 // answer is a property of the car, and a fix is worth having
-                // either way.
+                // either way, but only from a car that speaks protocol 3: the
+                // question is not in the version before it, and a car that
+                // cannot read it is a car left waiting for something else. The
+                // car names its version before it asks who is there, so the
+                // answer is known by the time this is decided. A car that
+                // reports its data without being asked is read all the same:
+                // every arm of `handle` that takes a report stands on its own.
                 self.send(FEATURE_CONFIG_REQUEST, &[]).await?;
-                self.send(CAR_DATA_SUBSCRIBE, &[]).await?;
+                if self.car_version.is_some_and(|(major, _)| major > 2) {
+                    self.send(CAR_DATA_SUBSCRIBE, &[]).await?;
+                }
                 // And the state of this device's own modules, which at this
                 // point is all four of them idle.
                 let body = proto::modules_at_rest();
@@ -2785,6 +2805,20 @@ mod tests {
         /// way a phone answers it: the verdict on that channel is one of the
         /// seven, and it arrives after `MD_INFO` rather than before it.
         async fn introduce(&mut self, channel: &str) -> frame::Message {
+            self.introduce_as(channel, 3).await
+        }
+
+        /// The same, with the protocol the car announces named. It is the first
+        /// thing a car says, and it decides whether the car is asked which of
+        /// its own data it can report — so a car below 3 has no such message
+        /// between the features and the module report.
+        async fn introduce_as(&mut self, channel: &str, major: i32) -> frame::Message {
+            let mut version = Vec::new();
+            proto::put_int(&mut version, 1, major);
+            proto::put_int(&mut version, 2, 0);
+            self.send(HU_PROTOCOL_VERSION, &version).await;
+            self.expect(MATCH_STATUS).await;
+
             self.send(HU_STATISTIC_INFO, &statistics(channel)).await;
             self.send(HU_INFO, &[]).await;
 
@@ -2793,7 +2827,9 @@ mod tests {
             self.expect(SCREEN_ON).await;
             let verdict = self.expect(MD_AUTHEN_RESULT).await;
             self.expect(FEATURE_CONFIG_REQUEST).await;
-            self.expect(CAR_DATA_SUBSCRIBE).await;
+            if major > 2 {
+                self.expect(CAR_DATA_SUBSCRIBE).await;
+            }
             self.expect(MODULE_STATUS).await;
             verdict
         }
@@ -2807,12 +2843,6 @@ mod tests {
             asked: proto::VideoEncoderInfo,
             served: proto::VideoEncoderInfo,
         ) {
-            let mut version = Vec::new();
-            proto::put_int(&mut version, 1, 1);
-            proto::put_int(&mut version, 2, 0);
-            self.send(HU_PROTOCOL_VERSION, &version).await;
-            self.expect(MATCH_STATUS).await;
-
             self.introduce(channel).await;
 
             self.send(HU_VIDEO_ENCODER_INIT, &proto::video_encoder_info(asked))
@@ -4680,6 +4710,56 @@ mod tests {
         assert_eq!(clock(1_709_164_800_000), "2024-02-29T08:00:00+08:00");
         // And no stamp at all is said to be nothing rather than 1970.
         assert_eq!(clock(0), "none");
+    }
+
+    /// A car that speaks protocol 2 is not asked which of its own data it can
+    /// report: that question arrived with 3. What it reports anyway is read all
+    /// the same, because nothing that takes a report is behind having asked.
+    #[tokio::test]
+    async fn a_car_below_protocol_three_is_not_asked_for_its_data_but_is_heard() {
+        let cfg = Config::from_env();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+        let mut carplay = |_: bool| {};
+        let status = Arc::new(Status::new());
+        let reported = status.clone();
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            // The introduction expects no `CAR_DATA_SUBSCRIBE` between the
+            // features and the module report, which is the assertion: it would
+            // have arrived there.
+            car.introduce_as("20062100", 2).await;
+
+            // A car that reports regardless, which is the other half: the
+            // position reaches the page, and so does the speed.
+            car.send(HU_CAR_GPS, &position()).await;
+            car.send(HU_CAR_VELOCITY, &speed(37)).await;
+            // A message the session answers, so that both are known to have been
+            // read by the time the page is looked at.
+            car.send(HU_GO_TO_FOREGROUND, &[]).await;
+            car.expect(GO_TO_FOREGROUND_RESPONSE).await;
+
+            let carlife = reported.json()["carlife"].clone();
+            assert_eq!(carlife["gps"]["latitude"], 30_317_880);
+            assert_eq!(carlife["speed"], 37);
+        });
+
+        run(
+            device,
+            &Frames::None,
+            &cfg,
+            None,
+            &mut |_, _, _| {},
+            no_icon(),
+            EventSink::new(),
+            &mut carplay,
+            &no_tap(),
+            status,
+            Arc::new(Vehicle::default()),
+        )
+        .await
+        .expect("the session ends cleanly");
+        car.await.unwrap();
     }
 
     /// The car's position is asked for as soon as the car has said what it is,
