@@ -92,6 +92,11 @@ const MEDIA_PAUSE: u32 = 0x0003_0003;
 const MEDIA_RESUME_PLAY: u32 = 0x0003_0004;
 const MEDIA_DATA: u32 = 0x0003_0006;
 
+/// The picture the panel is given for a song whose app sent no cover: the
+/// reference app's own placeholder, a note on a dark blue field, which is what
+/// it falls back to rather than sending a cover field with nothing in it.
+const PLACEHOLDER_ART: &str = "icons/iv_music_pic.jpg";
+
 // The navigation prompt has a channel of its own, with the same three messages
 // in the same order. See the guide's §10.4 and CarLifeVehicleLib's
 // `CommonParams.java`.
@@ -2116,7 +2121,8 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // it: a file transfer names no song, so there is no later
                 // moment at which the two could be told apart, and a new song
                 // that arrives without a picture would otherwise wear the last
-                // one's. It goes down here, and the song is sent without it.
+                // one's. It goes down here, and the song goes out with the
+                // placeholder until its own cover arrives.
                 let started = update.duration_s.is_some();
                 let before = self.track.clone();
                 self.track.merge(update);
@@ -2212,13 +2218,13 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // A file transfer that carried nothing is the phone saying this
                 // song has no picture. It is not ignored: it takes the place of
                 // the cover that is held — which is what puts the last song's
-                // down — and the message that follows carries no `albumArt` at
-                // all rather than a zero-length one.
+                // down — and the message that follows carries the placeholder
+                // instead, as a phone with a cover to draw would have sent one.
                 if self.art.as_deref() == Some(image.as_slice()) {
                     return Ok(());
                 }
                 if image.is_empty() {
-                    tracing::debug!("carlife.media_cover_empty action=send_without_cover");
+                    tracing::debug!("carlife.media_cover_empty action=send_placeholder");
                 }
                 self.art = Some(image);
                 // The page draws it as soon as it is here rather than when the
@@ -2255,11 +2261,26 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
 
     /// And the cover, which the page draws from a path of its own.
     ///
-    /// A cover that has just been put down is reported as one: the page draws
-    /// nothing rather than the picture of a song that has finished.
+    /// The same picture the car is given, `cover()` and all: the page and the
+    /// panel are meant to show one thing, and a cover that differs between them
+    /// would be a difference with nothing behind it.
     fn publish_cover(&self) {
-        self.status
-            .cover_changed(self.art.clone().unwrap_or_default());
+        self.status.cover_changed(self.cover().to_vec());
+    }
+
+    /// The cover for the song: the phone's, or the reference app's placeholder
+    /// when the phone sent none.
+    ///
+    /// A song whose app has no cover is not a song without a picture on the
+    /// panel — the reference app sends its own placeholder rather than a field
+    /// with nothing in it, and so does this. `crate::artwork` decides the size
+    /// of a cover the phone sent; the placeholder is small and fixed, and goes
+    /// as it was built in.
+    fn cover(&self) -> &[u8] {
+        match self.art.as_deref() {
+            Some(art) if !art.is_empty() => art,
+            _ => crate::assets::get(PLACEHOLDER_ART).expect("assets are built in"),
+        }
     }
 
     /// The whole of what is known about the song, as the car's one message.
@@ -2274,22 +2295,25 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         let song = self.track.song.as_deref().unwrap_or_default();
         let artist = self.track.artist.as_deref().unwrap_or_default();
         let album = self.track.album.as_deref().unwrap_or_default();
-        let source = self.track.source.as_deref().unwrap_or_default();
-        // The size rather than a flag, so this line and the car's own can be put
-        // side by side: the panel takes the picture from this message and
-        // nothing else, so a size that does not match is the whole difference.
+        // The source the car is given is a stamp, not the app: see
+        // `proto::media_info`. The size rather than a flag, so this line and the
+        // car's own can be put side by side: the panel takes the picture from
+        // this message and nothing else, so a size that does not match is the
+        // whole difference.
         //
         // `debug` rather than `info`: an app that puts its lyrics in the title
         // has the phone sending a new one per line, so this is per-event detail
         // however much it looks like one line per song.
-        let cover = self.art.as_ref().map_or(0.0, |art| art.len() as f64 / 1024.0);
+        let cover = self.cover();
+        let source = proto::source_stamp();
         tracing::debug!(
-            "carlife.msg.send service_type={} source={source:?} song={song:?} artist={artist:?} \
-             album={album:?} albumArt_kb={cover:.1} duration={}",
+            "carlife.msg.send service_type={} source={source} song={song:?} artist={artist:?} \
+             album={album:?} albumArt_kb={:.1} duration={}",
             names::ServiceType(MEDIA_INFO),
+            cover.len() as f64 / 1024.0,
             self.track.duration_s.unwrap_or(0)
         );
-        let body = proto::media_info(&self.track, self.art.as_deref().filter(|art| !art.is_empty()));
+        let body = proto::media_info(&self.track, cover, &source);
         self.send(MEDIA_INFO, &body).await
     }
 
@@ -2624,6 +2648,35 @@ mod tests {
     /// The car's control of a module, as the two fields it is.
     fn control(module: i32, state: i32) -> proto::ModuleControl {
         proto::ModuleControl { module, state }
+    }
+
+    /// The cover the panel is given for a song whose app sent none.
+    fn placeholder() -> &'static [u8] {
+        crate::assets::get(PLACEHOLDER_ART).expect("the placeholder is built in")
+    }
+
+    /// The message the panel should have been given for `track` and `cover`,
+    /// built again from the message that was: `source` is the moment it was
+    /// built, which a second build cannot match, so it is taken from `seen`.
+    /// Every other field — the ones that say what the song is — is compared
+    /// byte for byte.
+    fn rebuilt(seen: &[u8], track: &Track, cover: &[u8]) -> Vec<u8> {
+        proto::media_info(track, cover, stamp_of(seen))
+    }
+
+    /// The stamp out of a message that carried one: `source` is field 1, a
+    /// length-delimited string, and it is the first field written. Thirteen
+    /// bytes of it, so the length is one byte of its own.
+    fn stamp_of(body: &[u8]) -> &str {
+        std::str::from_utf8(&body[2..2 + usize::from(body[1])]).unwrap_or_default()
+    }
+
+    /// The placeholder goes out where a cover would, so it has to be a file the
+    /// car can draw: a JPEG, which is what a cover is on this wire and what the
+    /// reference app compresses every one of its own to.
+    #[test]
+    fn the_placeholder_is_a_picture() {
+        assert_eq!(&placeholder()[..2], b"\xff\xd8");
     }
 
     #[test]
@@ -3711,12 +3764,13 @@ mod tests {
             let named = car.expect(MEDIA_INFO).await;
             assert_eq!(
                 named.body,
-                proto::media_info(
+                rebuilt(
+                    &named.body,
                     &Track {
                         song: Some("Reeperbahn".into()),
                         ..Track::default()
                     },
-                    None
+                    placeholder()
                 )
             );
 
@@ -3728,13 +3782,14 @@ mod tests {
             let described = car.expect(MEDIA_INFO).await;
             assert_eq!(
                 described.body,
-                proto::media_info(
+                rebuilt(
+                    &described.body,
                     &Track {
                         song: Some("Reeperbahn".into()),
                         artist: Some("Hamburg".into()),
                         ..Track::default()
                     },
-                    None
+                    placeholder()
                 )
             );
 
@@ -3743,13 +3798,14 @@ mod tests {
             let covered = car.expect(MEDIA_INFO).await;
             assert_eq!(
                 covered.body,
-                proto::media_info(
+                rebuilt(
+                    &covered.body,
                     &Track {
                         song: Some("Reeperbahn".into()),
                         artist: Some("Hamburg".into()),
                         ..Track::default()
                     },
-                    Some(&[0xff, 0xd8, 0xff])
+                    &[0xff, 0xd8, 0xff]
                 )
             );
 
@@ -3890,12 +3946,13 @@ mod tests {
             let covered = car.expect(MEDIA_INFO).await;
             assert_eq!(
                 covered.body,
-                proto::media_info(
+                rebuilt(
+                    &covered.body,
                     &Track {
                         song: Some("Reeperbahn".into()),
                         ..Track::default()
                     },
-                    Some(&[0xff, 0xd8, 0xff])
+                    &[0xff, 0xd8, 0xff]
                 )
             );
         });
@@ -3951,7 +4008,7 @@ mod tests {
             let covered = car.expect(MEDIA_INFO).await;
             assert_eq!(
                 covered.body,
-                proto::media_info(&reeperbahn, Some(&[0xff, 0xd8]))
+                rebuilt(&covered.body, &reeperbahn, &[0xff, 0xd8])
             );
 
             // The next line of the lyrics: a title, and nothing else said.
@@ -3964,10 +4021,7 @@ mod tests {
                 song: Some("Reeperbahn — line two".into()),
                 ..reeperbahn.clone()
             };
-            assert_eq!(
-                told.body,
-                proto::media_info(&renamed, Some(&[0xff, 0xd8]))
-            );
+            assert_eq!(told.body, rebuilt(&told.body, &renamed, &[0xff, 0xd8]));
         });
 
         run(
@@ -3990,8 +4044,8 @@ mod tests {
 
     /// A file transfer that carried nothing is the phone saying the song has no
     /// picture. It is kept as the cover that is held, so the one before it goes
-    /// down with it — and the message that follows carries no `albumArt` at all
-    /// rather than a field with nothing in it to draw.
+    /// down with it — and the message that follows carries the placeholder,
+    /// which is what a phone with no cover of its own sends.
     #[tokio::test]
     async fn an_empty_cover_puts_the_last_one_down() {
         let cfg = Config::from_env();
@@ -4019,12 +4073,12 @@ mod tests {
             let art = vec![0xff, 0xd8, 0xff];
             sink.playing(Playing::Artwork(art.clone()));
             let told = car.expect(MEDIA_INFO).await;
-            assert_eq!(told.body, proto::media_info(&song, Some(&art)));
+            assert_eq!(told.body, rebuilt(&told.body, &song, &art));
 
             // And the phone saying there is none takes it back.
             sink.playing(Playing::Artwork(Vec::new()));
             let told = car.expect(MEDIA_INFO).await;
-            assert_eq!(told.body, proto::media_info(&song, None));
+            assert_eq!(told.body, rebuilt(&told.body, &song, placeholder()));
         });
 
         run(
@@ -4047,8 +4101,8 @@ mod tests {
 
     /// A length is what says a song has started, and the cover that is held
     /// belongs to the one before it. A file transfer names no song, so the new
-    /// one is sent without a cover rather than wearing the last one's — and the
-    /// page puts its picture down with it.
+    /// one is sent with the placeholder rather than wearing the last one's — and
+    /// the page is given the same picture the car is.
     #[tokio::test]
     async fn a_song_with_a_length_puts_the_last_cover_down() {
         let cfg = Config::from_env();
@@ -4082,19 +4136,23 @@ mod tests {
             let art = vec![0xff, 0xd8, 0xff];
             sink.playing(Playing::Artwork(art.clone()));
             let told = car.expect(MEDIA_INFO).await;
-            assert_eq!(told.body, proto::media_info(&first, Some(&art)));
+            assert_eq!(told.body, rebuilt(&told.body, &first, &art));
             assert!(page.cover().is_some(), "the page has the picture");
 
             // The next song announces itself with its length.
             sink.playing(Playing::Track(next.clone()));
             let told = car.expect(MEDIA_INFO).await;
-            assert_eq!(told.body, proto::media_info(&next, None));
-            assert!(page.cover().is_none(), "and the page puts it down");
+            assert_eq!(told.body, rebuilt(&told.body, &next, placeholder()));
+            assert_eq!(
+                page.cover().expect("the page has one").bytes.as_slice(),
+                placeholder(),
+                "and the page is given the placeholder"
+            );
 
             // Its own picture then goes out with it, as any cover does.
             sink.playing(Playing::Artwork(vec![0x89, 0x50]));
             let told = car.expect(MEDIA_INFO).await;
-            assert_eq!(told.body, proto::media_info(&next, Some(&[0x89, 0x50])));
+            assert_eq!(told.body, rebuilt(&told.body, &next, &[0x89, 0x50]));
         });
 
         run(
@@ -4115,9 +4173,9 @@ mod tests {
         car.await.unwrap();
     }
 
-    /// The app the phone is playing from is not a song. It is sent with every
-    /// change of play state, and a panel emptied by one of those is worse than
-    /// one the car never updated.
+    /// The app the phone is playing from is not a song. It arrives with every
+    /// change of play state, and a panel told an app name and nothing else is
+    /// worse than one the car never updated.
     #[tokio::test]
     async fn the_play_state_on_its_own_is_not_a_song() {
         let cfg = Config::from_env();
@@ -4147,13 +4205,13 @@ mod tests {
             let told = car.expect(MEDIA_INFO).await;
             assert_eq!(
                 told.body,
-                proto::media_info(
+                rebuilt(
+                    &told.body,
                     &Track {
-                        source: Some("Music".into()),
                         song: Some("Reeperbahn".into()),
                         ..Track::default()
                     },
-                    None
+                    placeholder()
                 )
             );
         });
@@ -4204,12 +4262,13 @@ mod tests {
             let told = car.expect(MEDIA_INFO).await;
             assert_eq!(
                 told.body,
-                proto::media_info(
+                rebuilt(
+                    &told.body,
                     &Track {
                         song: Some("Reeperbahn".into()),
                         ..Track::default()
                     },
-                    None
+                    placeholder()
                 )
             );
 
@@ -4221,13 +4280,14 @@ mod tests {
             let told = car.expect(MEDIA_INFO).await;
             assert_eq!(
                 told.body,
-                proto::media_info(
+                rebuilt(
+                    &told.body,
                     &Track {
                         song: Some("Reeperbahn".into()),
                         artist: Some("Hamburg".into()),
                         ..Track::default()
                     },
-                    None
+                    placeholder()
                 )
             );
 
@@ -4239,14 +4299,15 @@ mod tests {
             let told = car.expect(MEDIA_INFO).await;
             assert_eq!(
                 told.body,
-                proto::media_info(
+                rebuilt(
+                    &told.body,
                     &Track {
                         song: Some("Reeperbahn".into()),
                         artist: Some("Hamburg".into()),
                         album: Some("Stadt".into()),
                         ..Track::default()
                     },
-                    None
+                    placeholder()
                 )
             );
         });
@@ -4295,13 +4356,13 @@ mod tests {
             sink.playing(Playing::Artwork(vec![0xff; proto::MAX_ART + 1]));
             sink.playing(Playing::Track(track.clone()));
             let told = car.expect(MEDIA_INFO).await;
-            assert_eq!(told.body, proto::media_info(&track, None));
+            assert_eq!(told.body, rebuilt(&told.body, &track, placeholder()));
 
             // And one that fits exactly is the car's to draw.
             let fits = vec![0x89; proto::MAX_ART];
             sink.playing(Playing::Artwork(fits.clone()));
             let covered = car.expect(MEDIA_INFO).await;
-            assert_eq!(covered.body, proto::media_info(&track, Some(&fits)));
+            assert_eq!(covered.body, rebuilt(&covered.body, &track, &fits));
         });
 
         run(

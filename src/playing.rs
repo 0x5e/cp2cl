@@ -39,7 +39,8 @@ use iap2_csm::CsmMessage;
 /// album is empty, the panel is told that.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Track {
-    /// The app it is playing from, which the car shows as the song's source.
+    /// The app it is playing from, which the page shows as the song's source.
+    /// The car is not given it: see `crate::carlife::proto::media_info`.
     pub source: Option<String>,
     pub song: Option<String>,
     pub artist: Option<String>,

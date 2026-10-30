@@ -13,6 +13,8 @@
 //! forgiving: the car reads these with a generated parser, so a body that does
 //! not decode makes the message disappear rather than fail loudly.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use crate::playing::Track;
 
 /// One field, as it appears on the wire.
@@ -145,6 +147,13 @@ pub fn put_str(out: &mut Vec<u8>, number: u32, value: &str) {
     if value.is_empty() {
         return;
     }
+    put_bytes(out, number, value.as_bytes());
+}
+
+/// A string field the guide calls required: written even when it is empty,
+/// because a body without one is a body the car's parser drops rather than reads
+/// as blank.
+fn put_required_str(out: &mut Vec<u8>, number: u32, value: &str) {
     put_bytes(out, number, value.as_bytes());
 }
 
@@ -298,33 +307,59 @@ pub const MAX_ART: usize = 30 * 1024;
 /// "开始播放或者切换歌曲时" (guide §13.2).
 ///
 /// `CarlifeMediaInfo` is nine fields and the guide calls every one of them
-/// required. What goes out is what has a value: the four strings when they are
-/// not empty, `albumArt` when there is a cover, `duration` when the phone has
-/// said it. The other three — `playlistNum`, `songId` and `mode` — never,
-/// because the phone has nothing behind them: see `crate::playing` for which
-/// subscription is missing and why a zero would be a claim rather than a
-/// silence. A field left out carries its default, which is the same value an
-/// empty one would carry, and the car's parser hands its callbacks those
-/// defaults for whatever the body does not say. `albumArt` is written only when
-/// there is a picture: an empty one is not a picture, and a field that says
-/// nothing is better left out than sent with a length of zero.
+/// required, so all nine are written whether or not there is a value behind
+/// them: the car's parser drops a body that is missing one, whole, and a song it
+/// is not told about is not a song it shows.
+///
+/// `source` is not the app's name, however the field is described: the
+/// reference app writes the moment the message was built there whenever its
+/// music source gives it no URL to name instead (`MusicInfoSender`
+/// `sendMusicInfoToVehicle`), and this bridge's music source is CarPlay, which
+/// has no URL to give. The app is on the page, not on this wire. `songId` is the
+/// same `"-1"`, for a music source with no id, and `playlistNum` and `mode` are
+/// what a reference phone reports for a song playing out of no queue: no count,
+/// and a playlist that repeats. `duration` goes as zero until the phone has
+/// said it.
 ///
 /// `duration` is in seconds, which is the unit the guide gives it, and
 /// `albumArt` is the cover as the phone transferred it — a file, not a bitmap
-/// this side drew.
-pub fn media_info(track: &Track, album_art: Option<&[u8]>) -> Vec<u8> {
+/// this side drew. A song whose app sent none carries the reference app's own
+/// placeholder (`crate::assets`), so there is always a picture: a body that
+/// names no cover and a body that draws a blank one look the same on the panel,
+/// and neither is what a phone sends.
+pub fn media_info(track: &Track, album_art: &[u8], source: &str) -> Vec<u8> {
     let mut out = Vec::new();
-    put_str(&mut out, 1, track.source.as_deref().unwrap_or_default());
-    put_str(&mut out, 2, track.song.as_deref().unwrap_or_default());
-    put_str(&mut out, 3, track.artist.as_deref().unwrap_or_default());
-    put_str(&mut out, 4, track.album.as_deref().unwrap_or_default());
-    if let Some(art) = album_art {
-        put_bytes(&mut out, 5, art);
-    }
-    if let Some(seconds) = track.duration_s {
-        put_int(&mut out, 6, seconds);
-    }
+    put_required_str(&mut out, 1, source);
+    put_required_str(&mut out, 2, track.song.as_deref().unwrap_or_default());
+    put_required_str(&mut out, 3, track.artist.as_deref().unwrap_or_default());
+    put_required_str(&mut out, 4, track.album.as_deref().unwrap_or_default());
+    put_bytes(&mut out, 5, album_art);
+    put_int(&mut out, 6, track.duration_s.unwrap_or(0));
+    // No queue is behind this song, and a count of zero says so rather than
+    // leaving the field, which the car calls required, out.
+    put_int(&mut out, 7, 0);
+    put_required_str(&mut out, 8, SONG_ID_NONE);
+    put_int(&mut out, 9, PLAYMODE_REPEATE_ALL);
     out
+}
+
+/// `PlayMode`. The phone has no such attribute, so what goes out is the mode a
+/// reference phone reports while its queue plays on.
+pub const PLAYMODE_REPEATE_ALL: i32 = 2;
+
+/// What the reference app writes for `songId` when its music source gives no id.
+/// The phone behind this bridge never gives one — see `crate::playing` — and a
+/// field left out is a body the car drops rather than a song with no id.
+pub const SONG_ID_NONE: &str = "-1";
+
+/// What the reference app writes for `media_info`'s `source` when its music
+/// source gives no URL: the moment the message was built, in milliseconds.
+pub fn source_stamp() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .to_string()
 }
 
 /// `MSG_CMD_MODULE_STATUS` — the state of this device's own modules, which the
@@ -1130,41 +1165,68 @@ mod tests {
     #[test]
     fn the_panel_is_told_the_song_field_by_field() {
         let track = Track {
-            source: Some("Music".into()),
             song: Some("Reeperbahn".into()),
             artist: Some("Hamburg".into()),
             album: Some("Stadt".into()),
             duration_s: Some(239),
+            ..Track::default()
         };
-        let body = media_info(&track, Some(&[0xff, 0xd8, 0xff]));
+        let body = media_info(&track, &[0xff, 0xd8, 0xff], "1793333674727");
 
-        assert_eq!(str_of(&body, 1), Some("Music"));
+        assert_eq!(str_of(&body, 1), Some("1793333674727"));
         assert_eq!(str_of(&body, 2), Some("Reeperbahn"));
         assert_eq!(str_of(&body, 3), Some("Hamburg"));
         assert_eq!(str_of(&body, 4), Some("Stadt"));
         assert_eq!(bytes_of(&body, 5), Some(&[0xffu8, 0xd8, 0xff][..]));
         assert_eq!(int_of(&body, 6), Some(239));
 
-        // The three the phone has nothing to say about are absent rather than
-        // zero: a `mode` of 0 would be the panel told single-track repeat.
-        assert_eq!(int_of(&body, 7), None);
-        assert_eq!(str_of(&body, 8), None);
-        assert_eq!(int_of(&body, 9), None);
+        // The three the phone has nothing behind still go out: the car's parser
+        // drops a body that is missing one of them, and a song it is not told
+        // about is not a song it shows. What goes in them is what the reference
+        // app writes for a source with no queue and no id behind it.
+        assert_eq!(int_of(&body, 7), Some(0));
+        assert_eq!(str_of(&body, 8), Some(SONG_ID_NONE));
+        assert_eq!(int_of(&body, 9), Some(i64::from(PLAYMODE_REPEATE_ALL)));
     }
 
-    /// Nothing is written for a field there is nothing behind, so a song and
-    /// nothing else is a body of one field — and no cover at all is no cover
-    /// field, not an empty one.
+    /// The stamp is what the car is given for `source`, so it has to be the
+    /// thing the reference app writes: milliseconds since the epoch, thirteen
+    /// digits, and nothing else.
     #[test]
-    fn a_song_with_nothing_said_about_it_carries_only_its_name() {
+    fn the_source_says_when_the_message_was_built() {
+        let stamp = source_stamp();
+        assert_eq!(stamp.len(), 13, "{stamp}");
+        assert!(stamp.bytes().all(|b| b.is_ascii_digit()), "{stamp}");
+    }
+
+    /// Every one of the nine fields is written even when there is nothing behind
+    /// it, so a song and nothing else is a body of nine — an empty string and a
+    /// zero per field, an empty cover, and the two values the reference app
+    /// writes where it has nothing else.
+    #[test]
+    fn a_song_with_nothing_said_about_it_still_carries_every_field() {
         let body = media_info(
             &Track {
                 song: Some("Only".into()),
                 ..Track::default()
             },
-            None,
+            &[],
+            "1",
         );
-        assert_eq!(body, vec![0x12, 0x04, b'O', b'n', b'l', b'y']);
+        assert_eq!(
+            body,
+            vec![
+                0x0a, 0x01, b'1', // source
+                0x12, 0x04, b'O', b'n', b'l', b'y', // song
+                0x1a, 0x00, // artist
+                0x22, 0x00, // album
+                0x2a, 0x00, // albumArt
+                0x30, 0x00, // duration
+                0x38, 0x00, // playlistNum
+                0x42, 0x02, b'-', b'1', // songId
+                0x48, 0x02, // mode
+            ]
+        );
     }
 
     /// A cover is a file the phone sent, so it goes out byte for byte however
@@ -1177,13 +1239,14 @@ mod tests {
                 song: Some("Song".into()),
                 ..Track::default()
             },
-            Some(&art),
+            &art,
+            "1",
         );
         assert_eq!(bytes_of(&body, 5), Some(&art[..]));
-        // The song's field, then the cover's: a tag of its own and a length
-        // that no longer fits in one byte's worth of value.
-        assert_eq!(body[6], 0x2a);
-        assert_eq!(body[7], 0xc8);
+        // The four strings, then the cover's: a tag of its own and a length that
+        // no longer fits in one byte's worth of value.
+        assert_eq!(body[13], 0x2a);
+        assert_eq!(body[14], 0xc8);
     }
 
     #[test]
