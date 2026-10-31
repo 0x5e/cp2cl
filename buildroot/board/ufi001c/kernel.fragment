@@ -77,6 +77,15 @@ CONFIG_WCN36XX=y
 # ahead of it.
 CONFIG_BT_QCOMSMD=m
 
+# What the controller itself says, next to what the host decided. Off by default,
+# and the absence is not obvious: /sys/kernel/debug/bluetooth/hci0/ exists either
+# way -- the skeleton and the global l2cap/rfcomm/sco entries are made regardless
+# -- and what is missing is the per-controller files: identity (address and its
+# type), features (the LMP bits, which is where secure connections is answered),
+# and the per-connection ones. A pairing that fails between the halves is read
+# from here, because `bluetoothctl show` only reports what BlueZ cached.
+CONFIG_BT_DEBUGFS=y
+
 # The board's three LEDs (red power, green WLAN, blue WAN) are gpio-leds.
 CONFIG_LEDS_GPIO=y
 CONFIG_LEDS_TRIGGER_TIMER=y
