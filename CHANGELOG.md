@@ -15,6 +15,10 @@
 
 - `make firmware BOARD=nanopi-duo2|ufi001c|all` 选择目标板（默认 `nanopi-duo2`，`all` 依次构建两块板），构建镜像同时带 aarch64 与 armv7 交叉工具链。
 
+### 修复
+
+- 指示灯改按 `/sys/class/leds` 里名称中的颜色定位，按键改按 `gpio-keys` 平台设备定位，不再硬编码 NanoPi 的路径；UFI001C 的 LED 是 `red:power` / `green:wlan`，其输入设备名为 `GPIO Buttons`。
+
 ## v0.13.1 alpha — 2026-10-31
 
 ### 变更

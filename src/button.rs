@@ -18,9 +18,16 @@ use tokio::time::{sleep_until, Instant};
 /// How long the button has to stay down to count as held.
 const HELD: Duration = Duration::from_secs(3);
 
-/// The name the driver gives its device, which is how the node is found: this
-/// image has no udev, so there is no by-path link to ask.
-const NAME: &str = "gpio-keys";
+/// The name of the device-tree node the key belongs to, and the only part of its
+/// sysfs path that both boards agree on.
+///
+/// The input device's own name is not it: `gpio_keys` takes that from the node's
+/// `label`, so one tree reports `GPIO Buttons` and another reports `gpio-keys`,
+/// and matching on it ties this file to a string somebody chose. The node is
+/// called `gpio-keys` in both trees, and the platform device the driver binds to
+/// carries the node's name, so the resolved path of the input device runs
+/// through a `gpio-keys` directory either way.
+const DEVICE: &str = "gpio-keys";
 
 /// `EV_KEY`, and the value that says the key went down. Zero is the release and
 /// two is autorepeat, which this driver does not send.
@@ -39,7 +46,7 @@ const EVENT_LEN: usize = if std::mem::size_of::<usize>() == 4 {
 
 pub async fn watch() {
     let Some(path) = device() else {
-        tracing::warn!("button.unavailable name={NAME} consequence=long_press_unused");
+        tracing::warn!("button.unavailable device={DEVICE} consequence=long_press_unused");
         return;
     };
     let file = match File::open(&path) {
@@ -126,14 +133,24 @@ fn device() -> Option<PathBuf> {
         if !node.starts_with("event") {
             continue;
         }
-        let Ok(name) = std::fs::read_to_string(entry.path().join("device/name")) else {
+        // The class link points at the input device the driver registered, and
+        // its resolved path is what names the platform device above it.
+        let Ok(real) = std::fs::canonicalize(entry.path().join("device")) else {
             continue;
         };
-        if name.trim() == NAME {
+        if under_keys(&real) {
             return Some(Path::new("/dev/input").join(node));
         }
     }
     None
+}
+
+/// Whether a resolved input device sits under the key node's platform device:
+/// `/sys/devices/platform/gpio-keys/input/input1` either directly, or somewhere
+/// below the bus the node hangs off.
+fn under_keys(real: &Path) -> bool {
+    real.components()
+        .any(|part| part.as_os_str().to_str() == Some(DEVICE))
 }
 
 #[cfg(test)]
@@ -148,5 +165,20 @@ mod tests {
         record[EVENT_LEN - 6..EVENT_LEN - 4].copy_from_slice(&0x100u16.to_ne_bytes());
         record[EVENT_LEN - 4..].copy_from_slice(&DOWN.to_ne_bytes());
         assert_eq!(events(&record).collect::<Vec<_>>(), [(KEY, 0x100, DOWN)]);
+    }
+
+    /// The same node on both boards, under two different names for the input
+    /// device, and a neighbouring device that must not be taken for it.
+    #[test]
+    fn the_key_node_is_the_one_the_path_runs_through() {
+        assert!(under_keys(Path::new(
+            "/sys/devices/platform/gpio-keys/input/input1"
+        )));
+        assert!(under_keys(Path::new(
+            "/sys/devices/platform/soc@0/2000000.gpio/gpio-keys/input/input0"
+        )));
+        assert!(!under_keys(Path::new(
+            "/sys/devices/platform/pm8941-pwrkey/input/input0"
+        )));
     }
 }
