@@ -13,7 +13,7 @@
 
 ### 变更
 
-- `make firmware BOARD=<板名>` 选择目标板，构建镜像同时带 aarch64 与 armv7 交叉工具链。
+- `make firmware BOARD=nanopi-duo2|ufi001c|all` 选择目标板（默认 `nanopi-duo2`，`all` 依次构建两块板），构建镜像同时带 aarch64 与 armv7 交叉工具链。
 
 ## v0.13.1 alpha — 2026-10-31
 

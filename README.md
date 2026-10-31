@@ -474,9 +474,10 @@ The board runs an image this repository builds, not a distribution with things
 installed onto it. One command, from the checkout:
 
 ```bash
-make firmware                  # NanoPi Duo2, the default
-make firmware BOARD=ufi001c    # UFI001C
-# dist/buildroot-2025.02.19-cp2cl-nanopi_duo2-v0.11.0-<sha>.img.gz
+make firmware                    # NanoPi Duo2, the default
+make firmware BOARD=ufi001c      # UFI001C
+make firmware BOARD=all          # both, one after the other
+# dist/buildroot-2025.02.19-cp2cl-nanopi-duo2-v0.11.0-<sha>.img.gz
 ```
 
 Unpack it and write the `.img` to a card, then put the card in the board. The
@@ -640,7 +641,8 @@ apart, so change them together.
 **On a board that is not the Duo2.** `hostapd.conf` names this board's interface,
 SSID and passphrase; nothing else here is board-specific. A second board is a
 `buildroot/configs/<board>_defconfig` and a `buildroot/board/<board>/` directory,
-and `make firmware BOARD=<board>` builds it. The interface the file names is the
+and `make firmware BOARD=<board>` builds it once `<board>` is one of the names in
+`BOARDS` at the top of the `Makefile`. The interface the file names is the
 one wireless CarPlay looks for, so `wifi_iface` has to name it too when it
 is not `wlan0`. The controller is the first one under `/sys/class/udc`, so
 `musb-hdrc.4.auto` is not assumed, and neither is `usb0` or any other interface

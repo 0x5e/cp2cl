@@ -6,11 +6,21 @@
 # the cargo cache, so only the first build downloads anything.
 IMAGE  := cp2cl-builder
 
-# Which board a build is for, and therefore which Rust target it compiles. The
-# two boards are the two architectures in this repository: the NanoPi Duo2 is
-# armv7 hard-float, the UFI001C is aarch64. BOARD= also names the Buildroot
-# defconfig (`configs/$(BOARD)_defconfig`), so one word moves the whole build.
-BOARD ?= nanopi_duo2
+# Which firmware to build: `nanopi-duo2`, `ufi001c`, or `all` for every board in
+# turn. It decides the Rust target — the NanoPi Duo2 is armv7 hard-float, the
+# UFI001C is aarch64 — and the Buildroot defconfig a build starts from.
+BOARDS := nanopi-duo2 ufi001c
+BOARD  ?= nanopi-duo2
+
+ifeq ($(filter $(BOARD),$(BOARDS) all),)
+$(error BOARD is '$(BOARD)'; it is one of: $(BOARDS) all)
+endif
+
+# The underscore spelling: Buildroot names its defconfigs with one, and the build
+# volume is keyed the same way, so a board does not end up with two trees because
+# its name was written the other way round. A volume that changes name is a tree
+# built again from an empty download cache.
+BOARD_CFG := $(subst -,_,$(BOARD))
 
 ifeq ($(BOARD),ufi001c)
 TARGET    := aarch64-unknown-linux-musl
@@ -37,7 +47,7 @@ BR_IMAGE := cp2cl-buildroot
 # directories, module tree) is architecture-specific: a shared volume makes the
 # second board's build reuse the first board's objects, which fails somewhere
 # deep in the toolchain rather than at the configuration step.
-BR_VOL   := cp2cl-buildroot-out-$(BOARD)
+BR_VOL   := cp2cl-buildroot-out-$(BOARD_CFG)
 UID_GID  := $(shell id -u):$(shell id -g)
 # The uid of the build user in docker/buildroot.Dockerfile.
 BR_UID   := 1000
@@ -130,6 +140,17 @@ BR_RELEASE := { [ -e /build/.br-$(BR_VERSION) ] || { \
 
 .PHONY: all app test image firmware buildroot-image patched
 
+# `all` is not a board: it is every board, one build after another. Recursion
+# rather than a rule that builds both in one pass, because the Rust target and
+# the build volume are read once, when this makefile is, and one pass over two
+# boards would carry the first board's values into the second.
+ifeq ($(BOARD),all)
+all app test firmware:
+	@for b in $(BOARDS); do \
+		$(MAKE) --no-print-directory BOARD=$$b $@ || exit 1; \
+	done
+else
+
 # Both products: the program the board runs, and the image it runs from.
 # `make app` on its own is the program, which is what a change to the crate
 # needs; the image is a tree, a toolchain and a kernel on every build.
@@ -169,7 +190,8 @@ test: patched
 image:
 	docker build -t $(IMAGE) docker/
 
-# BOARD=<name> builds any board that has a configs/<name>_defconfig.
+# One board, out of the names at the top of this file; the defconfig is
+# `configs/<board>_defconfig`, and BOARD=all builds each of them in turn.
 #
 # The build directory is a named volume, not a bind mount: the host's filesystem
 # is case-insensitive and Buildroot's output is not. `dl/` goes in the volume too,
@@ -201,7 +223,7 @@ firmware: app buildroot-image
 		-e BR2_DL_DIR=/build/dl \
 		$(BR_IMAGE) sh -c 'chown $(BR_UID):$(BR_UID) /build \
 			&& su -s /bin/sh builder -c "$(BR_RELEASE) \
-				&& make -C /opt/buildroot O=/build BR2_EXTERNAL=/src/buildroot $(BOARD)_defconfig \
+				&& make -C /opt/buildroot O=/build BR2_EXTERNAL=/src/buildroot $(BOARD_CFG)_defconfig \
 				&& $(BR_FRESH) \
 				&& $(BR_REFRESH) \
 				&& make -C /opt/buildroot O=/build -j$$(nproc)"'
@@ -211,6 +233,8 @@ firmware: app buildroot-image
 			*) cat /build/images/$(PACKED) ;; \
 			esac > /out/$(notdir $(FW))'
 	@echo "image: $(FW)"
+
+endif
 
 # Once per machine, and again only when the Dockerfile changes.
 buildroot-image:
