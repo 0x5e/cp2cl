@@ -99,8 +99,10 @@ cat > "$BINARIES_DIR/flash.sh" <<'EOF'
 # The ramdisk finds the rootfs by its volume label, so where the bytes land only
 # decides where they land.
 #
-# There is no `fastboot flash boot`: boot.img is 15.6 MB and the boot partition
-# has 15.5 MB left after lk2nd. `--boot` is the way to use it.
+# There is no `fastboot flash boot boot.img`: the image is 15.6 MB and the boot
+# partition has 15.5 MB left after lk2nd. `--boot` is the way to use it, and
+# `boot` is where lk2nd itself goes — 428 KB, which is the first 512 KiB of the
+# partition and nothing more.
 #
 # When lk2nd boots nothing at all, its own log is what says why:
 #   fastboot oem log && fastboot get_staged log.txt
@@ -108,7 +110,7 @@ set -eu
 
 case "${1:-}" in
 --lk2nd)
-	fastboot flash lk2nd lk2nd-msm8916.img
+	fastboot flash boot lk2nd-msm8916.img
 	;;
 --boot)
 	fastboot boot boot.img
