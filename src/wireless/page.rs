@@ -33,6 +33,13 @@ const ANSWER: Duration = Duration::from_secs(15);
 /// on its own: dropping it is what makes it page us again.
 const STALE_SECS: u64 = 10;
 const STALE: Duration = Duration::from_secs(STALE_SECS);
+/// How many times a phone may refuse a page in a row before its entry here is
+/// dropped. A phone refuses by having deleted its half of the pairing, and no
+/// number of further pages brings a link key back: the address stays paired on
+/// this side, so every round after that fails the same way and says nothing
+/// above debug. A phone that is merely away times out instead, which is a
+/// different error and is not counted here.
+const REFUSALS: u32 = 3;
 
 /// What a removal from BlueZ's tree came back as, at every step.
 type Failure = Box<dyn std::error::Error + Send + Sync>;
@@ -74,6 +81,10 @@ pub(super) async fn run(
     round.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // When each phone was first seen on the link with no session on it.
     let mut waiting: HashMap<String, Instant> = HashMap::new();
+    // How many times each phone has refused a page in a row, since the pairing
+    // was last seen working. At `REFUSALS` the address is unpaired rather than
+    // called again, which is what takes it out of the list above.
+    let mut refused: HashMap<String, u32> = HashMap::new();
     // Said when the state changes rather than once a round: five seconds apart,
     // the line would be the only thing in the log for as long as a tunnel lasts.
     let mut held = false;
@@ -117,21 +128,53 @@ pub(super) async fn run(
         // A phone that left keeps no timer: one that comes back starts over.
         waiting.retain(|mac, _| phones.iter().any(|p| &p.mac == mac));
         let macs: Vec<String> = phones.iter().map(|p| p.mac.clone()).collect();
+        // Nor does it keep its refusals: the count is about this pairing, and
+        // one that is gone is not the one the next page is for.
+        refused.retain(|mac, _| macs.contains(mac));
         if to_call.as_ref() != Some(&macs) {
             tracing::info!("bt.paired_phones count={} macs={macs:?}", macs.len());
             to_call = Some(macs);
         }
         for Phone { path, mac, connected } in phones {
+            // A link is not a pairing. `Connected` goes up and down while the
+            // controller retries one that keeps failing — the same attempt a
+            // moment earlier reports `br-connection-already-connected` — and
+            // clearing the count here meant three refusals never became three
+            // in a row: every round that found the link up started from zero
+            // again and the phone was called for ever. Only a page the phone
+            // answered says the pairing works.
             if !connected {
                 waiting.remove(&mac);
-                call(&conn, &path, &mac).await;
+                match call(&conn, &path, &mac).await {
+                    Answer::Answered => {
+                        refused.remove(&mac);
+                    }
+                    Answer::Unanswered => {}
+                    Answer::Refused => {
+                        let count = refused.entry(mac.clone()).or_insert(0);
+                        *count += 1;
+                        let times = *count;
+                        if times >= REFUSALS {
+                            refused.remove(&mac);
+                            match unpair(&conn, &adapter, &path).await {
+                                Ok(()) => tracing::warn!(
+                                    "bt.page_given_up mac={mac} refused={times} action=unpaired"
+                                ),
+                                Err(e) => tracing::warn!(
+                                    "bt.page_given_up mac={mac} refused={times} \
+                                     action=unpair_failed err={e}"
+                                ),
+                            }
+                        }
+                    }
+                }
                 continue;
             }
             let on_link = waiting.entry(mac.clone()).or_insert_with(Instant::now).elapsed();
             if on_link < STALE {
                 // On the link but no channel yet: asking for the profile again is
                 // what LIVI does in the same state, and it costs one round trip.
-                call(&conn, &path, &mac).await;
+                let _ = call(&conn, &path, &mac).await;
                 continue;
             }
             waiting.remove(&mac);
@@ -141,14 +184,47 @@ pub(super) async fn run(
     }
 }
 
+/// What a page came to. The three are apart because only one of them is worth
+/// counting: a phone that is out of range times out, and giving up on it after
+/// three rounds would be giving up on a phone that was merely not there.
+enum Answer {
+    Answered,
+    /// The phone refused the link: it has no pairing for us any more.
+    Refused,
+    Unanswered,
+}
+
 /// Wakes one phone, or asks one that is already on the link for its iAP2 service
 /// again, and says what came of it.
-async fn call(conn: &Connection, path: &str, mac: &str) {
+async fn call(conn: &Connection, path: &str, mac: &str) -> Answer {
     match tokio::time::timeout(ANSWER, page(conn, path)).await {
-        Ok(Ok(())) => tracing::info!("bt.page_answered mac={mac}"),
-        Ok(Err(e)) => tracing::debug!("bt.page_unanswered mac={mac} err={e}"),
-        Err(_) => tracing::debug!("bt.page_deferred mac={mac} reason=timeout"),
+        Ok(Ok(())) => {
+            tracing::info!("bt.page_answered mac={mac}");
+            Answer::Answered
+        }
+        Ok(Err(e)) => {
+            tracing::debug!("bt.page_unanswered mac={mac} err={e}");
+            if refused(&e) {
+                Answer::Refused
+            } else {
+                Answer::Unanswered
+            }
+        }
+        Err(_) => {
+            tracing::debug!("bt.page_deferred mac={mac} reason=timeout");
+            Answer::Unanswered
+        }
     }
+}
+
+/// Whether BlueZ's error says the phone refused the link rather than missed it.
+///
+/// `br-connection-refused` is the name the kernel's `mgmt` layer gives the HCI
+/// status of the same meaning, and BlueZ puts it in the error it returns — so
+/// the string is the whole of what tells a phone that deleted its pairing apart
+/// from one that is a room away.
+fn refused(e: &zbus::Error) -> bool {
+    e.to_string().contains("br-connection-refused")
 }
 
 /// One page: the link, and the phone's iAP2 service on top of it.

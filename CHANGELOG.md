@@ -22,6 +22,7 @@
 ### 修复
 
 - UFI001C 上 iPhone 配对必然失败（数字比对后回 `Authentication Failure`，`0x05`），无线 CarPlay 停在配对之前：`modem` 分区里的 WCNSS 固件 `CNSS-PR-1-4-2` 算不出可用的确认值。改为随 rootfs 发布 DragonBoard 410c 的 `CNSS-PR-2-0-1-2`，`S05firmware` 让它优先于分区那份；Wi-Fi 的 NV 仍取 `persist` 的原厂校准。
+- 手机侧解绑后，主机侧不再无限重连：被拒（`br-connection-refused`）连续三次即记一行 `bt.page_given_up` 并删掉这条已失效的配对，重新配对后自动恢复。此前每 5 秒重试一次，只有 debug 级日志，且永远不会停。
 - 指示灯改按 `/sys/class/leds` 里名称中的颜色定位，按键改按 `gpio-keys` 平台设备定位，不再硬编码 NanoPi 的路径；UFI001C 的 LED 是 `red:power` / `green:wlan`，其输入设备名为 `GPIO Buttons`。
 
 ## v0.13.1 alpha — 2026-10-31
