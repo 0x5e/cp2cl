@@ -75,6 +75,15 @@ start() {
 		ln -sf "$blob" "$BASEDIR/target/${blob##*/}"
 	done
 
+	# An image built into the root filesystem takes precedence over the one on
+	# the modem partition, and goes in after the loop above so the link it just
+	# made is the one replaced. Only wcnss.mdt is linked: the bundled file is a
+	# non-split image, read whole, and the fragments beside it are never opened.
+	if [ -f /lib/firmware/wcnss/wcnss.mdt ]; then
+		ln -sf /lib/firmware/wcnss/wcnss.mdt "$BASEDIR/target/wcnss.mdt"
+		log "wcnss image from the root filesystem"
+	fi
+
 	# The NV blob is looked up as wlan/prima/WCNSS_qcom_wlan_nv.bin, which is the
 	# name in drivers/soc/qcom/wcnss_ctrl.c, not the flat one above.
 	nv=

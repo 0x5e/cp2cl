@@ -17,6 +17,17 @@ BOARD_DIR=$(cd "$(dirname "$0")" && pwd)
 # needs the directory to exist; the script does not make it.
 install -d -m 0755 "$TARGET_DIR/lib/firmware/msm-firmware-loader"
 
+# The WCNSS image ships in the root filesystem rather than being taken from the
+# modem partition, and S05firmware links this copy ahead of whatever the
+# partition holds. It is the DragonBoard 410c image (CNSS-PR-2-0-1-2-c1-74-
+# 130449-3) for the same APQ8016 + WCN3620 pair; the stock one on this board is
+# CNSS-PR-1-4-2, and the Bluetooth half of that one fails SSP secure-connections
+# pairing with an iPhone. The file is a non-split image, so the loader reads it
+# whole and the fragments on the partition are never opened.
+install -d -m 0755 "$TARGET_DIR/lib/firmware/wcnss"
+install -m 0644 "$BOARD_DIR/firmware/wcnss.mdt" \
+	"$TARGET_DIR/lib/firmware/wcnss/wcnss.mdt"
+
 # btmgmt is built but never installed. bluez lists it under noinst_PROGRAMS in
 # the block that READLINE guards, so it is compiled -- and dropped -- whether or
 # not --enable-tools is passed; BR2_PACKAGE_BLUEZ5_UTILS_TOOLS installs bluemoon,
