@@ -1,10 +1,13 @@
 //! The board's two lights: what this program makes them say.
 //!
-//! Both are kernel LED-class devices — `gpio-leds` on PA10 (green, status) and
-//! PL10 (red, power) — so each is two sysfs files rather than a GPIO held open.
-//! While a light's trigger is `timer` the kernel blinks it at
-//! `delay_on`/`delay_off`, which is why the patterns are rates here rather than
-//! a loop: nothing in this process wakes up to turn a light on or off.
+//! Both are kernel LED-class devices — `gpio-leds` — so each is two sysfs files
+//! rather than a GPIO held open. While a light's trigger is `timer` the kernel
+//! blinks it at `delay_on`/`delay_off`, which is why the patterns are rates here
+//! rather than a loop: nothing in this process wakes up to turn a light on or
+//! off.
+//!
+//! Which device is which is read off the names in `/sys/class/leds` rather than
+//! written down per board: see `Color`.
 //!
 //! Nothing here decides *when* anything happens. The parts of the bridge that
 //! learn something send it as one of three facts — whether the radios are up,
@@ -25,12 +28,62 @@ use std::sync::Arc;
 use tokio::signal::unix::{signal, Signal, SignalKind};
 use tokio::sync::watch;
 
-/// The status LED, by the label the device tree gives it.
-const STATUS: &str = "/sys/class/leds/nanopi:green:status";
+/// Where the kernel lists the board's lights.
+const LEDS: &str = "/sys/class/leds";
 
-/// The power LED, by the label the device tree gives it. Its node carries
-/// `default-state = "on"`, which is the state this module hands back on exit.
-const POWER: &str = "/sys/class/leds/nanopi:red:pwr";
+/// Which of the two a look is written to.
+///
+/// The colour, because it is the one part of the name both ways of declaring a
+/// light keep. A device tree either gives the node a `label` of its author's
+/// choosing — `nanopi:red:pwr` — or leaves the label out and lets the kernel
+/// compose one out of the node's colour and function, which is what this board's
+/// tree does: `red:power`, `green:wlan`. Splitting on `:` and looking for the
+/// word finds both, and neither board needs an entry in a table here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Color {
+    /// The power light. Its node carries `default-state = "on"`, which is the
+    /// state this module hands back on exit.
+    Red,
+    /// The status light.
+    Green,
+}
+
+impl Color {
+    fn name(self) -> &'static str {
+        match self {
+            Color::Red => "red",
+            Color::Green => "green",
+        }
+    }
+}
+
+/// Whether a class device's name is a light of this colour.
+///
+/// Whole components only: a name that happens to contain the word — a board that
+/// calls one `reddish:activity` — is not the light this program means.
+fn of_color(name: &str, color: Color) -> bool {
+    name.split(':').any(|part| part == color.name())
+}
+
+/// The LED-class device of that colour, if this image has one.
+///
+/// Sorted before the first is taken: `read_dir` returns entries in whatever
+/// order the directory holds them, and a board with two greens would otherwise
+/// light a different one from boot to boot.
+fn find(color: Color) -> Option<PathBuf> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(LEDS)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| of_color(name, color))
+        })
+        .collect();
+    found.sort();
+    found.into_iter().next()
+}
 
 /// What the green light is saying: five states, one look each, so what a person
 /// sees can be read without a log.
@@ -216,7 +269,13 @@ impl Signals {
 /// This is the only place that writes them, because a sysfs write blocks and
 /// none of the places that report a fact is one to wait in.
 pub async fn run(mut facts: watch::Receiver<Facts>, lights: Option<Arc<Lights>>) {
-    let green = Led::open(STATUS, "green");
+    // The device `lights` already holds when the red one was found: opening it a
+    // second time would be one scan and one line of log too many. A board with no
+    // red light has no `lights` at all, and that is the case this asks again for.
+    let green = match &lights {
+        Some(lights) => lights.status.clone(),
+        None => Led::open(Color::Green),
+    };
     let mut shown = None;
     loop {
         let wanted = facts.borrow_and_update().phase();
@@ -273,8 +332,8 @@ impl Lights {
     /// Takes the lights. Nothing is written until `run` has a state to show,
     /// because the state is what decides both of them.
     pub fn take() -> Option<Self> {
-        let power = Led::open(POWER, "red")?;
-        let status = Led::open(STATUS, "green");
+        let power = Led::open(Color::Red)?;
+        let status = Led::open(Color::Green);
         Some(Self { power, status })
     }
 
@@ -343,18 +402,24 @@ async fn raised(signal: &mut Option<Signal>) {
     }
 }
 
+#[derive(Clone)]
 struct Led {
     dir: PathBuf,
 }
 
 impl Led {
-    /// The LED-class device a label names, if this image has one.
-    fn open(path: &str, light: &str) -> Option<Self> {
-        let dir = PathBuf::from(path);
-        if !dir.exists() {
-            tracing::warn!("led.unavailable light={light} path={path} consequence=unused");
+    /// The LED-class device of a colour, if this image has one. The path is in
+    /// the line: when a board's lights cannot be found, what it calls them is
+    /// the whole of the answer.
+    fn open(color: Color) -> Option<Self> {
+        let Some(dir) = find(color) else {
+            tracing::warn!(
+                "led.unavailable color={} dir={LEDS} consequence=unused",
+                color.name()
+            );
             return None;
-        }
+        };
+        tracing::info!("led.ready color={} path={}", color.name(), dir.display());
         Some(Self { dir })
     }
 
@@ -435,6 +500,23 @@ mod tests {
         for phase in [Phase::Standby, Phase::Connecting, Phase::Linked] {
             assert!(matches!(phase.power(), Look::Steady(false)));
         }
+    }
+
+    /// Two device trees, two spellings, one rule: the colour is a whole
+    /// component of the name, and it is what the two lights are found by.
+    #[test]
+    fn a_light_is_found_by_the_colour_in_its_name() {
+        // A tree that writes its own labels.
+        assert!(of_color("nanopi:red:pwr", Color::Red));
+        assert!(of_color("nanopi:green:status", Color::Green));
+        // A tree that leaves the label out and lets the kernel compose one.
+        assert!(of_color("red:power", Color::Red));
+        assert!(of_color("green:wlan", Color::Green));
+        // The word has to be a component: a name that merely contains it, or a
+        // light of another colour, is not the one asked for.
+        assert!(!of_color("reddish:activity", Color::Red));
+        assert!(!of_color("blue:wan", Color::Red));
+        assert!(!of_color("blue:wan", Color::Green));
     }
 
     /// The four names the one line carries. The two beats are read off their

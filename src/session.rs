@@ -326,6 +326,9 @@ async fn attach(
             // start after that comes from a new session, below.
             start_again: None,
             theme: None,
+            // The cable is not going anywhere, so this session keeps the media
+            // on it.
+            now_playing: true,
         };
 
         let (tx, rx) = mpsc::channel(64);

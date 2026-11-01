@@ -1,0 +1,100 @@
+# MSM8916 + WCN3620, on top of board/common/kernel.fragment.
+#
+# Everything here is what arm64's defconfig does not already answer for this
+# board: the USB controller (ChipIdea, not musb), the WCNSS remote processor that
+# the Wi-Fi and Bluetooth halves both live behind, and the three GPIO LEDs.
+#
+# The device tree is msm8916-thwc-ufi001c.dts, in mainline since 6.x: eMMC on
+# sdhc_1, WCNSS with a wcn3620 iris, USB with pm8916_usbin as the role switch.
+
+# The controller on the USB port. `qcom,ci-hdrc` binds to the MSM glue; UDC is
+# the device side, which is the only side this board uses.
+CONFIG_USB=y
+CONFIG_USB_CHIPIDEA=y
+CONFIG_USB_CHIPIDEA_UDC=y
+CONFIG_USB_CHIPIDEA_MSM=y
+CONFIG_USB_CHIPIDEA_HOST=y
+# Which way the port faces is decided by the PMIC's USB-in detector, not by a
+# cable ID pin and not by writing a `mode` file the way musb on the NanoPi needs.
+CONFIG_USB_ROLE_SWITCH=y
+CONFIG_EXTCON=y
+CONFIG_EXTCON_QCOM_SPMI_MISC=y
+
+# eMMC. sdhc_1 on msm8916 is the SDHCI instance in the SoC.
+CONFIG_MMC=y
+CONFIG_MMC_SDHCI=y
+CONFIG_MMC_SDHCI_PLTFM=y
+CONFIG_MMC_SDHCI_MSM=y
+
+# The root filesystem is ext2 -- lk2nd reads the kernel out of it, and its ext2
+# driver has no extents -- so the filesystem the kernel mounts is one the ext4
+# driver has to accept. arm64's defconfig sets this; it is named here because
+# without it the rootfs mounts on nothing, and the boot ends in the ramdisk's
+# shell rather than anywhere that would say why.
+CONFIG_EXT4_FS=y
+CONFIG_EXT4_USE_FOR_EXT2=y
+
+# The PMIC side of the board: the regulators and clocks WCNSS asks for by name
+# (vddmx, vddcx, xo), the pin controller the LEDs and the SIM mux sit on, and the
+# USB-in detector. arm64's defconfig has most of these; they are named here so a
+# board that builds without a radio fails loudly instead of quietly.
+CONFIG_PINCTRL_MSM8916=y
+CONFIG_SPMI=y
+CONFIG_SPMI_MSM_PMIC_ARB=y
+CONFIG_REGULATOR_QCOM_SMD_RPM=y
+CONFIG_QCOM_CLK_SMD_RPM=y
+CONFIG_QCOM_RPMCC=y
+
+# The WCNSS chain, in the order it initialises:
+#
+#   qcom_wcnss_pil   loads wcnss.mdt into the remote processor
+#   qcom_wcnss_ctrl  talks to it over SMD, uploads the NV blob, then populates
+#                    the wifi and bluetooth child nodes
+#   wcn36xx          the Wi-Fi half
+#   btqcomsmd        the Bluetooth half
+#
+# Only qcom_wcnss_pil is a module, and for the reason the NanoPi's brcmfmac is:
+# it requests wcnss.mdt from probe, and a built-in driver probes at initcall time,
+# before the root filesystem — where the firmware lives — is mounted. The others
+# probe when qcom_wcnss_pil is loaded from /etc/init.d/S10radio, which is after
+# the root is up, so they can be built in.
+CONFIG_QCOM_WCNSS_PIL=m
+CONFIG_QCOM_WCNSS_CTRL=y
+CONFIG_QCOM_RPROC_COMMON=y
+CONFIG_QCOM_PIL_INFO=y
+CONFIG_QCOM_MDT_LOADER=y
+CONFIG_QCOM_SYSMON=y
+CONFIG_QCOM_SCM=y
+CONFIG_QCOM_SMEM=y
+CONFIG_QCOM_SMD_RPM=y
+CONFIG_QCOM_SMP2P=y
+CONFIG_QCOM_SMSM=y
+CONFIG_RPMSG=y
+CONFIG_RPMSG_QCOM_SMD=y
+CONFIG_WCN36XX=y
+# btqcomsmd is a module because CONFIG_BT is one in the common fragment: a
+# built-in driver cannot depend on a modular core. modprobe pulls bluetooth in
+# ahead of it.
+CONFIG_BT_QCOMSMD=m
+
+# What the controller itself says, next to what the host decided. Off by default,
+# and the absence is not obvious: /sys/kernel/debug/bluetooth/hci0/ exists either
+# way -- the skeleton and the global l2cap/rfcomm/sco entries are made regardless
+# -- and what is missing is the per-controller files: identity (address and its
+# type), features (the LMP bits, which is where secure connections is answered),
+# and the per-connection ones. A pairing that fails between the halves is read
+# from here, because `bluetoothctl show` only reports what BlueZ cached.
+CONFIG_BT_DEBUGFS=y
+
+# The board's three LEDs (red power, green WLAN, blue WAN) are gpio-leds.
+CONFIG_LEDS_GPIO=y
+CONFIG_LEDS_TRIGGER_TIMER=y
+CONFIG_LEDS_TRIGGER_HEARTBEAT=y
+CONFIG_LEDS_TRIGGER_DEFAULT_ON=y
+
+# No trusted keyring and no signed modules: nothing here verifies a signature,
+# and while they are on the kernel builds certs/extract-cert, which needs host
+# OpenSSL. arm64's defconfig turns the keyring on; sunxi's does not, which is why
+# the NanoPi build never needed this.
+# CONFIG_SYSTEM_TRUSTED_KEYRING is not set
+# CONFIG_SYSTEM_REVOCATION_LIST is not set

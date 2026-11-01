@@ -4,9 +4,34 @@
 # FunctionFS and nl80211, so there is nothing for a desktop to build. `-u` keeps
 # the products owned by the caller, and `cp2cl-cargo` is the named volume holding
 # the cargo cache, so only the first build downloads anything.
-IMAGE  := cp2cl-armv7-builder
-TARGET := armv7-unknown-linux-musleabihf
+IMAGE  := cp2cl-builder
+
+# Which firmware to build: `nanopi-duo2`, `ufi001c`, or `all` for every board in
+# turn. It decides the Rust target — the NanoPi Duo2 is armv7 hard-float, the
+# UFI001C is aarch64 — and the Buildroot defconfig a build starts from.
+BOARDS := nanopi-duo2 ufi001c
+BOARD  ?= all
+
+ifeq ($(filter $(BOARD),$(BOARDS) all),)
+$(error BOARD is '$(BOARD)'; it is one of: $(BOARDS) all)
+endif
+
+# The underscore spelling: Buildroot names its defconfigs with one, and the build
+# volume is keyed the same way, so a board does not end up with two trees because
+# its name was written the other way round. A volume that changes name is a tree
+# built again from an empty download cache.
+BOARD_CFG := $(subst -,_,$(BOARD))
+
+ifeq ($(BOARD),ufi001c)
+TARGET    := aarch64-unknown-linux-musl
+CMAKE_TF  := /opt/aarch64-toolchain.cmake
+else
+TARGET    := armv7-unknown-linux-musleabihf
+CMAKE_TF  := /opt/armv7-toolchain.cmake
+endif
+
 RUN    := docker run --rm -u "$$(id -u):$$(id -g)" \
+            -e CMAKE_TOOLCHAIN_FILE=$(CMAKE_TF) \
             -v "$(CURDIR)":/work -v cp2cl-cargo:/cargo $(IMAGE)
 
 # Buildroot is not in this repository; it is a container the image is built in,
@@ -17,18 +42,26 @@ RUN    := docker run --rm -u "$$(id -u):$$(id -g)" \
 # it installs the credentials from authentication/ into the image and reads the
 # version out of Cargo.toml, and both are one level up from the external tree.
 BR_IMAGE := cp2cl-buildroot
-BR_VOL   := cp2cl-buildroot-out
-BOARD    ?= nanopi_duo2
+# One build volume per board. The two boards cross-compile for different
+# architectures, and Buildroot's output tree (host toolchain, per-package build
+# directories, module tree) is architecture-specific: a shared volume makes the
+# second board's build reuse the first board's objects, which fails somewhere
+# deep in the toolchain rather than at the configuration step.
+BR_VOL   := cp2cl-buildroot-out-$(BOARD_CFG)
 UID_GID  := $(shell id -u):$(shell id -g)
 # The uid of the build user in docker/buildroot.Dockerfile.
 BR_UID   := 1000
 
-# Both products land in dist/, and the card is named for what produced it: the
-# same three facts the page shows as `v0.10.0 (9063c18-dirty)`, spelled as a file
-# name has to — the tag on the commit, `dev` when it carries none, the short
-# commit, and `-dirty` when the tree does not match it. `.img.gz` because that is
-# what is handed out: what is written to a card is the `.img` inside, and the copy
-# that travels is 15 MB of the 73.
+# Both products land in dist/, and each is named for what produced it: the board,
+# and the same three facts the page shows as `v0.10.0 (9063c18-dirty)` — the tag
+# on the commit, `dev` when it carries none, the short commit, and `-dirty` when
+# the tree does not match it.
+#
+# Both boards are handed out as `.tar.gz` holding one filesystem image. The
+# NanoPi's is a card image written over the whole card; the UFI001C's is the
+# userdata partition, which is also where its kernel is — the partition table,
+# lk2nd and the calibration data are left as they are. The tar wrapper is what
+# macOS unpacks on a double-click; a bare `.img.gz` it may refuse.
 #
 # The Buildroot release is read back out of the Dockerfile that pins it rather
 # than written here a second time: a second copy is a copy that goes stale.
@@ -36,10 +69,20 @@ DIST          := dist
 BR_VERSION    := $(shell sed -n 's/^ARG BUILDROOT_VERSION=//p' docker/buildroot.Dockerfile)
 CP2CL_VERSION := $(shell git describe --tags --exact-match 2>/dev/null || echo dev)
 CP2CL_COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
-# The submodule carries two patches (see `patched`), so its worktree is always
+# The submodule carries our patches (see `patched`), so its worktree is always
 # dirty by design; only a different commit is a change worth naming.
 DIRTY         := $(shell git status --porcelain --ignore-submodules=dirty 2>/dev/null)
-FW := $(DIST)/buildroot-$(BR_VERSION)-cp2cl-$(CP2CL_VERSION)-$(CP2CL_COMMIT)$(if $(DIRTY),-dirty).img.gz
+
+# What post-image.sh left in images/, and the name it carries inside the
+# archive. Both are `.img`; the wrapper around them is `.tar.gz` either way.
+ifeq ($(BOARD),ufi001c)
+PACKED := cp2cl-ufi001c.img
+else
+PACKED := sdcard.img
+endif
+FW_EXT := tar.gz
+
+FW := $(DIST)/buildroot-$(BR_VERSION)-cp2cl-$(BOARD)-$(CP2CL_VERSION)-$(CP2CL_COMMIT)$(if $(DIRTY),-dirty).$(FW_EXT)
 
 # What a firmware build starts from.
 #
@@ -98,6 +141,17 @@ BR_RELEASE := { [ -e /build/.br-$(BR_VERSION) ] || { \
 
 .PHONY: all app test image firmware buildroot-image patched
 
+# `all` is not a board: it is every board, one build after another. Recursion
+# rather than a rule that builds both in one pass, because the Rust target and
+# the build volume are read once, when this makefile is, and one pass over two
+# boards would carry the first board's values into the second.
+ifeq ($(BOARD),all)
+all app test firmware:
+	@for b in $(BOARDS); do \
+		$(MAKE) --no-print-directory BOARD=$$b $@ || exit 1; \
+	done
+else
+
 # Both products: the program the board runs, and the image it runs from.
 # `make app` on its own is the program, which is what a change to the crate
 # needs; the image is a tree, a toolchain and a kernel on every build.
@@ -137,7 +191,8 @@ test: patched
 image:
 	docker build -t $(IMAGE) docker/
 
-# BOARD=<name> builds any board that has a configs/<name>_defconfig.
+# One board, out of the names at the top of this file; the defconfig is
+# `configs/<board>_defconfig`, and BOARD=all builds each of them in turn.
 #
 # The build directory is a named volume, not a bind mount: the host's filesystem
 # is case-insensitive and Buildroot's output is not. `dl/` goes in the volume too,
@@ -169,13 +224,16 @@ firmware: app buildroot-image
 		-e BR2_DL_DIR=/build/dl \
 		$(BR_IMAGE) sh -c 'chown $(BR_UID):$(BR_UID) /build \
 			&& su -s /bin/sh builder -c "$(BR_RELEASE) \
-				&& make -C /opt/buildroot O=/build BR2_EXTERNAL=/src/buildroot $(BOARD)_defconfig \
+				&& make -C /opt/buildroot O=/build BR2_EXTERNAL=/src/buildroot $(BOARD_CFG)_defconfig \
 				&& $(BR_FRESH) \
 				&& $(BR_REFRESH) \
 				&& make -C /opt/buildroot O=/build -j$$(nproc)"'
 	docker run --rm -u $(UID_GID) -v $(BR_VOL):/build -v "$(CURDIR)/$(DIST)":/out \
-		$(BR_IMAGE) sh -c 'gzip -9 -c /build/images/sdcard.img > /out/$(notdir $(FW))'
+		$(BR_IMAGE) sh -c 'tar -C /build/images --owner=0 --group=0 -cf - $(PACKED) \
+			| gzip -9 > /out/$(notdir $(FW))'
 	@echo "image: $(FW)"
+
+endif
 
 # Once per machine, and again only when the Dockerfile changes.
 buildroot-image:

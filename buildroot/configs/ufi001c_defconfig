@@ -1,0 +1,137 @@
+# UFI001C / UFI001B — Qualcomm MSM8916 (Snapdragon 410), 512 MB, 4 GB eMMC,
+# WCN3620 (2.4 GHz 1x1 Wi-Fi + Bluetooth 4.0), no display, no SD slot.
+#
+# Boot chain: the stock aboot loads lk2nd from the boot partition, and lk2nd
+# loads the kernel out of the root filesystem, which is the partition called
+# userdata. Not out of the boot partition: it is 16 MiB, lk2nd occupies the first
+# 512 KiB of it, and the image that would have followed is 15.6 MiB -- 0.1 MiB
+# more than what is left. lk2nd's second route needs no room there: any
+# partition over 16 MiB, formatted ext2, carrying /extlinux/extlinux.conf.
+#
+# lk2nd is not built here; the board's post-image script downloads its release
+# and ships it in the package, so a board can be recovered without a second
+# source for the bootloader.
+#
+# The kernel is mainline, not the vendor's 3.10: mainline has the board's device
+# tree (msm8916-thwc-ufi001c.dts) and the WCNSS, ChipIdea and rpmsg drivers this
+# board needs. 6.18 is the same longterm the NanoPi build uses.
+
+BR2_aarch64=y
+BR2_cortex_a53=y
+BR2_TOOLCHAIN_BUILDROOT_MUSL=y
+# Pinned to the newest series this Buildroot offers, and older than the
+# kernel on purpose: with a custom kernel version the headers series is not
+# known early enough for the feature symbols packages depend on, and what the
+# headers have to carry is musl's needs. 2025.02 stops at 6.12.
+BR2_KERNEL_HEADERS_6_12=y
+
+BR2_TARGET_GENERIC_HOSTNAME="CarPlayBox"
+BR2_TARGET_GENERIC_ISSUE="cp2cl"
+BR2_TARGET_GENERIC_GETTY_PORT=""
+BR2_SYSTEM_DHCP=""
+
+BR2_INIT_BUSYBOX=y
+BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_DEVTMPFS=y
+# ext2, not ext4, and the feature list is part of the contract: lk2nd reads the
+# kernel out of this filesystem before there is a kernel. Its ext2 driver maps
+# i_block[] directly -- no extents -- and rejects any ro_compat bit other than
+# sparse_super and large_file (lib/fs/ext2/ext2.c, ext2_mount). compat and
+# incompat bits it never looks at, so resize_inode is allowed here while extents
+# would be read as an i_block[] and land on the wrong data.
+# No journal comes with ext2. What the program writes is a few small files, and a
+# rootfs that always mounts beats one that needs fsck after a power cut.
+BR2_TARGET_ROOTFS_EXT2=y
+BR2_TARGET_ROOTFS_EXT2_2=y
+# -E resize=16G is what makes the rest of the partition usable. The image is
+# 128 MB because that is what has to travel over EDL; userdata is measured in
+# GiB, and S01resizefs grows the filesystem online to the end of it on the first
+# boot, then reboots. Online growth
+# describes new groups in the blocks reserved here -- s_reserved_gdt_blocks, 63 of
+# them, which is 2048 groups, 16 GiB at 1 KiB blocks -- and grows no further than
+# they describe; with nothing left to describe it reaches for meta_bg instead,
+# whose descriptor layout lk2nd cannot follow. Both are well past the 4 GB eMMC
+# this board has.
+BR2_TARGET_ROOTFS_EXT2_MKFS_OPTIONS="-O ^64bit,^dir_index -E resize=16G"
+# 128 MB: twice the NanoPi's, because this rootfs carries kmod and the module
+# tree of a kernel whose defconfig is not trimmed to two drivers, and because
+# the kernel itself is in there -- /boot is 15.6 MB of it. The rest of the
+# partition is room for a binary to replace and the identity the program writes.
+BR2_TARGET_ROOTFS_EXT2_SIZE="128M"
+BR2_TARGET_ROOTFS_EXT2_RESBLKS=1
+# The one thing the ramdisk knows about the root filesystem. Nothing in the
+# kernel's root= syntax names this partition, so initramfs/init scans for this
+# label. That file holds no copy of the string: post-build.sh turns this value
+# into the hex constant the ramdisk compares against.
+BR2_TARGET_ROOTFS_EXT2_LABEL="rootfs"
+
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.18.58"
+# arm64's own `make defconfig`, which is what BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_
+# CONFIG asks for. Naming it as a defconfig file instead would have Buildroot ask
+# make for `defconfig_defconfig`, which does not exist. There is no board
+# defconfig upstream for this device; a fragment on top of the generic one is
+# what pmOS does too.
+BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y
+# arm64's defconfig keeps a trusted keyring, and certs/extract-cert links against
+# host OpenSSL whenever that or module signing is on. Turning the keyring off in
+# the fragment is not enough — it is selected back on by other symbols — so the
+# build gets the headers it needs. sunxi's defconfig never asked for this.
+BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_CP2CL_PATH)/board/common/kernel.fragment $(BR2_EXTERNAL_CP2CL_PATH)/board/ufi001c/kernel.fragment"
+BR2_LINUX_KERNEL_DTS_SUPPORT=y
+BR2_LINUX_KERNEL_INTREE_DTS_NAME="qcom/msm8916-thwc-ufi001c"
+# Image.gz, because it is a file lk2nd loads and gunzips itself: 14.7 MB against
+# the 40.8 MB of the plain Image, and the rootfs it sits in has to hold it.
+# post-build.sh copies it to /boot and names it in extlinux.conf.
+BR2_LINUX_KERNEL_IMAGEGZ=y
+# post-build.sh puts Image.gz and the dtb in /boot itself, under the names
+# extlinux.conf gives them, so Buildroot's own copy of both is not wanted. This
+# flag is only about that copy: modules are installed into /lib/modules whatever
+# it says, and the radios do not come up without them.
+# BR2_LINUX_KERNEL_INSTALL_TARGET is not set
+
+# No U-Boot: lk2nd is the bootloader, and the release image is downloaded by
+# board/ufi001c/post-image.sh rather than built here.
+
+BR2_PACKAGE_BUSYBOX=y
+# kmod's tools are only visible when busybox is told to let other packages
+# provide the same applets. Without this the line below is dropped silently and
+# the image falls back to busybox's modprobe, which cannot read modules.dep.
+BR2_PACKAGE_BUSYBOX_SHOW_OTHERS=y
+BR2_PACKAGE_DBUS=y
+BR2_PACKAGE_BLUEZ5_UTILS=y
+BR2_PACKAGE_BLUEZ5_UTILS_CLIENT=y
+# No console and no screen on this board, so a phone that will not pair leaves
+# nothing behind: bluetoothd's own log says what it decided, not what the
+# controller did. btmon reads the latter off the kernel's monitor channel --
+# the HCI frames of a pairing, and the reason code it failed with.
+#
+# Not the deprecated tools: bluez 5.79 dropped attrib/gatttool and the install
+# step still expects it, so `--enable-deprecated` fails the build.
+BR2_PACKAGE_BLUEZ5_UTILS_MONITOR=y
+BR2_PACKAGE_HOSTAPD=y
+BR2_PACKAGE_HOSTAPD_DRIVER_NL80211=y
+BR2_PACKAGE_DNSMASQ=y
+BR2_PACKAGE_IW=y
+BR2_PACKAGE_WIRELESS_REGDB=y
+# depmod/modprobe, not insmod: the WCNSS chain is five modules deep and their
+# load order is a property of the build, not something to retype in a script.
+BR2_PACKAGE_KMOD=y
+BR2_PACKAGE_KMOD_TOOLS=y
+
+BR2_PACKAGE_DROPBEAR=y
+BR2_PACKAGE_DROPBEAR_CLIENT=y
+BR2_PACKAGE_DROPBEAR_DISABLE_REVERSEDNS=y
+BR2_PACKAGE_DROPBEAR_SMALL=y
+# resize2fs, for S01resizefs. The root filesystem is mounted when it runs, so the
+# growth goes through EXT4_IOC_RESIZE_FS, and this is the tool that drives it.
+# e2fsprogs brings util-linux's libblkid and libuuid with it; the space they take
+# is part of the 128 MB, and the space the growth adds is measured in GiB.
+BR2_PACKAGE_E2FSPROGS=y
+BR2_PACKAGE_E2FSPROGS_RESIZE2FS=y
+BR2_PACKAGE_CP2CL=y
+
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_CP2CL_PATH)/board/common/rootfs-overlay $(BR2_EXTERNAL_CP2CL_PATH)/board/ufi001c/rootfs-overlay"
+BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_CP2CL_PATH)/board/ufi001c/post-build.sh"
+BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_CP2CL_PATH)/board/ufi001c/post-image.sh"

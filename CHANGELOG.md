@@ -4,6 +4,26 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## 未发布
+
+### 新增
+
+- 新增 UFI001C 板支持，rootfs 独立成镜像。
+- 固件随 rootfs 发布，开机只挂 `persist`。
+- 首次开机在线扩容 rootfs，完成后重启。
+- 镜像带 btmon、btmgmt 与蓝牙 debugfs。
+- 长按按键 3 秒解除蓝牙配对并重插 USB。
+
+### 变更
+
+- 构建按板选择，默认全建，产物统一 `.tar.gz`。
+- 配对改用 NoInputNoOutput，无需人工确认。
+- 蓝牙会话不订阅播放信息，媒体走 Wi-Fi 会话。
+
+### 修复
+
+- 被拒三次即删除失效配对，不再无限重连。
+
 ## v0.13.1 alpha — 2026-10-31
 
 ### 变更

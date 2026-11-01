@@ -1,7 +1,8 @@
 # What `cp2cl` needs from the system
 
-Values only. Everything listed is what `board/` and `configs/nanopi_duo2_defconfig`
-in this tree already provide; another rootfs has to provide the same.
+Values only. Everything listed is what `board/` and the two `configs/*_defconfig`
+in this tree already provide; another rootfs has to provide the same. Where the
+two boards differ is section 4.
 
 ## 1. Kernel
 
@@ -141,7 +142,7 @@ the core; none is loaded on this chip.
 
 ### 3.1 Mounts
 
-    /                     ext4, rw
+    /                     ext4 or ext2, rw
     /proc                 proc
     /sys                  sysfs
     /sys/kernel/config    configfs
@@ -223,3 +224,75 @@ by `post-build.sh`: it would start a second dnsmasq after the one in
                                     nothing drives; musb sits in OTG_STATE_UNDEFINED
                                     and never pulls up. cp2cl writes `peripheral`
                                     to the controller's `mode` to settle it
+
+## 4. UFI001C — MSM8916 + WCN3620
+
+Same program, different plumbing. What differs from the NanoPi:
+
+    storage         eMMC sdhc_1 = mmcblk0; the kernel lives in the rootfs, not
+                    in the boot partition (see below)
+    USB             ChipIdea, role switched by pm8916_usbin extcon. There is no
+                    `mode` file to write; the port is a device as soon as it is
+                    plugged into a host
+    Wi-Fi           WCN3620, driven by wcn36xx behind qcom_wcnss_pil, 2.4 GHz 1x1
+    Bluetooth       btqcomsmd on the same chip, HCI over rpmsg
+    firmware        the WCNSS image ships in the rootfs, at /lib/firmware/wcnss;
+                    S05firmware links it into a tmpfs and points
+                    firmware_class.path there. The WLAN NV blob comes off
+                    persist, where this board's calibration lives; the modem
+                    partition is not read at all
+    modules         qcom_wcnss_pil and btqcomsmd through kmod's modprobe, in the
+                    order modules.dep gives; busybox's insmod is not enough here
+    LEDs            led-r/led-g/led-b, function power/wlan/wan
+    rootfs          ext2, not ext4 — lk2nd reads the kernel out of it and has no
+                    extent support — found by the ramdisk through its volume
+                    label, read from the superblock before anything is mounted:
+                    root=UUID= is not something the kernel understands, and the
+                    label does not depend on what the rootfs has installed. The
+                    label is written once, in the defconfig; post-build.sh turns
+                    it into the hex constant the ramdisk compares against
+    image           cp2cl-ufi001c.img, the rootfs itself, written with
+                    `edl w userdata` on a board in EDL mode. The stock GPT stays:
+                    lk2nd, aboot, modem and the calibration partitions are on it
+    growth          the image is 128 MB, the partition is measured in GiB; the
+                    first boot after a flash grows the mounted filesystem to the
+                    end of it with the red LED blinking, then reboots, and
+                    Wi-Fi, Bluetooth and the program only start on that second
+                    boot. The marker in /var/lib keeps later boots from
+                    repeating it
+
+The boot partition is why the kernel is in the rootfs. It is 16 MiB on the stock
+table, lk2nd occupies the first 512 KiB of it, and the boot image that would have
+followed is 15.6 MiB — 0.1 MiB more than what is left, with no room for the next
+kernel version. lk2nd's other route needs none of it: it scans every partition
+over 16 MiB, mounts it as ext2, and boots the `/extlinux/extlinux.conf` it finds:
+
+    default buildroot
+
+    label buildroot
+        linux /boot/Image.gz
+        fdt /boot/dtbs/qcom/msm8916-thwc-ufi001c.dtb
+        initrd /boot/initramfs.cpio.gz
+        append earlycon console=ttyMSM0,115200n8
+
+Two consequences of that choice. The rootfs has to be ext2, because that is the
+only filesystem lk2nd's reader understands, and it has to keep clear of extents:
+the reader maps `i_block[]` directly and rejects any ro_compat bit beyond
+sparse_super and large_file. compat and incompat bits it never looks at, so
+resize_inode is allowed here and extents are not. No journal comes with ext2; a
+rootfs that always mounts beats one that needs fsck after a power cut.
+
+The image is 128 MB because that is what has to travel over EDL, while userdata is
+measured in GiB. That space is not left unused: mke2fs is called with
+`-E resize=16G`, which reserves the blocks needed to describe more block groups,
+and S01resizefs runs `resize2fs` on the first boot to extend the mounted
+filesystem to the end of the partition, then reboots. It writes
+`/var/lib/rootfs-resized` before doing so, and that file is what makes it the first
+boot only — delete it to grow again. Online growth is the only kind available here — the root filesystem is
+in use — and it is also the only kind lk2nd survives: a filesystem grown without
+reserved GDT blocks is converted to meta_bg, whose descriptor layout the reader
+cannot follow, and the next boot finds no kernel.
+
+`boot.img` is still built, for `fastboot boot` only — it cannot be flashed. When
+lk2nd boots nothing, its own log says why: `fastboot oem log && fastboot
+get_staged log.txt`.

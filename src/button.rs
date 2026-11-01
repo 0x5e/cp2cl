@@ -5,7 +5,12 @@
 //! three seconds are counted here. That is the only way to get a hold out of a
 //! driver that reports edges — none of the events it sends means "still down".
 //!
-//! What a long press does is one log line, for now.
+//! A hold is the way back from a pairing that is out of step: every phone this
+//! machine is paired with is unpaired, and the wired link is re-plugged — the
+//! same one replug the settings page asks for — so that the head unit enumerates
+//! the accessory again. Nothing else on the board can be reached without one,
+//! and the state that needs clearing is exactly the state that keeps a phone
+//! from connecting.
 
 use std::fs::File;
 use std::io::{self, Read};
@@ -18,9 +23,16 @@ use tokio::time::{sleep_until, Instant};
 /// How long the button has to stay down to count as held.
 const HELD: Duration = Duration::from_secs(3);
 
-/// The name the driver gives its device, which is how the node is found: this
-/// image has no udev, so there is no by-path link to ask.
-const NAME: &str = "gpio-keys";
+/// The name of the device-tree node the key belongs to, and the only part of its
+/// sysfs path that both boards agree on.
+///
+/// The input device's own name is not it: `gpio_keys` takes that from the node's
+/// `label`, so one tree reports `GPIO Buttons` and another reports `gpio-keys`,
+/// and matching on it ties this file to a string somebody chose. The node is
+/// called `gpio-keys` in both trees, and the platform device the driver binds to
+/// carries the node's name, so the resolved path of the input device runs
+/// through a `gpio-keys` directory either way.
+const DEVICE: &str = "gpio-keys";
 
 /// `EV_KEY`, and the value that says the key went down. Zero is the release and
 /// two is autorepeat, which this driver does not send.
@@ -37,9 +49,12 @@ const EVENT_LEN: usize = if std::mem::size_of::<usize>() == 4 {
     24
 };
 
-pub async fn watch() {
+/// Watches the button for a press held down, and unpairs the phones when one
+/// comes. `adapter` is the controller the pairings belong to; `replug` is the
+/// channel the settings page asks the wired link through.
+pub async fn watch(adapter: String, replug: mpsc::Sender<()>) {
     let Some(path) = device() else {
-        tracing::warn!("button.unavailable name={NAME} consequence=long_press_unused");
+        tracing::warn!("button.unavailable device={DEVICE} consequence=long_press_unused");
         return;
     };
     let file = match File::open(&path) {
@@ -71,7 +86,33 @@ pub async fn watch() {
                 tracing::info!("button.long_press held_ms={}", HELD.as_millis());
                 // One report per press: the release is what arms the next one.
                 held_until = None;
+                unpair_phones(&adapter, &replug).await;
             }
+        }
+    }
+}
+
+/// Unpairs every phone known to this machine, then asks for one replug.
+///
+/// The replug is the settings page's own: the same channel, and the same
+/// unbind-and-bind the wired half does with it. Not a restart of the program —
+/// a hold taken while someone is watching the panel should cost the link a
+/// second, not the session.
+async fn unpair_phones(adapter: &str, replug: &mpsc::Sender<()>) {
+    // A count of zero is a press that could not clear anything, which the
+    // per-device line inside `unpair_all` is the detail of.
+    match crate::wireless::unpair_all(adapter).await {
+        Ok(count) => tracing::info!("bt.unpaired count={count} adapter={adapter}"),
+        Err(e) => tracing::warn!("bt.unpaired_unavailable adapter={adapter} err={e}"),
+    }
+    match replug.try_send(()) {
+        // A full channel is one replug already on its way, which is what this
+        // would have asked for.
+        Ok(()) | Err(mpsc::error::TrySendError::Full(())) => {
+            tracing::info!("main.replug reason=button");
+        }
+        Err(mpsc::error::TrySendError::Closed(())) => {
+            tracing::warn!("main.replug_refused err=carlife_half_not_running");
         }
     }
 }
@@ -126,14 +167,24 @@ fn device() -> Option<PathBuf> {
         if !node.starts_with("event") {
             continue;
         }
-        let Ok(name) = std::fs::read_to_string(entry.path().join("device/name")) else {
+        // The class link points at the input device the driver registered, and
+        // its resolved path is what names the platform device above it.
+        let Ok(real) = std::fs::canonicalize(entry.path().join("device")) else {
             continue;
         };
-        if name.trim() == NAME {
+        if under_keys(&real) {
             return Some(Path::new("/dev/input").join(node));
         }
     }
     None
+}
+
+/// Whether a resolved input device sits under the key node's platform device:
+/// `/sys/devices/platform/gpio-keys/input/input1` either directly, or somewhere
+/// below the bus the node hangs off.
+fn under_keys(real: &Path) -> bool {
+    real.components()
+        .any(|part| part.as_os_str().to_str() == Some(DEVICE))
 }
 
 #[cfg(test)]
@@ -148,5 +199,20 @@ mod tests {
         record[EVENT_LEN - 6..EVENT_LEN - 4].copy_from_slice(&0x100u16.to_ne_bytes());
         record[EVENT_LEN - 4..].copy_from_slice(&DOWN.to_ne_bytes());
         assert_eq!(events(&record).collect::<Vec<_>>(), [(KEY, 0x100, DOWN)]);
+    }
+
+    /// The same node on both boards, under two different names for the input
+    /// device, and a neighbouring device that must not be taken for it.
+    #[test]
+    fn the_key_node_is_the_one_the_path_runs_through() {
+        assert!(under_keys(Path::new(
+            "/sys/devices/platform/gpio-keys/input/input1"
+        )));
+        assert!(under_keys(Path::new(
+            "/sys/devices/platform/soc@0/2000000.gpio/gpio-keys/input/input0"
+        )));
+        assert!(!under_keys(Path::new(
+            "/sys/devices/platform/pm8941-pwrkey/input/input0"
+        )));
     }
 }

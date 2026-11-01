@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: gaosen <0x5e@sina.cn>
+Date: Sun, 1 Nov 2026 13:25:00 +0800
+Subject: [PATCH 4/4] fix(bt): pair as an accessory with no display or keypad
+
+Registered as `KeyboardDisplay`, this made the phone put a six-digit number on
+its screen and wait for someone to confirm it. There is no display here to show
+that number on, so the operator's only part in the pairing was tapping a figure
+the board never saw. `NoInputNoOutput` describes the same accessory honestly:
+the link comes up as just works, with nothing on the phone to tap.
+---
+
+diff --git a/native/crates/livi-runtime/src/bt.rs b/native/crates/livi-runtime/src/bt.rs
+--- a/native/crates/livi-runtime/src/bt.rs
++++ b/native/crates/livi-runtime/src/bt.rs
+@@ -304,12 +304,18 @@
+         start_carplay(&conn, adapter, tx).await?;
+     }
+ 
++    // Pairs as an accessory with neither a display nor a keypad, which is what
++    // this is: claiming `KeyboardDisplay` made the phone put a six-digit number
++    // on its screen and wait for a confirmation nobody here can give — the
++    // board has no display to show the number it would be confirming. With
++    // `NoInputNoOutput` the same pairing completes as just works, and the phone
++    // shows nothing to tap.
+     conn.call_method(
+         Some("org.bluez"),
+         "/org/bluez",
+         Some("org.bluez.AgentManager1"),
+         "RegisterAgent",
+-        &(ObjectPath::try_from(AGENT_PATH)?, "KeyboardDisplay"),
++        &(ObjectPath::try_from(AGENT_PATH)?, "NoInputNoOutput"),
+     )
+     .await?;
+     conn.call_method(
