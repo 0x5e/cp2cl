@@ -64,6 +64,12 @@ BR2_TARGET_ROOTFS_EXT2_RESBLKS=1
 # into the hex constant the ramdisk compares against.
 BR2_TARGET_ROOTFS_EXT2_LABEL="rootfs"
 
+# The board's device tree is patched in this tree rather than in mainline: the
+# light names it falls back to are `green:wlan`, and what the program drives is
+# a status light. Without this directory the kernel is built from mainline as it
+# is and the patch applies to nothing.
+BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_CP2CL_PATH)/patches"
+
 BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_CUSTOM_VERSION=y
 BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.18.58"

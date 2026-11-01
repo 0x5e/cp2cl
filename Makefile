@@ -142,6 +142,23 @@ endif
 # stamps — so both go, and the rsync lands ahead of the install in the same run.
 BR_REFRESH := rm -f /build/build/cp2cl-*/.stamp_rsynced /build/build/cp2cl-*/.stamp_target_installed
 
+# The kernel's device trees are decided by buildroot/patches/ as much as the
+# boot is decided by board/, but a patched kernel tree is never patched again:
+# Buildroot applies BR2_GLOBAL_PATCH_DIR once, at `.stamp_patched`, and a tree
+# that has one does not look at the directory again. A board whose kernel was
+# patched before a patch was added keeps the device tree it was built with, and
+# says nothing about it — the UFI001C carried a green light named `green:wlan`
+# into an image that had just renamed it, for exactly that reason.
+#
+# So the kernel's source directory goes when the patches change, and only then:
+# the next build unpacks it again and applies all of them. The headers stay —
+# they are built from the same source, but everything in the tree depends on
+# them, and the device trees are in the kernel.
+BR_REPATCH := { find /src/buildroot/patches -type f | LC_ALL=C sort | xargs -r cat; } \
+	| md5sum | cut -c1-32 > /build/.patch-fingerprint.now && { \
+	cmp -s /build/.patch-fingerprint.now /build/.patch-fingerprint \
+	|| { rm -rf /build/build/linux-[0-9]* && mv /build/.patch-fingerprint.now /build/.patch-fingerprint; }; }
+
 # A change of Buildroot release is not a change of configuration: host/ and
 # build/ belong to the release that made them, and their stamps make the new one
 # skip the installs it needs — a host python without its installer modules stops
@@ -240,6 +257,7 @@ firmware: app buildroot-image
 			&& su -s /bin/sh builder -c "$(BR_RELEASE) \
 				&& make -C /opt/buildroot O=/build BR2_EXTERNAL=/src/buildroot $(BOARD_CFG)_defconfig \
 				&& $(BR_FRESH) \
+				&& $(BR_REPATCH) \
 				&& $(BR_REFRESH) \
 				&& make -C /opt/buildroot O=/build -j$$(nproc)"'
 	docker run --rm -u $(UID_GID) -v $(BR_VOL):/build -v "$(CURDIR)/$(DIST)":/out \
