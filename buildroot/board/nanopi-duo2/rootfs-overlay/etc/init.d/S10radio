@@ -31,11 +31,11 @@ log() {
 
 start() {
 	printf 'Loading radios: '
+
+	# /var/log is a tmpfs and starts empty on every boot, so the file needs no
+	# truncation.
 	ERR=/dev/null
-	if [ -w "$LOG" ]; then
-		: > "$LOG/radio.log"
-		ERR=$LOG/radio.log
-	fi
+	[ -w "$LOG" ] && ERR=$LOG/radio.log
 
 	failed=0
 	for m in $MODULES; do

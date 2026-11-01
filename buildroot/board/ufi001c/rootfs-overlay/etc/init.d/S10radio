@@ -27,11 +27,11 @@ log() {
 start() {
 	printf 'Loading radios: '
 
+	# /var/log is a tmpfs and starts empty on every boot, so the file needs no
+	# truncation -- and truncating it here would drop the lines S05firmware
+	# wrote into it a moment earlier.
 	ERR=/dev/null
-	if [ -w "$LOG" ]; then
-		: > "$LOG/radio.log"
-		ERR=$LOG/radio.log
-	fi
+	[ -w "$LOG" ] && ERR=$LOG/radio.log
 
 	if [ ! -f "$MODDIR/modules.dep" ]; then
 		depmod -a 2>>"$ERR" || log "depmod failed"
