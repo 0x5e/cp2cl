@@ -238,8 +238,9 @@ Same program, different plumbing. What differs from the NanoPi:
     Bluetooth       btqcomsmd on the same chip, HCI over rpmsg
     firmware        the WCNSS image ships in the rootfs, at /lib/firmware/wcnss;
                     S05firmware links it into a tmpfs and points
-                    firmware_class.path there. The WLAN NV blob still comes off
-                    modem/persist, where this board's calibration lives
+                    firmware_class.path there. The WLAN NV blob comes off
+                    persist, where this board's calibration lives; the modem
+                    partition is not read at all
     modules         qcom_wcnss_pil and btqcomsmd through kmod's modprobe, in the
                     order modules.dep gives; busybox's insmod is not enough here
     LEDs            led-r/led-g/led-b, function power/wlan/wan
