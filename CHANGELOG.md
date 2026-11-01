@@ -8,22 +8,21 @@
 
 ### 新增
 
-- 支持 UFI001C（MSM8916 + WCN3620）：新增该板的 buildroot 配置、内核片段、WCNSS 固件加载与指示灯。rootfs 单独成镜像，用 `edl w userdata` 刷入；内核不在 16 MiB 的 boot 分区里，由 lk2nd 从根文件系统的 `/extlinux/extlinux.conf` 读起。
-- UFI001C 的根文件系统在刷机后的第一次启动里在线扩容到分区末尾，红灯 200 毫秒亮灭闪烁，扩容成功即重启，Wi-Fi、蓝牙与 cp2cl 都等到重启之后才启动。`/var/lib/rootfs-resized` 标记使之后的开机不再扩容。
-- UFI001C 的镜像带上蓝牙取证要用的三样东西：`btmon` 抓 HCI 帧，`btmgmt` 改控制器的 Secure Connections 开关（bluez 把它挂在 `noinst_PROGRAMS` 下，`--enable-tools` 也不安装，由 post-build 单独装入），内核开 `CONFIG_BT_DEBUGFS` 才有 `/sys/kernel/debug/bluetooth/hci0/`。
-- 长按板上的按键 3 秒解除所有蓝牙配对，并让 USB 链路重插一次（与设置页的重启是同一个动作），用来从「手机已解绑、主机还留着记录」的状态里恢复。
+- 新增 UFI001C 板支持，rootfs 独立成镜像。
+- 固件随 rootfs 发布，开机只挂 `persist`。
+- 首次开机在线扩容 rootfs，完成后重启。
+- 镜像带 btmon、btmgmt 与蓝牙 debugfs。
+- 长按按键 3 秒解除蓝牙配对并重插 USB。
 
 ### 变更
 
-- `make firmware BOARD=nanopi-duo2|ufi001c|all` 选择目标板（默认 `all`，依次构建两块板），构建镜像同时带 aarch64 与 armv7 交叉工具链。两块板都产出 `.tar.gz`（内含一个 `.img`）：NanoPi 是整卡镜像，UFI001C 是 `userdata` 分区，后者不再附带 `boot.img` 与刷写脚本。
-- 蓝牙配对改为 `NoInputNoOutput`：手机上不再出现 6 位数字要人工确认，链路按 just works 建立。这块板没有屏幕，那个数字本来也无处显示。
-- 蓝牙会话不再订阅播放信息，媒体改由连上 Wi-Fi 之后的那个会话订阅。此前封面（一百多 KB）跟在启动协商的同一条链路上，排在手机加入热点之前。
+- 构建按板选择，默认全建，产物统一 `.tar.gz`。
+- 配对改用 NoInputNoOutput，无需人工确认。
+- 蓝牙会话不订阅播放信息，媒体走 Wi-Fi 会话。
 
 ### 修复
 
-- UFI001C 上 iPhone 配对必然失败（数字比对后回 `Authentication Failure`，`0x05`），无线 CarPlay 停在配对之前：`modem` 分区里的 WCNSS 固件 `CNSS-PR-1-4-2` 算不出可用的确认值。改为随 rootfs 发布 DragonBoard 410c 的 `CNSS-PR-2-0-1-2`，`S05firmware` 让它优先于分区那份；Wi-Fi 的 NV 仍取 `persist` 的原厂校准。
-- 手机侧解绑后，主机侧不再无限重连：被拒（`br-connection-refused`）连续三次即记一行 `bt.page_given_up` 并删掉这条已失效的配对，重新配对后自动恢复。此前每 5 秒重试一次，只有 debug 级日志，且永远不会停。
-- 指示灯改按 `/sys/class/leds` 里名称中的颜色定位，按键改按 `gpio-keys` 平台设备定位，不再硬编码 NanoPi 的路径；UFI001C 的 LED 是 `red:power` / `green:wlan`，其输入设备名为 `GPIO Buttons`。
+- 被拒三次即删除失效配对，不再无限重连。
 
 ## v0.13.1 alpha — 2026-10-31
 
