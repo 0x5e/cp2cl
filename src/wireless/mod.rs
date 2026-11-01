@@ -189,6 +189,9 @@ pub(crate) fn session_params(
         start_again: None,
         // No look of its own to hand the phone.
         theme: None,
+        // The session that carries the media is the one over Wi-Fi; see
+        // `run_session`, which turns this off for the Bluetooth one.
+        now_playing: true,
     };
 
     Ok(SessionParams {
@@ -256,7 +259,13 @@ pub(crate) async fn run_session(
         });
     });
 
-    let SessionParams { cp, identity, ssid, .. } = params;
+    let SessionParams { mut cp, identity, ssid, .. } = params;
+    // What the phone sends back answers whichever channel asked for it, and this
+    // one is about to be hung up: the media has a session of its own once the
+    // phone is on Wi-Fi — see `airplay::tunnel`. Asking here as well puts the
+    // covers on the same link as the negotiation, ahead of the phone joining
+    // the access point, and over the antenna that access point is on.
+    cp.now_playing = false;
 
     let (tx, rx) = mpsc::channel(64);
     // `Vehicle` owns the two watch senders and `feed` only hands out receivers,

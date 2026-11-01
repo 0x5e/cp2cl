@@ -68,7 +68,7 @@ DIST          := dist
 BR_VERSION    := $(shell sed -n 's/^ARG BUILDROOT_VERSION=//p' docker/buildroot.Dockerfile)
 CP2CL_VERSION := $(shell git describe --tags --exact-match 2>/dev/null || echo dev)
 CP2CL_COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
-# The submodule carries two patches (see `patched`), so its worktree is always
+# The submodule carries our patches (see `patched`), so its worktree is always
 # dirty by design; only a different commit is a change worth naming.
 DIRTY         := $(shell git status --porcelain --ignore-submodules=dirty 2>/dev/null)
 
