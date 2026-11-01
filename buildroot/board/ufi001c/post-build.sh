@@ -17,6 +17,26 @@ BOARD_DIR=$(cd "$(dirname "$0")" && pwd)
 # needs the directory to exist; the script does not make it.
 install -d -m 0755 "$TARGET_DIR/lib/firmware/msm-firmware-loader"
 
+# btmgmt is built but never installed. bluez lists it under noinst_PROGRAMS in
+# the block that READLINE guards, so it is compiled -- and dropped -- whether or
+# not --enable-tools is passed; BR2_PACKAGE_BLUEZ5_UTILS_TOOLS installs bluemoon,
+# l2ping and friends instead. It is copied in because it is the only client that
+# writes MGMT_OP_SET_SECURE_CONN, and that setting is how a pairing failure is
+# attributed: with SC off the controller runs the legacy DHKey exchange, so a
+# pairing that then works points at the P-256 path rather than at the agent.
+btmgmt_installed=
+for btmgmt in "$BUILD_DIR"/bluez5_utils-*/tools/btmgmt; do
+	if [ -x "$btmgmt" ]; then
+		install -m 0755 "$btmgmt" "$TARGET_DIR/usr/bin/btmgmt"
+		btmgmt_installed=1
+		break
+	fi
+done
+if [ -z "$btmgmt_installed" ]; then
+	echo "post-build: btmgmt was not built" >&2
+	exit 1
+fi
+
 # The kernel goes into this filesystem, not into the boot partition. lk2nd sits
 # at offset 0 there and 16 MiB - 512 KiB = 15.5 MiB is all that is left of it,
 # which is 0.1 MiB short of the Image.gz + dtb + ramdisk this board needs. What
