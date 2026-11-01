@@ -1,0 +1,38 @@
+The two lights are named by what they are rather than by the board they are on:
+a light declared with a colour and a function and no label is named
+`<colour>:<function>` by the kernel, so this tree's are `red:power` and
+`green:status` -- the same two names every other board in it uses. A label of
+its own (`nanopi:red:pwr`) is a second name for the same light, and one that no
+script under board/common/ can know.
+
+That is what S12firstboot holds to: the power light is blinkable by a script
+that has never seen this board.
+
+--- a/arch/arm/boot/dts/allwinner/sun8i-h3-nanopi-duo2.dts
++++ b/arch/arm/boot/dts/allwinner/sun8i-h3-nanopi-duo2.dts
+@@ -9,6 +9,7 @@
+ 
+ #include <dt-bindings/gpio/gpio.h>
+ #include <dt-bindings/input/input.h>
++#include <dt-bindings/leds/common.h>
+ 
+ / {
+ 	model = "FriendlyARM NanoPi Duo2";
+@@ -26,13 +27,15 @@
+ 		compatible = "gpio-leds";
+ 
+ 		led-0 {
+-			label = "nanopi:red:pwr";
++			color = <LED_COLOR_ID_RED>;
++			function = LED_FUNCTION_POWER;
+ 			gpios = <&r_pio 0 10 GPIO_ACTIVE_HIGH>; /* PL10 */
+ 			default-state = "on";
+ 		};
+ 
+ 		led-1 {
+-			label = "nanopi:green:status";
++			color = <LED_COLOR_ID_GREEN>;
++			function = LED_FUNCTION_STATUS;
+ 			gpios = <&pio 0 10 GPIO_ACTIVE_HIGH>; /* PA10 */
+ 		};
+ 	};

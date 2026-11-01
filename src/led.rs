@@ -33,12 +33,12 @@ const LEDS: &str = "/sys/class/leds";
 
 /// Which of the two a look is written to.
 ///
-/// The colour, because it is the one part of the name both ways of declaring a
-/// light keep. A device tree either gives the node a `label` of its author's
-/// choosing — `nanopi:red:pwr` — or leaves the label out and lets the kernel
-/// compose one out of the node's colour and function, which is what this board's
-/// tree does: `red:power`, `green:wlan`. Splitting on `:` and looking for the
-/// word finds both, and neither board needs an entry in a table here.
+/// The colour, because it is the part of the name every tree here spells the
+/// same way: a light declared with a colour and a function and no label is named
+/// `<colour>:<function>` by the kernel, so the power light is `red:power` and the
+/// status light `green:status` on every board. Splitting on `:` and looking for
+/// the word also finds a tree that writes a label of its own — `nanopi:red:pwr`
+/// was one — and neither board needs an entry in a table here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Color {
     /// The power light. Its node carries `default-state = "on"`, which is the
@@ -511,7 +511,7 @@ mod tests {
         assert!(of_color("nanopi:green:status", Color::Green));
         // A tree that leaves the label out and lets the kernel compose one.
         assert!(of_color("red:power", Color::Red));
-        assert!(of_color("green:wlan", Color::Green));
+        assert!(of_color("green:status", Color::Green));
         // The word has to be a component: a name that merely contains it, or a
         // light of another colour, is not the one asked for.
         assert!(!of_color("reddish:activity", Color::Red));

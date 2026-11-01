@@ -1,0 +1,18 @@
+The green light is `green:status` here too, for the reason 0002 gives: the
+fallback in msm8916-ufi.dtsi names it `green:wlan`, which is what the GPIO sits
+next to rather than what the light is for. cp2cl drives it with the same facts
+it drives the NanoPi's by, and S56led beats it once the access point is on air.
+
+The red and blue lights are already `red:power` and `blue:wan` and are left as
+they are.
+
+--- a/arch/arm64/boot/dts/qcom/msm8916-thwc-ufi001c.dts
++++ b/arch/arm64/boot/dts/qcom/msm8916-thwc-ufi001c.dts
+@@ -18,6 +18,7 @@
+ };
+ 
+ &led_g {
++	function = LED_FUNCTION_STATUS;
+ 	gpios = <&tlmm 21 GPIO_ACTIVE_HIGH>;
+ };
+ 

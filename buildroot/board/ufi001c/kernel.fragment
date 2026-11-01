@@ -86,7 +86,7 @@ CONFIG_BT_QCOMSMD=m
 # from here, because `bluetoothctl show` only reports what BlueZ cached.
 CONFIG_BT_DEBUGFS=y
 
-# The board's three LEDs (red power, green WLAN, blue WAN) are gpio-leds.
+# The board's three LEDs (red power, green status, blue WAN) are gpio-leds.
 CONFIG_LEDS_GPIO=y
 CONFIG_LEDS_TRIGGER_TIMER=y
 CONFIG_LEDS_TRIGGER_HEARTBEAT=y
