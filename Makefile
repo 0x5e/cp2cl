@@ -52,10 +52,14 @@ UID_GID  := $(shell id -u):$(shell id -g)
 # The uid of the build user in docker/buildroot.Dockerfile.
 BR_UID   := 1000
 
-# Both products land in dist/, and each is named for what produced it: the board,
-# and the same three facts the page shows as `v0.10.0 (9063c18-dirty)` — the tag
-# on the commit, `dev` when it carries none, the short commit, and `-dirty` when
-# the tree does not match it.
+# Both products land in dist/, one directory each — the program under app/, the
+# image under firmware/ — and each is named for what produced it: the program for
+# its target, the image for its board, because both boards' images are kept side
+# by side and neither binary runs on the other board.
+#
+# The image is named for the board and for this tree: the tag on the commit,
+# `dev` when it carries none, the short commit, and `-dirty` when the tree does
+# not match it — the same facts the page shows as `v0.12.0 (8582d5a-dirty)`.
 #
 # Both boards are handed out as `.tar.gz` holding one filesystem image. The
 # NanoPi's is a card image written over the whole card; the UFI001C's is the
@@ -64,7 +68,8 @@ BR_UID   := 1000
 # macOS unpacks on a double-click; a bare `.img.gz` it may refuse.
 #
 # The Buildroot release is read back out of the Dockerfile that pins it rather
-# than written here a second time: a second copy is a copy that goes stale.
+# than written here a second time: a second copy is a copy that goes stale. No
+# product carries it in its name, but a change of release empties the volume.
 DIST          := dist
 BR_VERSION    := $(shell sed -n 's/^ARG BUILDROOT_VERSION=//p' docker/buildroot.Dockerfile)
 CP2CL_VERSION := $(shell git describe --tags --exact-match 2>/dev/null || echo dev)
@@ -73,16 +78,24 @@ CP2CL_COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 # dirty by design; only a different commit is a change worth naming.
 DIRTY         := $(shell git status --porcelain --ignore-submodules=dirty 2>/dev/null)
 
-# What post-image.sh left in images/, and the name it carries inside the
-# archive. Both are `.img`; the wrapper around them is `.tar.gz` either way.
+# `dist/app/cp2cl-<os>-<arch>`, out of the triple: `cp2cl-linux-armv7` here and
+# `cp2cl-linux-aarch64` for the UFI001C. Flat, one file per target: a copy taken
+# from dist/ says which board it was built for in its own name.
+APP_OS   := $(word 3,$(subst -, ,$(TARGET)))
+APP_ARCH := $(word 1,$(subst -, ,$(TARGET)))
+APP      := $(DIST)/app/cp2cl-$(APP_OS)-$(APP_ARCH)
+
+# `dist/firmware/cp2cl-<version>-<commit>[-dirty]-<board>.tar.gz`.
+FW_DIR := $(DIST)/firmware
+FW     := $(FW_DIR)/cp2cl-$(CP2CL_VERSION)-$(CP2CL_COMMIT)$(if $(DIRTY),-dirty)-$(BOARD).tar.gz
+
+# What post-image.sh left in images/, and the name it carries inside the archive.
+# Both are `.img`; the wrapper around them is `.tar.gz` either way.
 ifeq ($(BOARD),ufi001c)
 PACKED := cp2cl-ufi001c.img
 else
 PACKED := sdcard.img
 endif
-FW_EXT := tar.gz
-
-FW := $(DIST)/buildroot-$(BR_VERSION)-cp2cl-$(BOARD)-$(CP2CL_VERSION)-$(CP2CL_COMMIT)$(if $(DIRTY),-dirty).$(FW_EXT)
 
 # What a firmware build starts from.
 #
@@ -176,13 +189,14 @@ patched:
 	  fi; \
 	done
 
-# The program, statically linked, staged into dist/ where buildroot/package/
-# cp2cl points at it. Nothing else from the checkout is staged: a `local` site
-# over the repository root would drag target/ through rsync on every build.
+# The program, statically linked, staged as dist/app/cp2cl-<os>-<arch>, where
+# buildroot/package/cp2cl reads it from. Nothing else from the checkout is
+# staged: a `local` site over the repository root would drag target/ through
+# rsync on every build.
 app: patched
 	$(RUN) cargo build --release --target $(TARGET)
-	mkdir -p $(DIST)
-	install -m 0755 target/$(TARGET)/release/cp2cl $(DIST)/cp2cl
+	mkdir -p $(DIST)/app
+	install -m 0755 target/$(TARGET)/release/cp2cl $(APP)
 
 test: patched
 	$(RUN) cargo test
@@ -217,7 +231,7 @@ image:
 # overlays changed, so what the card carries is the configuration and the
 # overlays and nothing else that was ever on the volume.
 firmware: app buildroot-image
-	mkdir -p $(DIST)
+	mkdir -p $(FW_DIR)
 	docker volume create $(BR_VOL) >/dev/null
 	docker run --rm -u 0:0 -v $(BR_VOL):/build \
 		-v "$(CURDIR)":/src:ro \
@@ -230,7 +244,7 @@ firmware: app buildroot-image
 				&& make -C /opt/buildroot O=/build -j$$(nproc)"'
 	docker run --rm -u $(UID_GID) -v $(BR_VOL):/build -v "$(CURDIR)/$(DIST)":/out \
 		$(BR_IMAGE) sh -c 'tar -C /build/images --owner=0 --group=0 -cf - $(PACKED) \
-			| gzip -9 > /out/$(notdir $(FW))'
+			| gzip -9 > /out/firmware/$(notdir $(FW))'
 	@echo "image: $(FW)"
 
 endif

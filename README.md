@@ -88,7 +88,8 @@ Then, from the repository root:
 make app
 ```
 
-`make all` builds this and the image below, and both products land in `dist/`.
+`make all` builds this and the image below, and both products land in `dist/`:
+the binary under `app/`, the image under `firmware/`.
 `make test` runs the unit tests in the same container. The `cp2cl-cargo` volume
 holds the cargo cache, so only the first build downloads anything, and the build
 products come out owned by you rather than by root: **this crate only builds for
@@ -107,10 +108,11 @@ cost is name resolution — musl reads
 nothing resolved through NSS or mDNS resolves here. Neither the CarPlay nor the
 CarLife path resolves a name.
 
-The result is `dist/cp2cl`, staged from
-`target/armv7-unknown-linux-musleabihf/release/cp2cl`. Copy it to
-the board and run it there; it needs no files of its own, and everything it takes
-from outside comes from `/etc/cp2cl/config.json` — see [Settings](#settings).
+The result is `dist/app/cp2cl-linux-armv7`, staged from
+`target/armv7-unknown-linux-musleabihf/release/cp2cl`; the UFI001C's build lands in
+`dist/app/cp2cl-linux-aarch64`. Copy it to the board and run it there; it needs no
+files of its own, and everything it takes from outside comes from
+`/etc/cp2cl/config.json` — see [Settings](#settings).
 
 ### What the phone renders at
 
@@ -477,15 +479,16 @@ installed onto it. One command, from the checkout:
 make firmware                    # NanoPi Duo2, the default
 make firmware BOARD=ufi001c      # UFI001C
 make firmware BOARD=all          # both, one after the other
-# dist/buildroot-2025.02.19-cp2cl-nanopi-duo2-v0.11.0-<sha>.img.gz
+# dist/firmware/cp2cl-v0.12.0-8582d5a-nanopi-duo2.tar.gz
+# dist/firmware/cp2cl-v0.12.0-8582d5a-ufi001c.tar.gz
 ```
 
 Unpack it and write the `.img` to a card, then put the card in the board. The
 file is gzipped because it is what is handed out: the card is 73 MB and the
-copy that travels is 15 MB. The name is the version the page shows, spelled as a
-file name has to: the Buildroot release, the board, the tag on the commit (`dev`
-when it carries none), the short commit, and `-dirty` when the tree does not
-match it.
+copy that travels is 15 MB. The name says which board it is for and which build
+it is: the tag on the commit (`dev` when it carries none), the short commit, and
+`-dirty` when the tree does not match it. Both boards' images sit in the same
+directory, so the board's name is what tells them apart.
 
 Everything the board runs is
 in it: the access point, the program, and the init scripts that start them in the

@@ -8,9 +8,14 @@
 # already are. Buildroot's cargo infrastructure would have to reproduce all
 # three, and would still be the slowest thing in the build.
 #
-# `make app` stages the binary under dist/, and that directory is the source.
-# Nothing else from the repository is copied, so `target/` never enters the
-# rsync that a `local` site would otherwise run over the whole checkout.
+# `make app` stages the binary as dist/app/cp2cl-linux-<arch>, flat, one file
+# per target, and the one this build was for is installed. `ARCH` is Buildroot's
+# own — `aarch64` here, `arm` for the board that builds as armv7 — so the name is
+# spelled from it rather than configured a second time. The `local` site takes
+# the whole of dist/app, which carries the other board's binary too; it is
+# installed by name, so that copy is rsync traffic and nothing else. Nothing else
+# from the repository is copied: `target/` and the images under dist/firmware/
+# never enter that rsync.
 #
 ################################################################################
 
@@ -18,14 +23,18 @@
 # lived here said 0.9.1 while the crate said 0.11.0, and this number is what
 # names the build directory and what the log prints on every package step.
 CP2CL_VERSION = $(shell sed -n 's/^version = "//p' $(BR2_EXTERNAL_CP2CL_PATH)/../Cargo.toml | head -n1 | tr -d '"')
-CP2CL_SITE = $(BR2_EXTERNAL_CP2CL_PATH)/../dist
+CP2CL_APP_ARCH = $(if $(filter aarch64,$(ARCH)),aarch64,armv7)
+# Both boards run Linux, so the operating system half of the name is written
+# here; the architecture half comes from the build.
+CP2CL_APP = cp2cl-linux-$(CP2CL_APP_ARCH)
+CP2CL_SITE = $(BR2_EXTERNAL_CP2CL_PATH)/../dist/app
 CP2CL_SITE_METHOD = local
 CP2CL_LICENSE = GPL-3.0-or-later
 CP2CL_INSTALL_STAGING = NO
 
 # The credentials the program reads at runtime, out of the directory it also
-# writes its own state to. They are not in dist/ — that is the binary and nothing
-# else — and not in the binary either, so they come straight from the checkout,
+# writes its own state to. They are not in dist/ — that is the binaries and the
+# images — and not in the binary either, so they come straight from the checkout,
 # by the names the program asks for them: one of the three is the CarLife app's
 # key, the other two are the MFi pair, and the public half beside them stays
 # behind because only the test that checks the pair reads it.
@@ -34,7 +43,7 @@ CP2CL_CREDENTIAL_FILES = \
 	$(addprefix $(CP2CL_CREDENTIALS)/,identity.pk8 certificate.p7b carlife_md_rsa_private.pem)
 
 define CP2CL_INSTALL_TARGET_CMDS
-	$(INSTALL) -D -m 0755 $(@D)/cp2cl $(TARGET_DIR)/usr/bin/cp2cl
+	$(INSTALL) -D -m 0755 $(@D)/$(CP2CL_APP) $(TARGET_DIR)/usr/bin/cp2cl
 	$(INSTALL) -d -m 0755 $(TARGET_DIR)/etc/cp2cl
 	for f in $(CP2CL_CREDENTIAL_FILES); do \
 		if [ -f "$$f" ]; then \
