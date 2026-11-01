@@ -11,6 +11,7 @@
 - 支持 UFI001C（MSM8916 + WCN3620）：新增该板的 buildroot 配置、内核片段、WCNSS 固件加载与指示灯。rootfs 单独成镜像，用 `edl w userdata` 刷入；内核不在 16 MiB 的 boot 分区里，由 lk2nd 从根文件系统的 `/extlinux/extlinux.conf` 读起。
 - UFI001C 的根文件系统在刷机后的第一次启动里在线扩容到分区末尾，红灯 200 毫秒亮灭闪烁，扩容成功即重启，Wi-Fi、蓝牙与 cp2cl 都等到重启之后才启动。`/var/lib/rootfs-resized` 标记使之后的开机不再扩容。
 - UFI001C 的镜像带上蓝牙取证要用的三样东西：`btmon` 抓 HCI 帧，`btmgmt` 改控制器的 Secure Connections 开关（bluez 把它挂在 `noinst_PROGRAMS` 下，`--enable-tools` 也不安装，由 post-build 单独装入），内核开 `CONFIG_BT_DEBUGFS` 才有 `/sys/kernel/debug/bluetooth/hci0/`。
+- 长按板上的按键 3 秒解除所有蓝牙配对，并让 USB 链路重插一次（与设置页的重启是同一个动作），用来从「手机已解绑、主机还留着记录」的状态里恢复。
 
 ### 变更
 

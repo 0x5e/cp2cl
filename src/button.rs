@@ -5,7 +5,12 @@
 //! three seconds are counted here. That is the only way to get a hold out of a
 //! driver that reports edges — none of the events it sends means "still down".
 //!
-//! What a long press does is one log line, for now.
+//! A hold is the way back from a pairing that is out of step: every phone this
+//! machine is paired with is unpaired, and the wired link is re-plugged — the
+//! same one replug the settings page asks for — so that the head unit enumerates
+//! the accessory again. Nothing else on the board can be reached without one,
+//! and the state that needs clearing is exactly the state that keeps a phone
+//! from connecting.
 
 use std::fs::File;
 use std::io::{self, Read};
@@ -44,7 +49,10 @@ const EVENT_LEN: usize = if std::mem::size_of::<usize>() == 4 {
     24
 };
 
-pub async fn watch() {
+/// Watches the button for a press held down, and unpairs the phones when one
+/// comes. `adapter` is the controller the pairings belong to; `replug` is the
+/// channel the settings page asks the wired link through.
+pub async fn watch(adapter: String, replug: mpsc::Sender<()>) {
     let Some(path) = device() else {
         tracing::warn!("button.unavailable device={DEVICE} consequence=long_press_unused");
         return;
@@ -78,7 +86,33 @@ pub async fn watch() {
                 tracing::info!("button.long_press held_ms={}", HELD.as_millis());
                 // One report per press: the release is what arms the next one.
                 held_until = None;
+                unpair_phones(&adapter, &replug).await;
             }
+        }
+    }
+}
+
+/// Unpairs every phone known to this machine, then asks for one replug.
+///
+/// The replug is the settings page's own: the same channel, and the same
+/// unbind-and-bind the wired half does with it. Not a restart of the program —
+/// a hold taken while someone is watching the panel should cost the link a
+/// second, not the session.
+async fn unpair_phones(adapter: &str, replug: &mpsc::Sender<()>) {
+    // A count of zero is a press that could not clear anything, which the
+    // per-device line inside `unpair_all` is the detail of.
+    match crate::wireless::unpair_all(adapter).await {
+        Ok(count) => tracing::info!("bt.unpaired count={count} adapter={adapter}"),
+        Err(e) => tracing::warn!("bt.unpaired_unavailable adapter={adapter} err={e}"),
+    }
+    match replug.try_send(()) {
+        // A full channel is one replug already on its way, which is what this
+        // would have asked for.
+        Ok(()) | Err(mpsc::error::TrySendError::Full(())) => {
+            tracing::info!("main.replug reason=button");
+        }
+        Err(mpsc::error::TrySendError::Closed(())) => {
+            tracing::warn!("main.replug_refused err=carlife_half_not_running");
         }
     }
 }

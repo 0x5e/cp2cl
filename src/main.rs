@@ -110,6 +110,11 @@ async fn main() -> Result<()> {
         settings::level_name(cfg.log_level)
     );
 
+    // One channel for the two things that ask the wired link to come back: the
+    // button and the settings page. One replug is a gadget unbind and bind,
+    // which is what makes a head unit enumerate the accessory again.
+    let (replug, replug_requested) = tokio::sync::mpsc::channel(1);
+
     // The board's lights and its one button. All three are best-effort: an
     // image without them runs exactly as before and says so once.
     //
@@ -133,7 +138,7 @@ async fn main() -> Result<()> {
     if !cfg.wireless {
         led.radios(true);
     }
-    tokio::spawn(button::watch());
+    tokio::spawn(button::watch(cfg.bt_adapter.clone(), replug.clone()));
     if let Some(lights) = &lights {
         // A wireless run already catches SIGTERM to put the Bluetooth
         // controllers back, and that path ends by returning through here, where
@@ -159,8 +164,6 @@ async fn main() -> Result<()> {
         s.carplay.name = hostname();
         s.carplay.bt_mac = config::bt_address(&cfg.bt_adapter);
     });
-
-    let (replug, replug_requested) = tokio::sync::mpsc::channel(1);
 
     // Bound before the streams are: a page that cannot be reached is worth
     // saying so about at startup rather than when someone goes looking for it.

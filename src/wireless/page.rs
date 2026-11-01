@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use zbus::Connection;
-use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue};
 
 use super::Handover;
 
@@ -33,6 +33,19 @@ const ANSWER: Duration = Duration::from_secs(15);
 /// on its own: dropping it is what makes it page us again.
 const STALE_SECS: u64 = 10;
 const STALE: Duration = Duration::from_secs(STALE_SECS);
+
+/// What a removal from BlueZ's tree came back as, at every step.
+type Failure = Box<dyn std::error::Error + Send + Sync>;
+
+/// How many times a removal BlueZ called busy is tried again, and how long
+/// between the tries.
+///
+/// BlueZ will not remove a device it is connecting to, nor one that is still on
+/// the link, and answers `Resource busy`. The disconnect in `unpair` is the
+/// whole answer to the second case; the first runs its course in a moment, so
+/// this waits it out rather than handing the caller a failure it cannot act on.
+const REMOVE_TRIES: u32 = 5;
+const REMOVE_PAUSE: Duration = Duration::from_millis(500);
 
 /// BlueZ's object tree, as `GetManagedObjects` returns it.
 type Objects = HashMap<OwnedObjectPath, HashMap<String, HashMap<String, OwnedValue>>>;
@@ -166,7 +179,13 @@ async fn disconnect(conn: &Connection, path: &str) -> Result<(), zbus::Error> {
 async fn paired(
     conn: &Connection,
     adapter: &str,
-) -> Result<Vec<Phone>, Box<dyn std::error::Error>> {
+) -> Result<Vec<Phone>, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(wanted(&managed(conn).await?, adapter))
+}
+
+/// Everything BlueZ has an object for: every adapter, and every device it
+/// remembers.
+async fn managed(conn: &Connection) -> Result<Objects, Box<dyn std::error::Error + Send + Sync>> {
     let reply = conn
         .call_method(
             Some("org.bluez"),
@@ -176,8 +195,87 @@ async fn paired(
             &(),
         )
         .await?;
-    let objects: Objects = reply.body().deserialize()?;
-    Ok(wanted(&objects, adapter))
+    Ok(reply.body().deserialize()?)
+}
+
+/// Unpairs every phone known to this controller, and says how many went.
+///
+/// A pairing lives in two places and only one of them is ours: a phone that was
+/// unpaired on its own side keeps its entry here, and BlueZ will not start a
+/// pairing it believes is already done. Handing the entry back is what gives the
+/// phone something to pair with again — it is the same thing the phone's own
+/// "Forget This Device" does from the other end.
+///
+/// One address that will not go does not stop the rest: a press that clears
+/// three phones but leaves the fourth is worth more than one that clears none,
+/// and the one that failed is named rather than counted. The total is what
+/// went, so a caller that reads zero knows nothing was cleared.
+pub(crate) async fn unpair_all(adapter: &str) -> Result<usize, Failure> {
+    let conn = Connection::system().await?;
+    let mut removed = 0;
+    for phone in wanted(&managed(&conn).await?, adapter) {
+        match unpair(&conn, adapter, &phone.path).await {
+            Ok(()) => removed += 1,
+            Err(e) => {
+                tracing::warn!("bt.unpair_failed adapter={adapter} mac={} err={e}", phone.mac);
+            }
+        }
+    }
+    Ok(removed)
+}
+
+/// Removes one device, which takes its link key with it. The pairing is what is
+/// useless, not the phone: nothing here decides a phone is unwelcome, only that
+/// the key beside this address no longer opens anything.
+///
+/// The link is dropped first, and that is not a courtesy: BlueZ refuses to
+/// remove a device that is still connected, and a press taken while a phone is
+/// on the link is the ordinary case — see `REMOVE_TRIES` for the half-way state
+/// that has to be waited out.
+async fn unpair(conn: &Connection, adapter: &str, path: &str) -> Result<(), Failure> {
+    // Nothing to drop on an idle address, and an error here says only that.
+    let _ = disconnect(conn, path).await;
+    let mut busy: Option<Failure> = None;
+    for attempt in 0..REMOVE_TRIES {
+        if attempt > 0 {
+            tokio::time::sleep(REMOVE_PAUSE).await;
+        }
+        match remove(conn, adapter, path).await {
+            Ok(()) => return Ok(()),
+            Err(e) if occupied(&e) => busy = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    match busy {
+        Some(e) => Err(e),
+        // Unreachable: the loop above leaves only by returning or by recording
+        // the error that kept it going.
+        None => Ok(()),
+    }
+}
+
+/// One `Adapter1.RemoveDevice`, the only thing that takes a link key with it.
+async fn remove(conn: &Connection, adapter: &str, path: &str) -> Result<(), Failure> {
+    let device = ObjectPath::try_from(path)?;
+    conn.call_method(
+        Some("org.bluez"),
+        format!("/org/bluez/{adapter}").as_str(),
+        Some("org.bluez.Adapter1"),
+        "RemoveDevice",
+        &(device,),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Whether BlueZ's error says the address is still occupied rather than gone.
+///
+/// It has two ways of saying it, and both come back through the same `Failed`:
+/// `Resource busy` for a device that is still connected, and `InProgress` for
+/// one whose connection is being set up.
+fn occupied(e: &Failure) -> bool {
+    let text = e.to_string().to_lowercase();
+    text.contains("busy") || text.contains("in progress")
 }
 
 /// The devices worth calling, each with the address it is known by.

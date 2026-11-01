@@ -37,6 +37,7 @@ mod page;
 mod power;
 
 pub use linux::watch;
+pub(crate) use page::unpair_all;
 
 /// Whether the two radios this board needs have come up: an interface for the
 /// access point, and a Bluetooth controller.
