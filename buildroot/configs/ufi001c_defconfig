@@ -44,8 +44,8 @@ BR2_TARGET_ROOTFS_EXT2=y
 BR2_TARGET_ROOTFS_EXT2_2=y
 # -E resize=16G is what makes the rest of the partition usable. The image is
 # 128 MB because that is what has to travel over EDL; userdata is measured in
-# GiB, and S01resizefs grows the filesystem online to the end of it on the first
-# boot, then reboots. Online growth
+# GiB, and S12firstboot grows the filesystem online to the end of it on the first
+# boot. Online growth
 # describes new groups in the blocks reserved here -- s_reserved_gdt_blocks, 63 of
 # them, which is 2048 groups, 16 GiB at 1 KiB blocks -- and grows no further than
 # they describe; with nothing left to describe it reaches for meta_bg instead,
@@ -124,7 +124,7 @@ BR2_PACKAGE_DROPBEAR=y
 BR2_PACKAGE_DROPBEAR_CLIENT=y
 BR2_PACKAGE_DROPBEAR_DISABLE_REVERSEDNS=y
 BR2_PACKAGE_DROPBEAR_SMALL=y
-# resize2fs, for S01resizefs. The root filesystem is mounted when it runs, so the
+# resize2fs, for S12firstboot. The root filesystem is mounted when it runs, so the
 # growth goes through EXT4_IOC_RESIZE_FS, and this is the tool that drives it.
 # e2fsprogs brings util-linux's libblkid and libuuid with it; the space they take
 # is part of the 128 MB, and the space the growth adds is measured in GiB.

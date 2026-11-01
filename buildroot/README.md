@@ -155,7 +155,7 @@ the core; none is loaded on this chip.
 
 ### 3.2 Paths written
 
-    /etc/hostname             S12name, first boot only
+    /etc/hostname             S12firstboot, first boot only
     /etc/hosts                127.0.1.1, first boot only
     /etc/hostapd/*.conf       ssid=, first boot only
     /etc/cp2cl/pairings.json
@@ -197,7 +197,7 @@ the core; none is loaded on this chip.
 
 ### 3.5 Start order
 
-    S00diag  S10radio  S12name  S30dbus-daemon  S40bluetoothd  S50cp2cl  S55ap
+    S00diag  S10radio  S12firstboot  S30dbus-daemon  S40bluetoothd  S50cp2cl  S55ap
 
 ### 3.6 Not needed
 
@@ -285,10 +285,12 @@ rootfs that always mounts beats one that needs fsck after a power cut.
 The image is 128 MB because that is what has to travel over EDL, while userdata is
 measured in GiB. That space is not left unused: mke2fs is called with
 `-E resize=16G`, which reserves the blocks needed to describe more block groups,
-and S01resizefs runs `resize2fs` on the first boot to extend the mounted
-filesystem to the end of the partition, then reboots. It writes
-`/var/lib/rootfs-resized` before doing so, and that file is what makes it the first
-boot only — delete it to grow again. Online growth is the only kind available here — the root filesystem is
+and S12firstboot runs `resize2fs` on the first boot, where the board's image
+carries the tool, to extend the mounted filesystem to the end of the partition.
+It records the outcome in `/var/lib/rootfs-resized`, and that file is what makes
+this the first boot only — delete it to grow again. The restart at the end of
+that script is for the name it writes in the same pass. Online growth is the
+only kind available here — the root filesystem is
 in use — and it is also the only kind lk2nd survives: a filesystem grown without
 reserved GDT blocks is converted to meta_bg, whose descriptor layout the reader
 cannot follow, and the next boot finds no kernel.

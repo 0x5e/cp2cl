@@ -535,7 +535,7 @@ two cannot drift apart. See [Wireless CarPlay](#wireless-carplay).
 |---|---|
 | `S00diag` | writes what the boot had to say to `/var/log`, then samples the radio for two minutes |
 | `S10radio` | loads the Wi-Fi and Bluetooth modules, and returns |
-| `S12name` | names the board after `wlan0`'s address and restarts, once, on the first boot |
+| `S12firstboot` | grows the root filesystem, names the board after `wlan0`'s address, and restarts, once |
 | `S50cp2cl` | the program, which sets no environment and reads `/etc/cp2cl/config.json` |
 | `S50dropbear` | dropbear, for the console the image does not otherwise have |
 | `S55ap` | hostapd on `wlan0` at `192.168.4.1/24`, then dnsmasq for the leases |

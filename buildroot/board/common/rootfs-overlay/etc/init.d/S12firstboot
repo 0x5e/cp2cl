@@ -1,0 +1,227 @@
+#!/bin/sh
+#
+# The first boot, and the only script in this tree that is about a board being
+# new rather than about a board running.
+#
+# Two things happen here: the root filesystem is grown to the partition it was
+# written to, and the name the board goes by is written into /etc/hostname and
+# into the access point's configuration. Writing the name ends in one restart,
+# so that the kernel and hostapd come up with it. Everything else about the boot
+# is the same on a fresh card as on one a year old.
+#
+# Neither step is counted. The filesystem carries /var/lib/rootfs-resized once
+# the growth has been settled and the name is the prefix in /etc/hostname, so a
+# boot that finds both returns here without touching a light. An image flashed
+# again carries neither and does both — which is what makes this the first boot
+# rather than a rule about boot numbers.
+#
+# The red light beats 200 ms on and 200 ms off while this runs, and goes back to
+# the steady it came up with before returning. Its name is the one thing here
+# that is the device tree's: a light declared with a colour and a function and
+# no label is named `<colour>:<function>` by the kernel, and every board in this
+# tree declares its power light with LED_COLOR_ID_RED and LED_FUNCTION_POWER.
+# That is the contract this file holds to, and the reason no board needs a copy
+# of it: a new board names its power light the same way and inherits this script.
+
+IFACE=wlan0
+PREFIX=CarPlayBox
+HOSTNAME_FILE=/etc/hostname
+HOSTAPD_FILE=/etc/hostapd/hostapd.conf
+MARKER=/var/lib/rootfs-resized
+LOG=/var/log
+
+# The power light, by the name the device tree gives it: see the header.
+LED=/sys/class/leds/red:power
+
+# 0.2 s a round, 20 s in all. The interface is there in under two seconds on the
+# NanoPi, and a few seconds in on the UFI001C, where the WCNSS firmware is
+# loaded into the remote processor first; this is the ceiling for a card that is
+# slow rather than a radio that is missing.
+ROUNDS=100
+
+say() {
+	[ -w "$LOG" ] && echo "firstboot: $*" >> "$LOG/boot.log"
+}
+
+# A board that is working on something should not look like one that is not.
+# The rate is the fast end of what the program uses, so a light beating at 200
+# is this boot working rather than the program saying anything.
+#
+# The kernel's timer trigger, not a loop here: it keeps blinking while resize2fs
+# holds this script, with no second process to schedule. A board whose tree
+# names its light something else is one this does nothing to, and the step goes
+# on without it.
+blink() {
+	[ -e "$LED" ] || return 0
+	echo timer > "$LED/trigger" 2>/dev/null || return 0
+	echo 200 > "$LED/delay_on" 2>/dev/null
+	echo 200 > "$LED/delay_off" 2>/dev/null
+}
+
+# Back to what the device tree gives it — `default-state = "on"` — which is what
+# the program expects to find, and what a board with no program looks like.
+steady() {
+	[ -e "$LED" ] || return 0
+	echo none > "$LED/trigger" 2>/dev/null
+	echo 1 > "$LED/brightness" 2>/dev/null
+}
+
+named() {
+	case "$(cat "$HOSTNAME_FILE" 2>/dev/null)" in
+	"$PREFIX"-*) return 0 ;;
+	esac
+	return 1
+}
+
+# Grows the root filesystem to the end of its partition, once. Returns 0 when
+# the step is settled — grown, or nothing this board has to grow — and 1 when
+# resize2fs failed, which leaves the marker unwritten so the next boot tries
+# again. The marker carries the outcome rather than a claim that anything grew:
+# on a board with no e2fsprogs there is nothing to grow and no tool to grow it
+# with, and that is settled too.
+#
+# The growth has to be the online kind, because the root is mounted. New block
+# groups are described in the blocks mke2fs reserved for exactly this
+# (-E resize=16G in the UFI001C's defconfig, 2048 groups), and the kernel grows
+# no further than those describe. A filesystem whose reservation covered less
+# than its partition does not stop short of the end: it converts itself to
+# meta_bg and grows, and meta_bg is a descriptor layout lk2nd cannot follow when
+# it looks for the kernel on the next boot.
+#
+# The ramdisk mounts the root partition by device node, so /proc/mounts carries
+# the node here and not the /dev/root the kernel would have used.
+grow() {
+	if ! command -v resize2fs >/dev/null 2>&1; then
+		echo "Growing root filesystem: no resize2fs in this image, nothing to grow"
+		say "no resize2fs"
+		echo "no resize2fs in this image" > "$MARKER"
+		return 0
+	fi
+
+	dev=$(awk '$2 == "/" { print $1; exit }' /proc/mounts)
+	case "$dev" in
+	/dev/*) ;;
+	*)
+		echo "Growing root filesystem: $dev is not a device node, skipped"
+		say "skipped $dev"
+		echo "$dev is not a device node" > "$MARKER"
+		return 0
+		;;
+	esac
+
+	out=$(resize2fs "$dev" 2>&1)
+	if [ $? -ne 0 ]; then
+		echo "Growing root filesystem: resize2fs failed on $dev"
+		printf '%s\n' "$out"
+		say "failed $dev"
+		return 1
+	fi
+
+	# "The filesystem on /dev/mmcblk0p27 is now 1048576 (1k) blocks long."
+	echo "$(printf '%s\n' "$out" | tail -n 1)"
+	say "grew $dev"
+
+	# The one line the growth printed, kept on the filesystem it describes: the
+	# log it also went to is tmpfs and does not survive the restart below.
+	printf '%s\n' "$out" | tail -n 1 > "$MARKER"
+	return 0
+}
+
+# The name this board goes by: `CarPlayBox` and the last four characters of
+# wlan0's own address, e.g. `CarPlayBox-3F7B`. Two files carry it — /etc/hostname
+# and the ssid= hostapd beacons — and everything else asks the kernel: the
+# Bluetooth name, the name the phone lists, the name the car is given, the page.
+#
+# Both are read by the next boot and not by this one: the kernel holds the name
+# it came up with and hostapd has not opened its file yet, so a write here is a
+# write waiting for a restart. That is the restart at the end of this function,
+# and it is the reason the step is worth gating on the file rather than on a
+# marker of its own.
+#
+# A board whose radio never appears keeps the plain prefix and boots on: a name
+# without a suffix is a worse name, not a reason not to start.
+name_board() {
+	current=$(cat "$HOSTNAME_FILE" 2>/dev/null)
+	case "$current" in
+	"$PREFIX"-*)
+		echo "Naming the board: $current (kept)"
+		say "$current"
+		return 0
+		;;
+	esac
+
+	i=0
+	while [ ! -r "/sys/class/net/$IFACE/address" ]; do
+		i=$((i + 1))
+		if [ "$i" -ge "$ROUNDS" ]; then
+			echo "Naming the board: no $IFACE after 20 s, staying $PREFIX"
+			say "$PREFIX radio_absent=true"
+			return 0
+		fi
+		sleep 0.2
+	done
+
+	hex=$(sed 's/://g' "/sys/class/net/$IFACE/address" 2>/dev/null)
+	case "$hex" in
+	????????????) ;;
+	*)
+		echo "Naming the board: $IFACE address unreadable, staying $PREFIX"
+		say "$PREFIX address_unreadable=true"
+		return 0
+		;;
+	esac
+	name="$PREFIX-$(printf %s "$hex" | tail -c 4 | tr 'a-f' 'A-F')"
+
+	echo "$name" > "$HOSTNAME_FILE"
+	# Read back before going any further: a name that did not reach the file is
+	# a name that is computed and then restarted into being computed again.
+	if [ "$(cat "$HOSTNAME_FILE" 2>/dev/null)" != "$name" ]; then
+		echo "Naming the board: could not write $HOSTNAME_FILE"
+		say "$name write_failed=true"
+		return 1
+	fi
+
+	# What this machine resolves itself as, and the network the phone is told to
+	# join. The program hands the phone this same file, so a name left behind
+	# here would be two names for one board.
+	sed -i "s/^127\.0\.1\.1.*/127.0.1.1	$name/" /etc/hosts
+	sed -i "s/^ssid=.*/ssid=$name/" "$HOSTAPD_FILE"
+
+	echo "Naming the board: $name, restarting"
+	say "$name"
+	# `sync` first: this is the applet's own restart, with no rcK and no unmount
+	# behind it.
+	sync
+	reboot
+	# Only reached when the restart did not happen. The card has the answer, so
+	# the next boot is the one that applies it.
+	say "$name restart_failed=true"
+	return 0
+}
+
+start() {
+	# Nothing to do is the ordinary boot: no light, no line in the log, and
+	# nothing waited for.
+	if [ -e "$MARKER" ] && named; then
+		return 0
+	fi
+
+	blink
+
+	# A growth that failed does not stop the boot: the marker stays unwritten
+	# and the next boot tries again, while this one goes on to name the board.
+	[ -e "$MARKER" ] || grow
+
+	name_board
+
+	steady
+}
+
+case "$1" in
+	start) start ;;
+	stop|restart|reload) ;;
+	*)
+		echo "Usage: $0 {start}"
+		exit 1
+		;;
+esac
