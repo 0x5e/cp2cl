@@ -10,7 +10,7 @@ IMAGE  := cp2cl-builder
 # turn. It decides the Rust target — the NanoPi Duo2 is armv7 hard-float, the
 # UFI001C is aarch64 — and the Buildroot defconfig a build starts from.
 BOARDS := nanopi-duo2 ufi001c
-BOARD  ?= nanopi-duo2
+BOARD  ?= all
 
 ifeq ($(filter $(BOARD),$(BOARDS) all),)
 $(error BOARD is '$(BOARD)'; it is one of: $(BOARDS) all)
@@ -57,10 +57,11 @@ BR_UID   := 1000
 # on the commit, `dev` when it carries none, the short commit, and `-dirty` when
 # the tree does not match it.
 #
-# The NanoPi is handed out as `.img.gz`: a card image, compressed on the way out.
-# The UFI001C is a `.tar.gz` of the root filesystem, a boot image for `fastboot
-# boot`, lk2nd and the scripts that write them — it keeps the stock partition
-# table, so there is no card image to write.
+# Both boards are handed out as `.tar.gz` holding one filesystem image. The
+# NanoPi's is a card image written over the whole card; the UFI001C's is the
+# userdata partition, which is also where its kernel is — the partition table,
+# lk2nd and the calibration data are left as they are. The tar wrapper is what
+# macOS unpacks on a double-click; a bare `.img.gz` it may refuse.
 #
 # The Buildroot release is read back out of the Dockerfile that pins it rather
 # than written here a second time: a second copy is a copy that goes stale.
@@ -72,14 +73,14 @@ CP2CL_COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 # dirty by design; only a different commit is a change worth naming.
 DIRTY         := $(shell git status --porcelain --ignore-submodules=dirty 2>/dev/null)
 
-# What post-image.sh left in images/, and what the copy in dist/ is called.
+# What post-image.sh left in images/, and the name it carries inside the
+# archive. Both are `.img`; the wrapper around them is `.tar.gz` either way.
 ifeq ($(BOARD),ufi001c)
-PACKED := cp2cl-ufi001c.tar.gz
-FW_EXT := tar.gz
+PACKED := cp2cl-ufi001c.img
 else
 PACKED := sdcard.img
-FW_EXT := img.gz
 endif
+FW_EXT := tar.gz
 
 FW := $(DIST)/buildroot-$(BR_VERSION)-cp2cl-$(BOARD)-$(CP2CL_VERSION)-$(CP2CL_COMMIT)$(if $(DIRTY),-dirty).$(FW_EXT)
 
@@ -228,10 +229,8 @@ firmware: app buildroot-image
 				&& $(BR_REFRESH) \
 				&& make -C /opt/buildroot O=/build -j$$(nproc)"'
 	docker run --rm -u $(UID_GID) -v $(BR_VOL):/build -v "$(CURDIR)/$(DIST)":/out \
-		$(BR_IMAGE) sh -c 'case $(PACKED) in \
-			*.img) gzip -9 -c /build/images/$(PACKED) ;; \
-			*) cat /build/images/$(PACKED) ;; \
-			esac > /out/$(notdir $(FW))'
+		$(BR_IMAGE) sh -c 'tar -C /build/images --owner=0 --group=0 -cf - $(PACKED) \
+			| gzip -9 > /out/$(notdir $(FW))'
 	@echo "image: $(FW)"
 
 endif

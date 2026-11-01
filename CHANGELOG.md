@@ -15,7 +15,7 @@
 
 ### 变更
 
-- `make firmware BOARD=nanopi-duo2|ufi001c|all` 选择目标板（默认 `nanopi-duo2`，`all` 依次构建两块板），构建镜像同时带 aarch64 与 armv7 交叉工具链。
+- `make firmware BOARD=nanopi-duo2|ufi001c|all` 选择目标板（默认 `all`，依次构建两块板），构建镜像同时带 aarch64 与 armv7 交叉工具链。两块板都产出 `.tar.gz`（内含一个 `.img`）：NanoPi 是整卡镜像，UFI001C 是 `userdata` 分区，后者不再附带 `boot.img` 与刷写脚本。
 - 蓝牙配对改为 `NoInputNoOutput`：手机上不再出现 6 位数字要人工确认，链路按 just works 建立。这块板没有屏幕，那个数字本来也无处显示。
 - 蓝牙会话不再订阅播放信息，媒体改由连上 Wi-Fi 之后的那个会话订阅。此前封面（一百多 KB）跟在启动协商的同一条链路上，排在手机加入热点之前。
 
