@@ -19,9 +19,9 @@ CONFIG_USB_CONFIGFS_F_FS=y
 
 CONFIG_MMC=y
 
-# Wi-Fi and Bluetooth. The stack above the bus is the same on both boards; which
-# driver binds to the chip, and whether it is a module, is the board fragment's
-# business.
+# Wi-Fi and Bluetooth. The stack above the bus is the same on all three boards;
+# which driver binds to the chip, and whether it is a module, is the board
+# fragment's business.
 #
 # The first two are menuconfigs, and a minimal vendor defconfig — sunxi's, for
 # one — turns both off. With them off nothing underneath exists, and the lines
@@ -33,8 +33,9 @@ CONFIG_WLAN=y
 CONFIG_CFG80211=y
 CONFIG_MAC80211=y
 CONFIG_RFKILL=y
-# The core and the serial profile, shared by both boards. The transport is
-# board-specific: UART+btbcm on the NanoPi, rpmsg on the UFI001C.
+# The core and the serial profile, shared by all three boards. The transport is
+# board-specific: UART+btbcm on the NanoPi, SDIO+tty on the Zero 2W, rpmsg on the
+# UFI001C.
 CONFIG_BT=m
 CONFIG_BT_BREDR=y
 CONFIG_BT_RFCOMM=m

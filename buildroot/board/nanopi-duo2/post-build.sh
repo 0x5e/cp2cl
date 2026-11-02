@@ -2,8 +2,9 @@
 #
 # Runs after the overlays are laid down and before the image is made.
 #
-# What both boards need — /var/log as a directory, /var/run as a symlink, the key
-# permissions, the glib2 tools nothing links — is in board/common/post-build.sh.
+# What every board needs — /var/log as a directory, /var/run as a symlink, the
+# key permissions, the glib2 tools nothing links — is in
+# board/common/post-build.sh.
 # What is here is the firmware: three files that belong to this chip, copied with
 # a check, so a board whose blobs are missing fails here instead of booting into
 # a radio that never appears.

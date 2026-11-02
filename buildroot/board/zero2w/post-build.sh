@@ -2,8 +2,9 @@
 #
 # Runs after the overlays are laid down and before the image is made.
 #
-# What both boards need — /var/log as a directory, /var/run as a symlink, the key
-# permissions, the glib2 tools nothing links — is in board/common/post-build.sh.
+# What every board needs — /var/log as a directory, /var/run as a symlink, the
+# key permissions, the glib2 tools nothing links — is in
+# board/common/post-build.sh.
 # What is here is the radio: the four blobs the UWE5622 asks for, and the attach
 # tool its Bluetooth half needs. Each is checked, so a board whose files are
 # missing fails here instead of booting into a radio that never appears.
