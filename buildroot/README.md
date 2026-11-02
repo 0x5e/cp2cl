@@ -1,8 +1,8 @@
 # What `cp2cl` needs from the system
 
-Values only. Everything listed is what `board/` and the two `configs/*_defconfig`
-in this tree already provide; another rootfs has to provide the same. Where the
-two boards differ is section 4.
+Values only. Everything listed is what `board/` and the three
+`configs/*_defconfig` in this tree already provide; another rootfs has to provide
+the same. Where the boards differ is sections 4 and 5.
 
 ## 1. Kernel
 
@@ -47,6 +47,11 @@ Dual role is the mode selection's default with both `USB` and `USB_GADGET` on,
 so `kernel.fragment` does not set it. It is the mode the port has to be in: the
 program writes `peripheral` to the controller's `mode` file before it composes
 the gadget.
+
+The platform glue, `CONFIG_USB_MUSB_SUNXI`, *depends on* `NOP_USB_XCEIV`,
+`PHY_SUN4I_USB` and `EXTCON` rather than selecting them: with any one missing it
+is dropped, and the gadget goes with it, leaving one `Value requested for … not
+in final .config` line in the build log.
 
 ### 1.4 Wi-Fi — CarPlay
 
@@ -298,3 +303,79 @@ cannot follow, and the next boot finds no kernel.
 `boot.img` is still built, for `fastboot boot` only — it cannot be flashed. When
 lk2nd boots nothing, its own log says why: `fastboot oem log && fastboot
 get_staged log.txt`.
+
+## 5. Orange Pi Zero 2W — H618 + UWE5622
+
+Same program, different plumbing, and one part of it outside mainline. What
+differs from the NanoPi:
+
+    storage         microSD on mmc0 = mmcblk0, the same two-partition card
+    USB             port 0 (PHY0, musb) is the socket that also powers the
+                    board, and its device tree says `dr_mode = "peripheral"`:
+                    the head unit enumerates us there, with no `mode` file to
+                    write and no ID pin in the way. Port 1 (PHY1, EHCI/OHCI) is
+                    a host — wired CarPlay goes there, a phone charges there
+    Wi-Fi           UWE5622 behind SDIO on mmc1, 802.11a/b/g/n/ac 1x1. No
+                    mainline driver: `package/uwe5622` builds the out-of-tree
+                    one, and `patches/linux/0004` describes the bus and its
+                    power sequence, which 6.18 does not
+    Bluetooth       the same chip, as a tty over that SDIO function.
+                    `sprdbt_tty` publishes /dev/ttyBT0 and `S10radio` puts the
+                    HCI line discipline on it with `hciattach_opi -s 1500000`;
+                    BlueZ's own hciattach has no `sprd` type, so the vendor
+                    binary is in `board/zero2w/firmware/`
+    firmware        wcnmodem.bin and wifi_2355b001_1ant.ini are opened by path
+                    rather than through request_firmware: installed in
+                    /lib/firmware/uwe5622/ with a symlink beside it, one at each
+                    place the driver looks
+    access point    5 GHz: hw_mode=a, channel 149, 40 MHz, 802.11n. 802.11ac is
+                    off on purpose
+    LEDs            one, `green:status` on PC13. The red power LED sits on the
+                    supply rail and no GPIO reaches it: the program finds no
+                    `red:` device and logs `led.unavailable`, and the first
+                    boot's blink does nothing
+    image           sdcard.img — SPL at 8 KiB, a 32 MB FAT boot partition, a
+                    64 MB ext4 root. The boot half is four times the NanoPi's
+                    because the arm64 image is 13.5 MB gzipped where the armv7
+                    one is a megabyte or two. The root is 51 MB used of 64, and
+                    24 MB of that is the 836 modules arm64's defconfig leaves
+                    on — the list at the end of `board/zero2w/kernel.fragment`
+                    is what cuts them down from 1059
+    libc            glibc, where the other two boards are musl: `hciattach_opi`
+                    is a glibc binary and there is no other tool that speaks
+                    `sprd`. cp2cl is statically linked either way
+
+Eight things that cost an evening each:
+
+    * The pwrseq clock has to be named `ext_clock`, which is what
+      mmc-pwrseq-simple asks for; any other name is an optional clock that is
+      silently skipped, and the chip comes up without its 32 kHz sleep clock.
+      The pin it fans out on (PG10) has to be muxed to the clock function.
+    * `CONFIG_DEBUG_INFO` stopped being a bool in 6.10 — it is a choice, and
+      arm64's defconfig picks DWARF. The `is not set` line every fragment in
+      this tree carries is dropped without a word, and the debug information
+      ships. `CONFIG_DEBUG_INFO_NONE` is the symbol that turns it off now.
+    * The generic defconfig leaves a thousand modules on and they do not fit
+      the 64 MB root: mkfs stops partway through the tree with `Could not
+      allocate block`, after everything else has built. The list at the end of
+      `board/zero2w/kernel.fragment` is what brings it back to the NanoPi's
+      sizes.
+    * U-Boot's arm64 image is packed by binman with TF-A's bl31.bin: without
+      `BR2_TARGET_UBOOT_NEEDS_ATF_BL31` the build fails after the whole of
+      U-Boot has compiled, with `is missing external blobs and is
+      non-functional: atf-bl31`. That is also where the board's PSCI comes from
+      — the H616 has no secure firmware of its own.
+    * The kernel builds `certs/extract-cert` against the host's `openssl/bio.h`,
+      which a container does not have: the build dies ten minutes in, on a host
+      program, with the error in a parallel job's output. Buildroot's
+      `BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL` is the fix.
+    * The driver reads its blobs by absolute path, not through the firmware
+      loader, and there is no console to say a path was wrong.
+    * Channel 149 needs the regulatory database: without `wireless-regdb` the
+      world domain has no CN and hostapd refuses the channel. Nothing falls back
+      to 2.4 GHz on its own — that is `hw_mode=g` and `channel=11` in
+      `/etc/hostapd/hostapd.conf`.
+    * The board is powered from the head unit over the same 5 V rail the host
+      socket's VBUS comes from. A phone that draws more than the head unit
+      allows browns the board out; the first thing to check if it reboots when
+      the cable goes in.
