@@ -1,7 +1,9 @@
-# Applied on top of U-Boot's own nanopi_duo2_defconfig.
+# Sits on top of U-Boot's own defconfig for the board, the one
+# BR2_TARGET_UBOOT_BOARD_DEFCONFIG names. What is here is what a sunxi board
+# with no console and no USB boot media needs the defconfig corrected on.
 
-# Two seconds of countdown, waiting for a key on a console this board does not
-# have.
+# No countdown: the default waits two seconds for a key on a console this board
+# does not have.
 CONFIG_BOOTDELAY=0
 
 # ARCH_SUNXI selects USE_PREBOOT, so preboot cannot be turned off, only emptied:
