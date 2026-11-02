@@ -1,0 +1,71 @@
+The radio is on mmc1: an SDIO function, 4-bit, not removable, behind a power
+sequence of its own. Mainline 6.18 has the board but describes none of it, so
+the bus stays disabled and the out-of-tree driver has nothing to bind to.
+
+What the sequence has to do, from the schematic and from the vendor tree: hold
+WL_REG_ON (PG18, active low) in reset, drive the RTC's 32 kHz fanout out of
+PG10 as the chip's sleep clock, and give both rails a name. The clock's
+property name is the one mmc-pwrseq-simple asks for — `ext_clock`; a node that
+calls it anything else is one the driver silently skips, because an optional
+clock that cannot be found is not an error.
+
+The regulators are fixed and always on rather than the PMIC's own: they are
+rails this board wires straight to the module, and nothing here turns them off.
+
+--- a/arch/arm64/boot/dts/allwinner/sun50i-h618-orangepi-zero2w.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-h618-orangepi-zero2w.dts
+@@ -8,6 +8,7 @@
+ #include "sun50i-h616.dtsi"
+ #include "sun50i-h616-cpu-opp.dtsi"
+ 
++#include <dt-bindings/clock/sun6i-rtc.h>
+ #include <dt-bindings/gpio/gpio.h>
+ #include <dt-bindings/interrupt-controller/arm-gic.h>
+ #include <dt-bindings/leds/common.h>
+@@ -188,4 +188,46 @@
+ &usbphy {
+ 	usb1_vbus-supply = <&reg_vcc5v>;
+ 	status = "okay";
+ };
++
++/ {
++	reg_vcc33_wifi: vcc33-wifi {
++		/* Always-on 3.3V rail for the radio */
++		compatible = "regulator-fixed";
++		regulator-name = "vcc33-wifi";
++		regulator-min-microvolt = <3300000>;
++		regulator-max-microvolt = <3300000>;
++		regulator-always-on;
++		vin-supply = <&reg_vcc5v>;
++	};
++
++	reg_vcc_wifi_io: vcc-wifi-io {
++		/* Always-on 1.8V rail for the radio IO */
++		compatible = "regulator-fixed";
++		regulator-name = "vcc-wifi-io";
++		regulator-min-microvolt = <1800000>;
++		regulator-max-microvolt = <1800000>;
++		regulator-always-on;
++		vin-supply = <&reg_vcc5v>;
++	};
++
++	wifi_pwrseq: wifi-pwrseq {
++		compatible = "mmc-pwrseq-simple";
++		clocks = <&rtc CLK_OSC32K_FANOUT>;
++		clock-names = "ext_clock";
++		pinctrl-names = "default";
++		pinctrl-0 = <&x32clk_fanout_pin>;
++		reset-gpios = <&pio 6 18 GPIO_ACTIVE_LOW>;	/* PG18 */
++		post-power-on-delay-ms = <200>;
++	};
++};
++
++&mmc1 {
++	vmmc-supply = <&reg_vcc33_wifi>;
++	vqmmc-supply = <&reg_vcc_wifi_io>;
++	mmc-pwrseq = <&wifi_pwrseq>;
++	bus-width = <4>;
++	non-removable;
++	mmc-ddr-1_8v;
++	status = "okay";
++};

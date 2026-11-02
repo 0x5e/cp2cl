@@ -6,10 +6,11 @@
 # the cargo cache, so only the first build downloads anything.
 IMAGE  := cp2cl-builder
 
-# Which firmware to build: `nanopi-duo2`, `ufi001c`, or `all` for every board in
-# turn. It decides the Rust target — the NanoPi Duo2 is armv7 hard-float, the
-# UFI001C is aarch64 — and the Buildroot defconfig a build starts from.
-BOARDS := nanopi-duo2 ufi001c
+# Which firmware to build: `nanopi-duo2`, `orangepi-zero2w`, `ufi001c`, or `all`
+# for every board in turn. It decides the Rust target — the NanoPi Duo2 is armv7
+# hard-float, the other two are aarch64 — and the Buildroot defconfig a build
+# starts from.
+BOARDS := nanopi-duo2 orangepi-zero2w ufi001c
 BOARD  ?= all
 
 ifeq ($(filter $(BOARD),$(BOARDS) all),)
@@ -22,7 +23,14 @@ endif
 # built again from an empty download cache.
 BOARD_CFG := $(subst -,_,$(BOARD))
 
-ifeq ($(BOARD),ufi001c)
+# The architecture is the board's, not the build's: written out per board, and
+# not as "whatever is not the UFI001C is armv7", which was a rule that held only
+# while there were two boards and one of them was the odd one out.
+BOARD_ARCH_nanopi-duo2     := armv7
+BOARD_ARCH_orangepi-zero2w := aarch64
+BOARD_ARCH_ufi001c         := aarch64
+
+ifeq ($(BOARD_ARCH_$(BOARD)),aarch64)
 TARGET    := aarch64-unknown-linux-musl
 CMAKE_TF  := /opt/aarch64-toolchain.cmake
 else
@@ -42,11 +50,11 @@ RUN    := docker run --rm -u "$$(id -u):$$(id -g)" \
 # it installs the credentials from authentication/ into the image and reads the
 # version out of Cargo.toml, and both are one level up from the external tree.
 BR_IMAGE := cp2cl-buildroot
-# One build volume per board. The two boards cross-compile for different
-# architectures, and Buildroot's output tree (host toolchain, per-package build
-# directories, module tree) is architecture-specific: a shared volume makes the
-# second board's build reuse the first board's objects, which fails somewhere
-# deep in the toolchain rather than at the configuration step.
+# One build volume per board. The boards cross-compile for two architectures,
+# and Buildroot's output tree (host toolchain, per-package build directories,
+# module tree) is architecture-specific: a shared volume makes the second
+# board's build reuse the first board's objects, which fails somewhere deep in
+# the toolchain rather than at the configuration step.
 BR_VOL   := cp2cl-buildroot-out-$(BOARD_CFG)
 UID_GID  := $(shell id -u):$(shell id -g)
 # The uid of the build user in docker/buildroot.Dockerfile.
@@ -54,18 +62,18 @@ BR_UID   := 1000
 
 # Both products land in dist/, one directory each — the program under app/, the
 # image under firmware/ — and each is named for what produced it: the program for
-# its target, the image for its board, because both boards' images are kept side
-# by side and neither binary runs on the other board.
+# its target, the image for its board, because every board's image is kept side
+# by side and no binary runs on another board.
 #
 # The image is named for the board and for this tree: the tag on the commit,
 # `dev` when it carries none, the short commit, and `-dirty` when the tree does
 # not match it — the same facts the page shows as `v0.12.0 (8582d5a-dirty)`.
 #
-# Both boards are handed out as `.tar.gz` holding one filesystem image. The
-# NanoPi's is a card image written over the whole card; the UFI001C's is the
-# userdata partition, which is also where its kernel is — the partition table,
-# lk2nd and the calibration data are left as they are. The tar wrapper is what
-# macOS unpacks on a double-click; a bare `.img.gz` it may refuse.
+# Every board is handed out as `.tar.gz` holding one filesystem image. The
+# NanoPi's and the Zero 2W's are card images written over the whole card; the
+# UFI001C's is the userdata partition, which is also where its kernel is — the
+# partition table, lk2nd and the calibration data are left as they are. The tar
+# wrapper is what macOS unpacks on a double-click; a bare `.img.gz` it may refuse.
 #
 # The Buildroot release is read back out of the Dockerfile that pins it rather
 # than written here a second time: a second copy is a copy that goes stale. No
@@ -78,9 +86,9 @@ CP2CL_COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 # dirty by design; only a different commit is a change worth naming.
 DIRTY         := $(shell git status --porcelain --ignore-submodules=dirty 2>/dev/null)
 
-# `dist/app/cp2cl-<os>-<arch>`, out of the triple: `cp2cl-linux-armv7` here and
-# `cp2cl-linux-aarch64` for the UFI001C. Flat, one file per target: a copy taken
-# from dist/ says which board it was built for in its own name.
+# `dist/app/cp2cl-<os>-<arch>`, out of the triple: `cp2cl-linux-armv7` for the
+# NanoPi and `cp2cl-linux-aarch64` for the other two. Flat, one file per target:
+# a copy taken from dist/ says which board it was built for in its own name.
 APP_OS   := $(word 3,$(subst -, ,$(TARGET)))
 APP_ARCH := $(word 1,$(subst -, ,$(TARGET)))
 APP      := $(DIST)/app/cp2cl-$(APP_OS)-$(APP_ARCH)

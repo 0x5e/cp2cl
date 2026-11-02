@@ -4,6 +4,13 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## 未发布
+
+### 新增
+
+- 新增 Orange Pi Zero 2W 板支持：一个 Type-C 作车机口并由车机供电，另一个作主机口，热点走 5 GHz。
+- 板载 UWE5622 的驱动、固件与蓝牙附加工具随镜像一起出包，主线无驱动。
+
 ## v0.14.0 beta — 2026-11-01
 
 ### 新增
