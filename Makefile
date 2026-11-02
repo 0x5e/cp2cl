@@ -180,7 +180,7 @@ BR_RELEASE := { [ -e /build/.br-$(BR_VERSION) ] || { \
 	find /build -mindepth 1 -maxdepth 1 ! -name dl -exec rm -rf {} + \
 	&& touch /build/.br-$(BR_VERSION); }; }
 
-.PHONY: all app test image firmware buildroot-image patched
+.PHONY: all app test image firmware buildroot-image patched clean
 
 # `all` is not a board: it is every board, one build after another. Recursion
 # rather than a rule that builds both in one pass, because the Rust target and
@@ -281,3 +281,29 @@ endif
 # Once per machine, and again only when the Dockerfile changes.
 buildroot-image:
 	docker build -t $(BR_IMAGE) -f docker/buildroot.Dockerfile docker/
+
+# `clean` takes back what the builds wrote and leaves the checkout as it was
+# found: the products in dist/ and the cargo artifacts in target/.
+#
+# What it deliberately keeps is dl/. That is the download cache, the one part of
+# a build volume a rebuild cannot make back, and it is worth an hour of fetching;
+# everything beside it goes — the Buildroot tree, its stamps, the host tools and
+# the images — because a build that was interrupted leaves stamps that say a
+# package is finished when half of it is on disk, and no later make disagrees.
+# The next build compiles; it does not fetch.
+#
+# Per board, or every board's when BOARD=all. This rule works from the board list
+# rather than through BOARD_CFG, so it does not need the recursion the build
+# targets use — nothing here is read once when this makefile is.
+CLEAN_VOLS := $(foreach b,$(if $(filter all,$(BOARD)),$(BOARDS),$(BOARD)),\
+	cp2cl-buildroot-out-$(subst -,_,$(b)))
+
+clean:
+	rm -rf $(DIST) target
+	@for v in $(CLEAN_VOLS); do \
+		docker volume inspect $$v >/dev/null 2>&1 || continue; \
+		docker image inspect $(BR_IMAGE) >/dev/null 2>&1 || continue; \
+		docker run --rm -u 0:0 -v $$v:/build $(BR_IMAGE) sh -c \
+			'find /build -mindepth 1 -maxdepth 1 ! -name dl -exec rm -rf {} +' \
+		&& printf 'emptied %s\n' $$v; \
+	done
