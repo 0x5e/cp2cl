@@ -429,10 +429,10 @@ pub struct Airplay {
 }
 
 /// How many round trips the page's three numbers are taken over. The phone
-/// answers once a second, so this is a minute of the link's behaviour: long
+/// answers once a second, so this is five minutes of the link's behaviour: long
 /// enough for a stalling access point to show up in it, short enough that a
 /// link which has recovered stops being described by what it used to be.
-const RTT_WINDOW: usize = 60;
+const RTT_WINDOW: usize = 300;
 
 /// The recent round trips, in microseconds.
 ///
