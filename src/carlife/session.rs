@@ -180,10 +180,13 @@ const TTS_IDLE: Duration = Duration::from_millis(700);
 const MIN_FPS: i32 = 3;
 const MAX_FPS: i32 = 60;
 
-/// Where the video channel's pictures come from: the CarPlay session, or — in a
-/// run with no phone behind it — nothing but heartbeats.
+/// Where the video channel's pictures come from: the CarPlay session, or — for
+/// the tests — nothing at all.
 pub enum Frames {
     /// Nothing but heartbeats: the session is up and the car is kept waiting.
+    /// The program reaches the same state through a `Live` outlet with no
+    /// stream taken, so only a test names this one.
+    #[cfg_attr(not(test), allow(dead_code))]
     None,
     /// The CarPlay side, as it arrives. Frames are written to the car as they
     /// come in rather than on the session's own clock: they are a coded stream,
