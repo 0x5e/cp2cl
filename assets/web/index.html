@@ -294,16 +294,11 @@ const CARLIFE_ROWS = [
     : null],
 ];
 
-const CARLIFE_BLOCKS = [];
-
 const CARPLAY_ROWS = [
   ["状态", d => bool(CARPLAY_UP(d), "已连接", "未连接"), d => CARPLAY_UP(d) ? "ok" : null],
   ["接入方式", d => bool(d.wireless, "WiFi", "USB")],
   ["分辨率", d => d.screen ? size(d.screen) : null],
   ["视频编码", d => video(d.video)],
-];
-
-const CARPLAY_BLOCKS = [
   ["音频编码", d => d.audio.map(audioStream)],
 ];
 
@@ -342,9 +337,12 @@ const SPEED_ROWS = [
   ["车速", d => d.speed == null ? null : d.speed + " km/h"],
 ];
 
-function cell(label, value, tone, block) {
+function cell(label, value, tone) {
   const row = document.createElement("div");
-  row.className = block ? "weui-cell weui-cell_block" : "weui-cell";
+  // A value that is a list is a block: one line per entry, laid out as several
+  // lines instead of one value on the right.
+  const lines = Array.isArray(value) ? value : null;
+  row.className = lines ? "weui-cell weui-cell_block" : "weui-cell";
 
   const bd = document.createElement("div");
   bd.className = "weui-cell__bd";
@@ -355,11 +353,11 @@ function cell(label, value, tone, block) {
   const ft = document.createElement("div");
   ft.className = "weui-cell__ft";
   if (tone) ft.classList.add("v-" + tone);
-  if (value === null || value === "") {
+  if (value === null || value === "" || (lines && !lines.length)) {
     ft.textContent = NONE;
     ft.classList.add("none");
-  } else if (block) {
-    for (const line of value) {
+  } else if (lines) {
+    for (const line of lines) {
       const p = document.createElement("div");
       p.className = "line";
       p.textContent = line;
@@ -374,16 +372,12 @@ function cell(label, value, tone, block) {
   return row;
 }
 
-function fill(host, rows, blocks, data, up) {
+function fill(host, rows, data, up) {
   host.textContent = "";
   rows.forEach(([label, value, tone], i) => {
     const live = i === 0 || up;
-    host.appendChild(cell(label, live ? value(data) : null, live && tone ? tone(data) : null, false));
+    host.appendChild(cell(label, live ? value(data) : null, live && tone ? tone(data) : null));
   });
-  for (const [label, lines] of blocks) {
-    const value = up ? lines(data) : null;
-    host.appendChild(cell(label, value && value.length ? value : null, null, true));
-  }
 }
 
 let playingKey = "";
@@ -407,10 +401,10 @@ function renderPlaying(playing) {
   if (key !== playingKey) {
     playingKey = key;
     host.textContent = "";
-    stateLine = cell("状态", null, null, false);
+    stateLine = cell("状态", null, null);
     host.appendChild(stateLine);
     for (const [label, value] of PLAYING_ROWS) {
-      host.appendChild(cell(label, value(playing), null, false));
+      host.appendChild(cell(label, value(playing), null));
     }
     progressLine = progressRow();
     progressTrack = progressLine.querySelector(".weui-progress");
@@ -521,9 +515,9 @@ function coverCell(cover) {
 }
 
 function render(data) {
-  fill(document.getElementById("carlife"), CARLIFE_ROWS, CARLIFE_BLOCKS, data.carlife, CARLIFE_UP(data.carlife));
-  fill(document.getElementById("carplay"), CARPLAY_ROWS, CARPLAY_BLOCKS, data.carplay, CARPLAY_UP(data.carplay));
-  fill(document.getElementById("device"), DEVICE_ROWS, [], data.device || {}, true);
+  fill(document.getElementById("carlife"), CARLIFE_ROWS, data.carlife, CARLIFE_UP(data.carlife));
+  fill(document.getElementById("carplay"), CARPLAY_ROWS, data.carplay, CARPLAY_UP(data.carplay));
+  fill(document.getElementById("device"), DEVICE_ROWS, data.device || {}, true);
 
   const both = BOTH_UP(data);
   for (const id of ["playing-title", "playing"]) {
@@ -538,7 +532,7 @@ function render(data) {
   for (const id of ["gps-title", "gps"]) {
     document.getElementById(id).style.display = fix ? "" : "none";
   }
-  fill(document.getElementById("gps"), GPS_ROWS, [], fix || {}, true);
+  fill(document.getElementById("gps"), GPS_ROWS, fix || {}, true);
 
   // The speed comes and goes the same way: the section is there while the car is
   // reporting one, and a speed of zero is something the car says rather than
@@ -547,7 +541,7 @@ function render(data) {
   for (const id of ["speed-title", "speed"]) {
     document.getElementById(id).style.display = speed == null ? "none" : "";
   }
-  fill(document.getElementById("speed"), SPEED_ROWS, [], { speed }, true);
+  fill(document.getElementById("speed"), SPEED_ROWS, { speed }, true);
 }
 
 function now() {
