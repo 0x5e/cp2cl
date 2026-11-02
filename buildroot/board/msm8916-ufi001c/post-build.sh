@@ -85,7 +85,7 @@ if not 1 <= len(label) <= 16:
 print(label.ljust(16, b"\0").hex())
 PY
 )
-init_file="$BUILD_DIR/ufi001c-init"
+init_file="$BUILD_DIR/msm8916-ufi001c-init"
 sed "s/@ROOT_LABEL_HEX@/$root_label_hex/" "$BOARD_DIR/initramfs/init" > "$init_file"
 if grep -q '@ROOT_LABEL_HEX@' "$init_file"; then
 	echo "post-build: the label was not substituted into init" >&2

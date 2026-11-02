@@ -40,7 +40,7 @@ COPY aarch64-toolchain.cmake /opt/aarch64-toolchain.cmake
 #
 # CMAKE_TOOLCHAIN_FILE is the armv7 one: a `docker run` of this image with no
 # override is the NanoPi build, which is what it was before the second board
-# existed. The Makefile passes the aarch64 file for BOARD=ufi001c.
+# existed. The Makefile passes the aarch64 file for BOARD=msm8916-ufi001c.
 ENV CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=arm-linux-musleabihf-gcc \
     CC_armv7_unknown_linux_musleabihf=arm-linux-musleabihf-gcc \
     CXX_armv7_unknown_linux_musleabihf=arm-linux-musleabihf-g++ \

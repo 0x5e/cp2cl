@@ -6,11 +6,11 @@
 # the cargo cache, so only the first build downloads anything.
 IMAGE  := cp2cl-builder
 
-# Which firmware to build: `nanopi-duo2`, `orangepi-zero2w`, `ufi001c`, or `all`
-# for every board in turn. It decides the Rust target — the NanoPi Duo2 is armv7
-# hard-float, the other two are aarch64 — and the Buildroot defconfig a build
-# starts from.
-BOARDS := nanopi-duo2 orangepi-zero2w ufi001c
+# Which firmware to build: `nanopi-duo2`, `orangepi-zero2w`,
+# `msm8916-ufi001c`, or `all` for every board in turn. It decides the Rust
+# target — the NanoPi Duo2 is armv7 hard-float, the other two are aarch64 — and
+# the Buildroot defconfig a build starts from.
+BOARDS := nanopi-duo2 orangepi-zero2w msm8916-ufi001c
 BOARD  ?= all
 
 ifeq ($(filter $(BOARD),$(BOARDS) all),)
@@ -24,11 +24,11 @@ endif
 BOARD_CFG := $(subst -,_,$(BOARD))
 
 # The architecture is the board's, not the build's: written out per board, and
-# not as "whatever is not the UFI001C is armv7", which was a rule that held only
-# while there were two boards and one of them was the odd one out.
+# not as "whatever is not the odd one out is armv7", which was a rule that held
+# only while there were two boards.
 BOARD_ARCH_nanopi-duo2     := armv7
 BOARD_ARCH_orangepi-zero2w := aarch64
-BOARD_ARCH_ufi001c         := aarch64
+BOARD_ARCH_msm8916-ufi001c := aarch64
 
 ifeq ($(BOARD_ARCH_$(BOARD)),aarch64)
 TARGET    := aarch64-unknown-linux-musl
@@ -98,9 +98,12 @@ FW_DIR := $(DIST)/firmware
 FW     := $(FW_DIR)/cp2cl-$(CP2CL_VERSION)-$(CP2CL_COMMIT)$(if $(DIRTY),-dirty)-$(BOARD).tar.gz
 
 # What post-image.sh left in images/, and the name it carries inside the archive.
-# Both are `.img`; the wrapper around them is `.tar.gz` either way.
-ifeq ($(BOARD),ufi001c)
-PACKED := cp2cl-ufi001c.img
+# Both are `.img`; the wrapper around them is `.tar.gz` either way. The card
+# boards write sdcard.img, because it is written over a card and has no other
+# name; the UFI001C writes one partition, which is flashed on its own and is
+# named for the board.
+ifeq ($(BOARD),msm8916-ufi001c)
+PACKED := cp2cl-$(BOARD).img
 else
 PACKED := sdcard.img
 endif

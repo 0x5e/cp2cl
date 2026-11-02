@@ -20,7 +20,8 @@
 # the Rockchip one instead.
 #
 # Nothing here is installed into the rootfs beyond the modules themselves: the
-# blobs the chip needs are the board's, and live under board/zero2w/firmware/.
+# blobs the chip needs are the board's, and live under
+# board/orangepi-zero2w/firmware/.
 #
 ################################################################################
 

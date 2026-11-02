@@ -11,7 +11,7 @@ gen_init_cpio -- because the Buildroot container has neither and installing one
 just to concatenate four files is not worth a package.
 
   mkcpio.py --output initramfs.cpio.gz \\
-      --file /init=board/ufi001c/initramfs/init \\
+      --file /init=board/msm8916-ufi001c/initramfs/init \\
       --file /bin/busybox=target/bin/busybox \\
       --file /lib/libc.so=target/lib/libc.so \\
       --symlink /lib/ld-musl-aarch64.so.1=libc.so

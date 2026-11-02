@@ -234,6 +234,12 @@ by `post-build.sh`: it would start a second dnsmasq after the one in
 
 Same program, different plumbing. What differs from the NanoPi:
 
+    board           `msm8916-ufi001c`, named for the SoC: 001C is one board that
+                    several vendors sell under their own names, and mainline's
+                    device tree is named for the vendor whose sample was
+                    submitted (thwc) — a name that is wrong on anyone else's
+                    unit
+
     storage         eMMC sdhc_1 = mmcblk0; the kernel lives in the rootfs, not
                     in the boot partition (see below)
     USB             ChipIdea, role switched by pm8916_usbin extcon. There is no
@@ -256,7 +262,7 @@ Same program, different plumbing. What differs from the NanoPi:
                     label does not depend on what the rootfs has installed. The
                     label is written once, in the defconfig; post-build.sh turns
                     it into the hex constant the ramdisk compares against
-    image           cp2cl-ufi001c.img, the rootfs itself, written with
+    image           cp2cl-msm8916-ufi001c.img, the rootfs itself, written with
                     `edl w userdata` on a board in EDL mode. The stock GPT stays:
                     lk2nd, aboot, modem and the calibration partitions are on it
     growth          the image is 128 MB, the partition is measured in GiB; the
@@ -323,7 +329,7 @@ differs from the NanoPi:
                     `sprdbt_tty` publishes /dev/ttyBT0 and `S10radio` puts the
                     HCI line discipline on it with `hciattach_opi -s 1500000`;
                     BlueZ's own hciattach has no `sprd` type, so the vendor
-                    binary is in `board/zero2w/firmware/`
+                    binary is in `board/orangepi-zero2w/firmware/`
     firmware        wcnmodem.bin and wifi_2355b001_1ant.ini are opened by path
                     rather than through request_firmware: installed in
                     /lib/firmware/uwe5622/ with a symlink beside it, one at each
@@ -339,7 +345,7 @@ differs from the NanoPi:
                     because the arm64 image is 13.5 MB gzipped where the armv7
                     one is a megabyte or two. The root is 51 MB used of 64, and
                     24 MB of that is the 836 modules arm64's defconfig leaves
-                    on — the list at the end of `board/zero2w/kernel.fragment`
+                    on — the list at the end of `board/orangepi-zero2w/kernel.fragment`
                     is what cuts them down from 1059
     libc            glibc, where the other two boards are musl: `hciattach_opi`
                     is a glibc binary and there is no other tool that speaks
@@ -361,7 +367,7 @@ Eight things that cost an evening each:
     * The generic defconfig leaves a thousand modules on and they do not fit
       the 64 MB root: mkfs stops partway through the tree with `Could not
       allocate block`, after everything else has built. The list at the end of
-      `board/zero2w/kernel.fragment` is what brings it back to the NanoPi's
+      `board/orangepi-zero2w/kernel.fragment` is what brings it back to the NanoPi's
       sizes.
     * U-Boot's arm64 image is packed by binman with TF-A's bl31.bin: without
       `BR2_TARGET_UBOOT_NEEDS_ATF_BL31` the build fails after the whole of

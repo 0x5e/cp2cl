@@ -1,6 +1,12 @@
 # UFI001C / UFI001B — Qualcomm MSM8916 (Snapdragon 410), 512 MB, 4 GB eMMC,
 # WCN3620 (2.4 GHz 1x1 Wi-Fi + Bluetooth 4.0), no display, no SD slot.
 #
+# Named for the SoC rather than for a manufacturer, unlike the other two boards:
+# 001C is one board that several vendors sell under their own names, and the
+# device tree in mainline is named for the vendor whose sample was submitted —
+# thwc, msm8916-thwc-ufi001c.dts. A directory named after that vendor would be
+# wrong on anyone else's unit of the same board.
+#
 # Boot chain: the stock aboot loads lk2nd from the boot partition, and lk2nd
 # loads the kernel out of the root filesystem, which is the partition called
 # userdata. Not out of the boot partition: it is 16 MiB, lk2nd occupies the first
@@ -84,7 +90,7 @@ BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y
 # the fragment is not enough — it is selected back on by other symbols — so the
 # build gets the headers it needs. sunxi's defconfig never asked for this.
 BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
-BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_CP2CL_PATH)/board/common/kernel.fragment $(BR2_EXTERNAL_CP2CL_PATH)/board/ufi001c/kernel.fragment"
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_CP2CL_PATH)/board/common/kernel.fragment $(BR2_EXTERNAL_CP2CL_PATH)/board/msm8916-ufi001c/kernel.fragment"
 BR2_LINUX_KERNEL_DTS_SUPPORT=y
 BR2_LINUX_KERNEL_INTREE_DTS_NAME="qcom/msm8916-thwc-ufi001c"
 # Image.gz, because it is a file lk2nd loads and gunzips itself: 14.7 MB against
@@ -98,7 +104,7 @@ BR2_LINUX_KERNEL_IMAGEGZ=y
 # BR2_LINUX_KERNEL_INSTALL_TARGET is not set
 
 # No U-Boot: lk2nd is the bootloader, and the release image is downloaded by
-# board/ufi001c/post-image.sh rather than built here.
+# board/msm8916-ufi001c/post-image.sh rather than built here.
 
 BR2_PACKAGE_BUSYBOX=y
 # kmod's tools are only visible when busybox is told to let other packages
@@ -138,6 +144,6 @@ BR2_PACKAGE_E2FSPROGS=y
 BR2_PACKAGE_E2FSPROGS_RESIZE2FS=y
 BR2_PACKAGE_CP2CL=y
 
-BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_CP2CL_PATH)/board/common/rootfs-overlay $(BR2_EXTERNAL_CP2CL_PATH)/board/ufi001c/rootfs-overlay"
-BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_CP2CL_PATH)/board/ufi001c/post-build.sh"
-BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_CP2CL_PATH)/board/ufi001c/post-image.sh"
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_CP2CL_PATH)/board/common/rootfs-overlay $(BR2_EXTERNAL_CP2CL_PATH)/board/msm8916-ufi001c/rootfs-overlay"
+BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_CP2CL_PATH)/board/msm8916-ufi001c/post-build.sh"
+BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_CP2CL_PATH)/board/msm8916-ufi001c/post-image.sh"

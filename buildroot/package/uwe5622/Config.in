@@ -15,6 +15,6 @@ config BR2_PACKAGE_UWE5622
 	  It is not enough on its own. The device tree has to describe
 	  the SDIO bus and the power sequence, and the blobs the WCN
 	  core reads by path — wcnmodem.bin and wifi_<chip>_<ant>ant.ini
-	  — have to be on the target: see board/zero2w/post-build.sh.
+	  — have to be on the target: see board/orangepi-zero2w/post-build.sh.
 
 	  https://github.com/armbian/uwe5622

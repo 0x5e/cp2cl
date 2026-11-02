@@ -14,11 +14,15 @@
 # it compressed.
 set -eu
 
+# The image is named for the board, after the directory this script sits in:
+# unlike the card boards there is one product, and it is flashed on its own.
+BOARD=$(basename "$(cd "$(dirname "$0")" && pwd)")
+
 KERNEL="$BINARIES_DIR/Image.gz"
 DTB="$BINARIES_DIR/msm8916-thwc-ufi001c.dtb"
 RAMDISK="$TARGET_DIR/boot/initramfs.cpio.gz"
 ROOTFS="$BINARIES_DIR/rootfs.ext2"
-IMAGE="$BINARIES_DIR/cp2cl-ufi001c.img"
+IMAGE="$BINARIES_DIR/cp2cl-$BOARD.img"
 
 for f in "$KERNEL" "$DTB" "$RAMDISK" "$ROOTFS"; do
 	[ -f "$f" ] || { echo "post-image: $f is missing" >&2; exit 1; }
