@@ -69,11 +69,11 @@ BR_UID   := 1000
 # `dev` when it carries none, the short commit, and `-dirty` when the tree does
 # not match it — the same facts the page shows as `v0.12.0 (8582d5a-dirty)`.
 #
-# Every board is handed out as `.tar.gz` holding one filesystem image. The
-# NanoPi's and the Zero 2W's are card images written over the whole card; the
-# UFI001C's is the userdata partition, which is also where its kernel is — the
-# partition table, lk2nd and the calibration data are left as they are. The tar
-# wrapper is what macOS unpacks on a double-click; a bare `.img.gz` it may refuse.
+# Every board is handed out as one filesystem image, uncompressed, under the name
+# the flashing tool is pointed at. The NanoPi's and the Zero 2W's are card images
+# written over the whole card; the UFI001C's is the userdata partition, which is
+# also where its kernel is — the partition table, lk2nd and the calibration data
+# are left as they are.
 #
 # The Buildroot release is read back out of the Dockerfile that pins it rather
 # than written here a second time: a second copy is a copy that goes stale. No
@@ -93,15 +93,14 @@ APP_OS   := $(word 3,$(subst -, ,$(TARGET)))
 APP_ARCH := $(word 1,$(subst -, ,$(TARGET)))
 APP      := $(DIST)/app/cp2cl-$(APP_OS)-$(APP_ARCH)
 
-# `dist/firmware/cp2cl-<version>-<commit>[-dirty]-<board>.tar.gz`.
+# `dist/firmware/cp2cl-<version>-<commit>[-dirty]-<board>.img`.
 FW_DIR := $(DIST)/firmware
-FW     := $(FW_DIR)/cp2cl-$(CP2CL_VERSION)-$(CP2CL_COMMIT)$(if $(DIRTY),-dirty)-$(BOARD).tar.gz
+FW     := $(FW_DIR)/cp2cl-$(CP2CL_VERSION)-$(CP2CL_COMMIT)$(if $(DIRTY),-dirty)-$(BOARD).img
 
-# What post-image.sh left in images/, and the name it carries inside the archive.
-# Both are `.img`; the wrapper around them is `.tar.gz` either way. The card
-# boards write sdcard.img, because it is written over a card and has no other
-# name; the UFI001C writes one partition, which is flashed on its own and is
-# named for the board.
+# What post-image.sh left in the volume's images/, which is what crosses back. The
+# card boards write sdcard.img, because it is written over a card and has no other
+# name; the UFI001C writes one partition, which is flashed on its own and is named
+# for the board. Either way it lands in dist/ under the name above.
 ifeq ($(BOARD),msm8916-ufi001c)
 PACKED := cp2cl-$(BOARD).img
 else
@@ -243,12 +242,12 @@ image:
 # The build runs as uid 1000, not as root: host-tar's configure refuses to run as
 # root. The volume is root-owned when it is created, so the container starts as
 # root, hands it over, and drops to the builder. Only the image crosses back, in
-# a second container running as you — compressed on the way out, so what lands in
-# dist/ is the file that is handed out rather than one more copy to make. `dd`
-# rather than `cp` was how the raw card crossed back: on this bind mount cp
-# finishes the write and then fails to deallocate the tail, which leaves a copy
-# of the right length and an exit status that stops the build. `gzip -c` writes
-# the bytes it compresses and nothing more, so there is no tail to give back.
+# a second container running as you.
+#
+# `cat` and not `cp` or `dd`: on this bind mount both of those finish the write
+# and then fail to deallocate the tail, which leaves a copy of the right length
+# and an exit status that stops the build. A redirect writes the bytes it is
+# given and nothing more, so there is no tail to give back.
 #
 # `BR_REFRESH` between the configuration and the make is what makes a new binary
 # reach the card. `_defconfig` comes first because `BR_FRESH` fingerprints the
@@ -272,8 +271,7 @@ firmware: app buildroot-image
 				&& $(BR_REFRESH) \
 				&& make -C /opt/buildroot O=/build -j$$(nproc)"'
 	docker run --rm -u $(UID_GID) -v $(BR_VOL):/build -v "$(CURDIR)/$(DIST)":/out \
-		$(BR_IMAGE) sh -c 'tar -C /build/images --owner=0 --group=0 -cf - $(PACKED) \
-			| gzip -9 > /out/firmware/$(notdir $(FW))'
+		$(BR_IMAGE) sh -c 'cat /build/images/$(PACKED) > /out/firmware/$(notdir $(FW))'
 	@echo "image: $(FW)"
 
 endif
