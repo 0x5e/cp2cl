@@ -63,5 +63,13 @@ CONFIG_NLS_UTF8=y
 # CONFIG_FB is not set
 # CONFIG_SOUND is not set
 # CONFIG_USB_STORAGE is not set
-# CONFIG_DEBUG_INFO is not set
+
+# Not `# CONFIG_DEBUG_INFO is not set`: since 6.10 the symbol is a choice, and a
+# fragment can pick an option of a choice but cannot unset one. The `is not set`
+# form is dropped without a word and vmlinux keeps the DWARF the architecture's
+# defconfig asked for — 166 MB against 53. Nothing that reaches the card
+# changes, because Image is an objcopy of the loadable sections and the modules
+# are installed stripped; what it buys is the build tree, at every rebuild.
+CONFIG_DEBUG_INFO_NONE=y
+
 # CONFIG_MODULE_SIG is not set

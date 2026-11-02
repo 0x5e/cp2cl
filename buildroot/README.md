@@ -352,9 +352,12 @@ Eight things that cost an evening each:
       silently skipped, and the chip comes up without its 32 kHz sleep clock.
       The pin it fans out on (PG10) has to be muxed to the clock function.
     * `CONFIG_DEBUG_INFO` stopped being a bool in 6.10 — it is a choice, and
-      arm64's defconfig picks DWARF. The `is not set` line every fragment in
-      this tree carries is dropped without a word, and the debug information
-      ships. `CONFIG_DEBUG_INFO_NONE` is the symbol that turns it off now.
+      arm64's defconfig picks DWARF. The `is not set` form this tree used to
+      carry was dropped without a word and vmlinux kept the DWARF, 166 MB
+      against 53; `board/common/kernel.fragment` says `CONFIG_DEBUG_INFO_NONE`
+      instead. Nothing on the card changes — Image is an objcopy of the
+      loadable sections and the modules install stripped — but the build tree
+      does, at every rebuild.
     * The generic defconfig leaves a thousand modules on and they do not fit
       the 64 MB root: mkfs stops partway through the tree with `Could not
       allocate block`, after everything else has built. The list at the end of

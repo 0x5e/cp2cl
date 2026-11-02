@@ -7,12 +7,6 @@
 
 CONFIG_MMC_SUNXI=y
 
-# board/common/kernel.fragment turns off CONFIG_DEBUG_INFO, which stopped being
-# a bool in 6.10 — it is a choice now, and arm64's defconfig picks DWARF. The
-# `is not set` line is dropped without a word, and the debug information stays in
-# vmlinux and in every module. This is the line that turns it off.
-CONFIG_DEBUG_INFO_NONE=y
-
 # The pins the radio is wired to: PG0-PG5 for SDIO, PG10 for the clock, PG18 for
 # the chip enable. Without the pinctrl driver the pwrseq node has nothing to mux
 # the 32 kHz output onto, and the chip comes up without a clock.
