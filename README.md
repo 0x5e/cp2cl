@@ -67,6 +67,13 @@ Example
 }
 ```
 
+## Performance data
+
+RTT min/avg/max in 5mins, stay in now-playing page, 1920x720@30:
+msm8916-ufi001c 4/60/1059 ms
+nanopi-duo2 3/14/183
+orangepi-zero2w todo
+
 ## Debug with CarLife Head Unit running in macOS
 
 Try this: [Setting the board up](https://github.com/0x5e/CarLifePort)
