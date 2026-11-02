@@ -306,7 +306,7 @@ const CARPLAY_ROWS = [
   ["RTT (min/avg/max)", d => {
     const r = d.airplay && d.airplay.clock_rtt_us;
     if (!r) return null;
-    const ms = v => (v / 1000).toFixed(1).replace(/\.0$/, "");
+    const ms = v => Math.round(v / 1000);
     return ms(r.min) + "/" + ms(r.avg) + "/" + ms(r.max) + " ms";
   }],
 ];
