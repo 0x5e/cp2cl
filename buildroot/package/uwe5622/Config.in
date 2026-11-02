@@ -1,0 +1,20 @@
+config BR2_PACKAGE_UWE5622
+	bool "uwe5622 (Unisoc UWE5622 radio)"
+	depends on BR2_LINUX_KERNEL
+	help
+	  Out-of-tree driver for the Unisoc (Spreadtrum) UWE5622, the
+	  Wi-Fi and Bluetooth combo behind the 20U5622 module on the
+	  Orange Pi Zero 2W. Mainline has no driver for the chip and is
+	  not likely to get one, so this tree builds the vendor source
+	  as a module set:
+
+	    uwe5622_bsp_sdio  the WCN core: SDIO, firmware download
+	    sprdwl_ng         cfg80211 Wi-Fi, station and SoftAP
+	    sprdbt_tty        Bluetooth as a tty over the same SDIO
+
+	  It is not enough on its own. The device tree has to describe
+	  the SDIO bus and the power sequence, and the blobs the WCN
+	  core reads by path — wcnmodem.bin and wifi_<chip>_<ant>ant.ini
+	  — have to be on the target: see board/zero2w/post-build.sh.
+
+	  https://github.com/armbian/uwe5622
