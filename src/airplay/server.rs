@@ -2097,11 +2097,15 @@ impl Session {
                     // Kept as well as applied: how far apart the two clocks are,
                     // and over how long a round trip that was measured, is the
                     // pair of numbers that says whether audio timing can be
-                    // trusted at all.
-                    rx_status.with(|s| {
-                        s.carplay.airplay.clock_offset_us = Some(offset as i64);
-                        s.carplay.airplay.clock_rtt_us = Some(rtt as i64);
-                    });
+                    // trusted at all. `ntp_diff` answers in seconds, so both are
+                    // scaled to the microseconds the page reports them in; a
+                    // sample the clock itself would reject is not kept either.
+                    if offset.is_finite() && rtt.is_finite() && rtt >= 0.0 {
+                        rx_status.with(|s| {
+                            s.carplay.airplay.clock_offset_us = Some((offset * 1e6) as i64);
+                            s.carplay.airplay.rtt.push((rtt * 1e6) as i64);
+                        });
+                    }
                 }
             }
         });

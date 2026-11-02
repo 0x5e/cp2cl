@@ -17,6 +17,7 @@
 //! The shape of the snapshot is the page's contract, and it is written down once
 //! — in `Snapshot::json` — rather than in three places that have to agree.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
@@ -420,11 +421,49 @@ pub struct Airplay {
     pub event_port: Option<u16>,
     /// The port the phone answers our clock requests on.
     pub timing_port: Option<u16>,
-    /// How far our clock is from the phone's, in microseconds, and the round
-    /// trip it was measured over. The first says whether the two agree; the
-    /// second says how much to trust that.
+    /// How far our clock is from the phone's, in microseconds. It says whether
+    /// the two agree, which is what audio timing rests on.
     pub clock_offset_us: Option<i64>,
-    pub clock_rtt_us: Option<i64>,
+    /// The round trips it was measured over, which say how much to trust that.
+    pub rtt: Rtt,
+}
+
+/// How many round trips the page's three numbers are taken over. The phone
+/// answers once a second, so this is a minute of the link's behaviour: long
+/// enough for a stalling access point to show up in it, short enough that a
+/// link which has recovered stops being described by what it used to be.
+const RTT_WINDOW: usize = 60;
+
+/// The recent round trips, in microseconds.
+///
+/// A window rather than three running figures, because a minimum is the one
+/// number that cannot be maintained over a stream: once the worst trip falls
+/// out, nothing else says what the next worst was.
+#[derive(Debug, Clone, Default)]
+pub struct Rtt {
+    samples: VecDeque<i64>,
+}
+
+impl Rtt {
+    pub fn push(&mut self, us: i64) {
+        if self.samples.len() == RTT_WINDOW {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(us);
+    }
+
+    /// The three numbers the page shows, or nothing before the phone has
+    /// answered once — three zeroes would say the trip is instant.
+    fn json(&self) -> Option<Value> {
+        let min = *self.samples.iter().min()?;
+        let max = *self.samples.iter().max()?;
+        let sum: i64 = self.samples.iter().sum();
+        Some(json!({
+            "min": min,
+            "avg": sum / self.samples.len() as i64,
+            "max": max,
+        }))
+    }
 }
 
 /// What the phone has been asked to render, and what that works out to.
@@ -623,7 +662,7 @@ impl Carplay {
                 "event_port": self.airplay.event_port,
                 "timing_port": self.airplay.timing_port,
                 "clock_offset_us": self.airplay.clock_offset_us,
-                "clock_rtt_us": self.airplay.clock_rtt_us,
+                "clock_rtt_us": self.airplay.rtt.json(),
             },
             "screen": self.screen.as_ref().map(|s| json!({
                 "width": s.width,
@@ -674,5 +713,53 @@ impl Carplay {
                 "channels": m.channels,
             })),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The page asks three questions of the window rather than of a running
+    /// total: the best the link gets, the worst, and where it usually sits.
+    /// What has fallen out of the window has to stop answering, or the minimum
+    /// would go on describing a link that no longer exists.
+    #[test]
+    fn the_round_trip_window_forgets_what_has_fallen_out_of_it() {
+        let mut rtt = Rtt::default();
+        assert_eq!(
+            rtt.json(),
+            None,
+            "three zeroes would say the trip is instant"
+        );
+
+        // A window that has not filled is averaged over what it holds.
+        for us in [3_000, 1_000, 2_000] {
+            rtt.push(us);
+        }
+        assert_eq!(
+            rtt.json(),
+            Some(json!({ "min": 1_000, "avg": 2_000, "max": 3_000 }))
+        );
+
+        // Filled the rest of the way with a steady 2 ms, the one 3 ms trip is
+        // still the maximum…
+        for _ in 3..RTT_WINDOW {
+            rtt.push(2_000);
+        }
+        assert_eq!(rtt.json().expect("a full window")["max"], json!(3_000));
+
+        // …and once the window turns past it, it is not: the oldest sample is
+        // the one that leaves, which is the whole reason this is a window.
+        rtt.push(2_000);
+        assert_eq!(rtt.json().expect("a turned window")["max"], json!(2_000));
+
+        // The 1 ms trip was taken second, so it outlives the 3 ms one by a turn
+        // — samples leave in the order they arrived, not by how they look.
+        rtt.push(2_000);
+        let after = rtt.json().expect("still a window");
+        assert_eq!(after["min"], json!(2_000));
+        assert_eq!(after["avg"], json!(2_000));
+        assert_eq!(after["max"], json!(2_000));
     }
 }

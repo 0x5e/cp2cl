@@ -300,6 +300,15 @@ const CARPLAY_ROWS = [
   ["分辨率", d => d.screen ? size(d.screen) : null],
   ["视频编码", d => video(d.video)],
   ["音频编码", d => d.audio.map(audioStream)],
+  // The round trip belongs to the link rather than to any one stream, and it is
+  // a measurement rather than a setting, so it is shown as three numbers: the
+  // best the link does, the worst, and where it usually sits.
+  ["RTT (min/avg/max)", d => {
+    const r = d.airplay && d.airplay.clock_rtt_us;
+    if (!r) return null;
+    const ms = v => (v / 1000).toFixed(1).replace(/\.0$/, "");
+    return ms(r.min) + "/" + ms(r.avg) + "/" + ms(r.max) + " ms";
+  }],
 ];
 
 const DEVICE_ROWS = [
