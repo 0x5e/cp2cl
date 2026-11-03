@@ -35,7 +35,7 @@ use tokio::time::Instant;
 use super::{auth, guide};
 use crate::media::{Media, Navi};
 use crate::page::{Page, Size, Statistic};
-use crate::panel::{self, Panel};
+use crate::channels::{self, ChannelEntry};
 use crate::playing::{Playing, Track};
 use crate::ports::Ports;
 use crate::press::{Command, TouchContact, PHONE_DROP, PHONE_HOOK_SWITCH, PHONE_MUTE};
@@ -329,7 +329,7 @@ where
         source,
         channel_touched: None,
         screen_in_force: None,
-        panel: Panel::default(),
+        channel_entry: ChannelEntry::default(),
         started_at: None,
         keyframe_asked: None,
         media_format: None,
@@ -712,7 +712,7 @@ struct Session<'a, W> {
     /// that number has arrived: the size the phone is asked for, when the table
     /// preconfigures one, and the density the panel's millimetres are worked out
     /// at. Nothing has been said yet, so nothing is assumed but the default.
-    panel: Panel,
+    channel_entry: ChannelEntry,
     /// When the encoder started, which is what the video channel's timestamps
     /// are measured from.
     started_at: Option<Instant>,
@@ -987,15 +987,15 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // what the millimetres are worked out at. Nothing is reported
                 // from it — `INIT_DONE` is where the screen is settled, and it is
                 // settled in one place.
-                self.panel = self.ports.delegate.panel(Some(info.channel));
-                if let Some(preset) = self.panel.preset {
+                self.channel_entry = self.ports.delegate.channel_entry(Some(info.channel));
+                if let Some(preset) = self.channel_entry.preset {
                     tracing::info!(
                         "carlife.panel_preset width={} height={} frameRate={} ppi={} \
                          source=channel_map",
                         preset.width,
                         preset.height,
                         preset.fps,
-                        self.panel.ppi
+                        self.channel_entry.ppi
                     );
                 }
                 // The other half of the authentication is owed on this number,
@@ -1230,10 +1230,10 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // here, from the size the phone is actually asked for and the
                 // density the table gives this car — 120 dpi where it says
                 // nothing. Nothing in the protocol carries a size.
-                let ppi = self.panel.ppi;
+                let ppi = self.channel_entry.ppi;
                 let physical = (
-                    panel::millimetres(in_force.width as u32, ppi),
-                    panel::millimetres(in_force.height as u32, ppi),
+                    channels::millimetres(in_force.width as u32, ppi),
+                    channels::millimetres(in_force.height as u32, ppi),
                 );
                 self.status.with(|s| {
                     s.carlife.requested = Some(Size {
@@ -1297,7 +1297,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // Only a car that nothing else has a rate for changes its own: the
                 // file's rate and a preset's are what the phone renders at, and
                 // another would leave the car pacing a picture it never sends.
-                let fixed = self.settings.screen.fps.is_some() || self.panel.preset.is_some();
+                let fixed = self.settings.screen.fps.is_some() || self.channel_entry.preset.is_some();
                 let current = self.screen_in_force.map_or(30, |screen| screen.frame_rate);
                 let accepted = match asked {
                     MIN_FPS..=MAX_FPS if !fixed => asked,
@@ -1628,7 +1628,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         &self,
         named: proto::VideoEncoderInfo,
     ) -> (proto::VideoEncoderInfo, &'static str, &'static str) {
-        let table = self.panel.preset;
+        let table = self.channel_entry.preset;
         let resolution = self
             .settings
             .screen
@@ -2396,17 +2396,17 @@ mod tests {
 
         /// The one entry of the channel table the tests use: `20062104` is a
         /// panel the table preconfigures, and every other number is not.
-        fn panel(&self, channel: Option<&str>) -> Panel {
+        fn channel_entry(&self, channel: Option<&str>) -> ChannelEntry {
             match channel {
-                Some("20062104") => Panel {
-                    preset: Some(crate::panel::Preset {
+                Some("20062104") => ChannelEntry {
+                    preset: Some(crate::channels::Preset {
                         width: 1920,
                         height: 720,
                         fps: 30,
                     }),
-                    ppi: crate::panel::DEFAULT_PPI,
+                    ppi: crate::channels::DEFAULT_PPI,
                 },
-                _ => Panel::default(),
+                _ => ChannelEntry::default(),
             }
         }
     }

@@ -7,7 +7,7 @@ use std::io;
 
 use futures_util::future::BoxFuture;
 
-use crate::panel::Panel;
+use crate::channels::ChannelEntry;
 use crate::press::Command;
 use crate::settings::Screen;
 
@@ -44,7 +44,7 @@ pub trait Delegate: Send + Sync {
     fn screen_override(&self) -> Screen;
 
     /// What the channel table says about the panel behind this channel number.
-    fn panel(&self, channel: Option<&str>) -> Panel;
+    fn channel_entry(&self, channel: Option<&str>) -> ChannelEntry;
 }
 
 /// What the binary carries besides code: the guide's pictures and the cover a

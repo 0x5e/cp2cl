@@ -15,8 +15,8 @@
 
 use std::sync::Arc;
 
-use carlife_md::link::{Assets, Desktop, Delegate, Input};
-use carlife_md::panel::Panel;
+use carlife_md::channels::ChannelEntry;
+use carlife_md::link::{Assets, Delegate, Desktop, Input};
 use carlife_md::press::Command;
 use carlife_md::settings::Screen;
 use carplay_hu::{Press, ScreenParams};
@@ -133,10 +133,10 @@ impl Delegate for Hooks {
     /// The table belongs to this program — `airplay::info` reads it for `/info`
     /// too — so the entry is looked up here and handed over as the CarLife half
     /// reads it.
-    fn panel(&self, channel: Option<&str>) -> Panel {
-        let entry = carplay_hu::entry(channel);
-        Panel {
-            preset: entry.preset.map(|preset| carlife_md::panel::Preset {
+    fn channel_entry(&self, channel: Option<&str>) -> ChannelEntry {
+        let entry = carplay_hu::channels::of(channel);
+        ChannelEntry {
+            preset: entry.preset.map(|preset| carlife_md::channels::Preset {
                 width: preset.width,
                 height: preset.height,
                 fps: preset.fps,

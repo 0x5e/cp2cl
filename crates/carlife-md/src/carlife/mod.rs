@@ -23,4 +23,4 @@ mod aio;
 pub(crate) mod gadget;
 pub(crate) mod usb;
 
-pub use gadget::Carlife;
+pub use gadget::Md;

@@ -7,9 +7,6 @@ license = "GPL-3.0-or-later"
 publish = false
 
 [dependencies]
-# `Track`/`Position` read the phone's NowPlayingUpdate. They move to the CarPlay
-# half once that side is a crate of its own; until then this is where it sits.
-iap2-csm = { path = "../../vendor/LIVI/native/crates/iap2-csm" }
 # `Vehicle` is where the car's position goes, and it is the same object the
 # CarPlay half hands to the phone.
 livi-runtime = { path = "../../vendor/LIVI/native/crates/livi-runtime" }

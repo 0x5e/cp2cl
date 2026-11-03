@@ -68,13 +68,13 @@ enum Answered {
 ///
 /// Built by the program and run in a task of its own: what it does is answer a
 /// car, and the car decides when that is.
-pub struct Carlife<'a> {
+pub struct Md<'a> {
     settings: &'a Settings,
     ports: &'a Ports<'a>,
     replug: mpsc::Receiver<()>,
 }
 
-impl<'a> Carlife<'a> {
+impl<'a> Md<'a> {
     pub fn new(
         settings: &'a Settings,
         ports: &'a Ports<'a>,

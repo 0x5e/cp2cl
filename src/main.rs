@@ -362,7 +362,7 @@ async fn main() -> Result<()> {
             page: reported,
             vehicle: handed,
         };
-        let outcome = carlife_md::Carlife::new(&settings, &ports, replug_requested)
+        let outcome = carlife_md::Md::new(&settings, &ports, replug_requested)
             .serve()
             .await;
         if let Err(e) = outcome {

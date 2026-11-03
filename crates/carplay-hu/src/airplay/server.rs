@@ -29,6 +29,7 @@ use super::pairing::{PairSetup, PairVerify, Pairings, VerifyKeys};
 use super::rtsp::{self, Request, Response, OCTET_CONTENT_TYPE, PAIRING_CONTENT_TYPE};
 use super::screen::{self, VideoReceiver};
 use super::tunnel;
+use crate::channels;
 use crate::link::{Delegate, Link, Panel};
 use crate::wireless::Handover;
 use livi_runtime::vehicle::Vehicle;
@@ -1010,7 +1011,7 @@ impl Session {
         // dense the panel is — 120 dpi where it says nothing — and the size
         // follows from that and the canvas above.
         let channel = self.channel.borrow().clone();
-        let ppi = info::entry(channel.as_deref()).ppi;
+        let ppi = channels::of(channel.as_deref()).ppi;
         // Reported before the answer goes out: this is the only place the two
         // halves meet — what the car said its screen is, and what the phone is
         // therefore asked to draw — and the page is where that is worth seeing.
@@ -1022,8 +1023,8 @@ impl Session {
                 ppi,
                 canvas_width: width,
                 canvas_height: height,
-                width_mm: info::millimetres(width, ppi),
-                height_mm: info::millimetres(height, ppi),
+                width_mm: channels::millimetres(width, ppi),
+                height_mm: channels::millimetres(height, ppi),
             });
         });
         let plist = info::build(&info::Static {

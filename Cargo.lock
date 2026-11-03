@@ -239,7 +239,6 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "futures-util",
- "iap2-csm",
  "libc 0.2.189",
  "livi-runtime",
  "rand 0.8.8",

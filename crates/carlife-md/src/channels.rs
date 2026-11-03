@@ -17,14 +17,14 @@ pub struct Preset {
 
 /// One entry of the table, as the CarLife half uses it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Panel {
+pub struct ChannelEntry {
     /// The size and rate the phone is asked for, when the entry names one.
     pub preset: Option<Preset>,
     /// The density the panel's millimetres are worked out at.
     pub ppi: u32,
 }
 
-impl Default for Panel {
+impl Default for ChannelEntry {
     fn default() -> Self {
         Self {
             preset: None,
@@ -45,8 +45,8 @@ mod tests {
 
     #[test]
     fn a_panel_with_no_entry_is_the_default_density() {
-        assert_eq!(Panel::default().ppi, DEFAULT_PPI);
-        assert!(Panel::default().preset.is_none());
+        assert_eq!(ChannelEntry::default().ppi, DEFAULT_PPI);
+        assert!(ChannelEntry::default().preset.is_none());
     }
 
     #[test]

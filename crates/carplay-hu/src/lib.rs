@@ -12,6 +12,7 @@
 //! three into whatever the other end understands.
 
 pub mod assets;
+pub mod channels;
 pub mod link;
 pub mod now_playing;
 pub mod options;
@@ -42,11 +43,10 @@ use crate::report::Report;
 use crate::sink::{AudioCodec, MediaSink};
 
 // What the program names without going through a module: the entry point, the
-// keys it feeds in, the size the car named, the channel table's rows, and the
-// one constant the page repeats.
+// keys it feeds in, the size the car named, and the one constant the page
+// repeats.
 pub use crate::airplay::Hu;
 pub use crate::airplay::event::Press;
-pub use crate::airplay::info::{entry, Entry, Preset};
 pub use crate::airplay::screen::CODEC;
 pub use crate::airplay::ScreenParams;
 pub use crate::wireless::unpair_all;
