@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, watch};
 
 use crate::media::{Media, Navi};
-use crate::playing::Playing;
+use crate::now_playing::NowPlaying;
 
 /// How many items may wait for the car. Bounded and dropped past, so a session
 /// that falls behind glitches instead of accumulating latency.
@@ -24,12 +24,12 @@ pub struct Outlet {
     media_rx: Mutex<Option<mpsc::Receiver<Media>>>,
     navi_tx: mpsc::Sender<Navi>,
     navi_rx: Mutex<Option<mpsc::Receiver<Navi>>>,
-    playing_tx: mpsc::Sender<Playing>,
-    playing_rx: Mutex<Option<mpsc::Receiver<Playing>>>,
+    playing_tx: mpsc::Sender<NowPlaying>,
+    playing_rx: Mutex<Option<mpsc::Receiver<NowPlaying>>>,
     /// Whether the phone's screen stream is open, which decides what the car is
     /// shown and whether a keyframe can be asked for.
-    screen_tx: watch::Sender<bool>,
-    screen_rx: watch::Receiver<bool>,
+    stream_tx: watch::Sender<bool>,
+    stream_rx: watch::Receiver<bool>,
 }
 
 impl Outlet {
@@ -38,7 +38,7 @@ impl Outlet {
         let (media_tx, media_rx) = mpsc::channel(BACKLOG);
         let (navi_tx, navi_rx) = mpsc::channel(BACKLOG);
         let (playing_tx, playing_rx) = mpsc::channel(BACKLOG);
-        let (screen_tx, screen_rx) = watch::channel(false);
+        let (stream_tx, stream_rx) = watch::channel(false);
         Self {
             video_tx,
             video_rx: Mutex::new(Some(video_rx)),
@@ -48,8 +48,8 @@ impl Outlet {
             navi_rx: Mutex::new(Some(navi_rx)),
             playing_tx,
             playing_rx: Mutex::new(Some(playing_rx)),
-            screen_tx,
-            screen_rx,
+            stream_tx,
+            stream_rx,
         }
     }
 
@@ -60,7 +60,7 @@ impl Outlet {
             media: self.media_tx.clone(),
             navi: self.navi_tx.clone(),
             playing: self.playing_tx.clone(),
-            screen: self.screen_tx.clone(),
+            stream: self.stream_tx.clone(),
             no_video_reader: AtomicBool::new(false),
             video_behind: AtomicBool::new(false),
             no_media_reader: AtomicBool::new(false),
@@ -71,8 +71,9 @@ impl Outlet {
         })
     }
 
-    pub fn screen(&self) -> watch::Receiver<bool> {
-        self.screen_rx.clone()
+    /// Whether the phone's screen stream is open.
+    pub fn streaming(&self) -> watch::Receiver<bool> {
+        self.stream_rx.clone()
     }
 
     /// One car, one owner: a second call gets nothing.
@@ -106,11 +107,11 @@ impl Outlet {
         }
     }
 
-    pub fn take_playing(&self) -> Option<mpsc::Receiver<Playing>> {
+    pub fn take_playing(&self) -> Option<mpsc::Receiver<NowPlaying>> {
         Some(emptied(self.playing_rx.lock().ok()?.take()?))
     }
 
-    pub fn return_playing(&self, rx: mpsc::Receiver<Playing>) {
+    pub fn return_playing(&self, rx: mpsc::Receiver<NowPlaying>) {
         if let Ok(mut guard) = self.playing_rx.lock() {
             *guard = Some(rx);
         }
@@ -133,8 +134,8 @@ pub struct Sink {
     video: mpsc::Sender<Vec<u8>>,
     media: mpsc::Sender<Media>,
     navi: mpsc::Sender<Navi>,
-    playing: mpsc::Sender<Playing>,
-    screen: watch::Sender<bool>,
+    playing: mpsc::Sender<NowPlaying>,
+    stream: watch::Sender<bool>,
     /// Each of these is said once. A stream that keeps arriving with nowhere to
     /// go would otherwise print a line per frame.
     no_video_reader: AtomicBool,
@@ -202,7 +203,7 @@ impl Sink {
 
     /// A record rather than a flow: what a car that is not reading did not hear
     /// is stale, so both ways of having nowhere to go are one line.
-    pub fn playing(&self, item: Playing) {
+    pub fn playing(&self, item: NowPlaying) {
         if self.playing.try_send(item).is_err()
             && !self.playing_dropped.swap(true, Ordering::Relaxed)
         {
@@ -210,8 +211,8 @@ impl Sink {
         }
     }
 
-    pub fn screen(&self, open: bool) {
-        let _ = self.screen.send(open);
+    pub fn stream(&self, open: bool) {
+        let _ = self.stream.send(open);
     }
 }
 
@@ -250,12 +251,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_screen_watch_says_what_the_sink_was_told() {
+    async fn the_stream_watch_says_what_the_sink_was_told() {
         let outlet = Outlet::new();
-        let mut screen = outlet.screen();
-        assert!(!*screen.borrow());
-        outlet.sink().screen(true);
-        screen.changed().await.expect("a change");
-        assert!(*screen.borrow());
+        let mut streaming = outlet.streaming();
+        assert!(!*streaming.borrow());
+        outlet.sink().stream(true);
+        streaming.changed().await.expect("a change");
+        assert!(*streaming.borrow());
     }
 }

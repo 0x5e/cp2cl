@@ -1,6 +1,6 @@
 //! What the CarLife half needs from the program it runs in, and what it tells it.
 //!
-//! The host implements all three. Nothing here knows how the other half of the
+//! The host implements all of it. Nothing here knows how the other half of the
 //! bridge works.
 
 use std::io;
@@ -8,21 +8,14 @@ use std::io;
 use futures_util::future::BoxFuture;
 
 use crate::channels::ChannelEntry;
+use crate::machine::ScreenOverride;
 use crate::press::Command;
-use crate::settings::Screen;
 
 /// Where the car's touch and panel keys go. The receiver is the CarPlay half,
 /// so a key pressed in the car arrives at the phone by the road any other key
 /// would.
 pub trait Input: Send + Sync {
     fn press(&self, command: Command) -> BoxFuture<'_, io::Result<()>>;
-}
-
-/// What the car's session waits on: a tap on the phone's icon for us, which on
-/// the phone stands for the car's own interface.
-pub trait Desktop: Send + Sync {
-    /// Resolves on the next tap.
-    fn tapped(&self) -> BoxFuture<'_, ()>;
 }
 
 /// What the host is told as the session runs.
@@ -33,15 +26,15 @@ pub trait Delegate: Send + Sync {
     fn session(&self, up: bool);
 
     /// The size the car asked to be rendered at.
-    fn screen(&self, width: u32, height: u32, fps: u32);
+    fn screen_named(&self, width: u32, height: u32, fps: u32);
 
     /// The channel number the car reported, which `/info` answers from: a head
     /// unit that names itself gets the icon and label of the make it belongs to.
-    fn channel(&self, channel: Option<&str>);
+    fn channel_id(&self, channel: Option<&str>);
 
     /// The screen the operator picked, read again for each session because the
     /// page can change it while the program runs.
-    fn screen_override(&self) -> Screen;
+    fn screen_chosen(&self) -> ScreenOverride;
 
     /// What the channel table says about the panel behind this channel number.
     fn channel_entry(&self, channel: Option<&str>) -> ChannelEntry;

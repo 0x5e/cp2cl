@@ -16,10 +16,10 @@
 use std::sync::Arc;
 
 use carlife_md::channels::ChannelEntry;
-use carlife_md::link::{Assets, Delegate, Desktop, Input};
+use carlife_md::link::{Assets, Delegate, Input};
+use carlife_md::machine::{ScreenOverride, Size};
 use carlife_md::press::Command;
-use carlife_md::settings::Screen;
-use carplay_hu::{Press, ScreenParams};
+use carplay_hu::{Events, Geometry};
 use carplay_hu::link::Link;
 use tokio::sync::{watch, Notify};
 
@@ -34,34 +34,34 @@ pub struct Hooks {
     /// Bumped when a running CarPlay session should read `/info` again.
     restart: watch::Sender<u64>,
     /// The size the car named, which is what `/info` answers with.
-    screen: watch::Sender<Option<ScreenParams>>,
+    screen: watch::Sender<Option<Geometry>>,
     /// The channel number the car named, which picks the icon `/info` carries.
-    channel: watch::Sender<Option<String>>,
+    channel_id: watch::Sender<Option<String>>,
     /// Fired by the phone's half and waited on by the car's: on the phone our
-    /// icon stands for the car's own desktop.
-    tap: Arc<Notify>,
+    /// icon stands for the car's own interface.
+    home: Arc<Notify>,
     /// The bridge's own light.
     lights: Arc<led::Signals>,
     /// Where a key pressed in the car arrives for the phone.
-    events: Arc<Press>,
+    events: Arc<Events>,
 }
 
 impl Hooks {
     pub fn new(
         carplay: watch::Sender<bool>,
         restart: watch::Sender<u64>,
-        screen: watch::Sender<Option<ScreenParams>>,
-        channel: watch::Sender<Option<String>>,
-        tap: Arc<Notify>,
+        screen: watch::Sender<Option<Geometry>>,
+        channel_id: watch::Sender<Option<String>>,
+        home: Arc<Notify>,
         lights: Arc<led::Signals>,
-        events: Arc<Press>,
+        events: Arc<Events>,
     ) -> Arc<Self> {
         Arc::new(Self {
             carplay,
             restart,
             screen,
-            channel,
-            tap,
+            channel_id,
+            home,
             lights,
             events,
         })
@@ -71,15 +71,13 @@ impl Hooks {
     ///
     /// Read each time rather than kept: the page writes it while the program
     /// runs, and a copy taken at startup is a copy of what was there before.
-    pub fn screen_chosen(&self) -> Screen {
+    pub fn screen_chosen(&self) -> ScreenOverride {
         let picked = crate::settings::load().screen;
-        Screen {
-            resolution: picked
-                .resolution
-                .map(|size| carlife_md::settings::Resolution {
-                    width: size.width,
-                    height: size.height,
-                }),
+        ScreenOverride {
+            size: picked.resolution.map(|size| Size {
+                width: size.width,
+                height: size.height,
+            }),
             fps: picked.fps,
         }
     }
@@ -105,12 +103,12 @@ impl Delegate for Hooks {
     /// A size that lands after the phone has already read `/info` is worth a
     /// session of its own — that is what `restart` is for — and a size that
     /// changes nothing is not worth saying twice.
-    fn screen(&self, width: u32, height: u32, fps: u32) {
-        let wanted = ScreenParams {
+    fn screen_named(&self, width: u32, height: u32, fps: u32) {
+        let wanted = Geometry {
             width,
             height,
             fps,
-            ..ScreenParams::default()
+            ..Geometry::default()
         };
         if *self.screen.borrow() == Some(wanted) {
             return;
@@ -120,14 +118,14 @@ impl Delegate for Hooks {
         self.changed();
     }
 
-    fn channel(&self, channel: Option<&str>) {
-        let _ = self.channel.send(channel.map(str::to_string));
+    fn channel_id(&self, channel: Option<&str>) {
+        let _ = self.channel_id.send(channel.map(str::to_string));
     }
 
     /// Read again for each session, because the page can change it while the
     /// program runs.
-    fn screen_override(&self) -> Screen {
-        self.screen_chosen()
+    fn screen_chosen(&self) -> ScreenOverride {
+        Hooks::screen_chosen(self)
     }
 
     /// The table belongs to this program — `airplay::info` reads it for `/info`
@@ -143,12 +141,6 @@ impl Delegate for Hooks {
             }),
             ppi: entry.ppi,
         }
-    }
-}
-
-impl Desktop for Hooks {
-    fn tapped(&self) -> futures_util::future::BoxFuture<'_, ()> {
-        Box::pin(self.tap.notified())
     }
 }
 
@@ -170,10 +162,10 @@ impl carplay_hu::link::Delegate for Hooks {
         self.lights.phone()
     }
 
-    /// A tap on our icon on the phone's screen, which is the car's own desktop
+    /// A tap on our icon on the phone's screen, which is the car's own interface
     /// being asked for. Kept if the car is not waiting yet.
     fn tapped(&self) {
-        self.tap.notify_one();
+        self.home.notify_one();
     }
 }
 

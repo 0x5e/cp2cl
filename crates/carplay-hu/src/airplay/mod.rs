@@ -39,4 +39,4 @@ mod server;
 pub(crate) mod tunnel;
 
 pub use self::mic::MicSink;
-pub use self::server::{AudioClock, Hu, ScreenParams};
+pub use self::server::{AudioClock, Hu, Geometry};

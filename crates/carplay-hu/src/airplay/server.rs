@@ -22,7 +22,7 @@ use super::audio::{self, AudioReceiver};
 use super::bplist::{to_binary, to_json};
 use super::clock::{ntp_diff, SyncedClock};
 use super::crypto::{self, aes_ctr128, open_frames, seal_frames, sha1_all, sha256_all, SymKey};
-use super::event::{pump_events, Press};
+use super::event::{pump_events, Events};
 use super::info;
 use super::mic::{MicConfig, MicSink};
 use super::pairing::{PairSetup, PairVerify, Pairings, VerifyKeys};
@@ -33,9 +33,9 @@ use crate::channels;
 use crate::link::{Delegate, Link, Panel};
 use crate::wireless::Handover;
 use livi_runtime::vehicle::Vehicle;
-use crate::options::Options;
-use crate::sink::{AudioCodec, MediaSink, StreamEvent, StreamId};
-use crate::report::{Audio, Mic, Report, Screen};
+use crate::machine::Machine;
+use crate::sink::{AudioCodec, StreamSink, StreamEvent, StreamId};
+use crate::report::{Audio, Mic, Rendering, Report};
 
 /// What a coding is called on the page. `AudioCodec`'s own `Debug` is a struct
 /// dump, which is not a thing to put in front of someone.
@@ -231,7 +231,7 @@ impl AudioStream {
 /// why changing it costs a session: the iPhone reads `/info` once and does not
 /// ask again. See `main`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ScreenParams {
+pub struct Geometry {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -242,7 +242,7 @@ pub struct ScreenParams {
     pub ui_scale: u32,
 }
 
-impl Default for ScreenParams {
+impl Default for Geometry {
     /// Until a head unit names a screen of its own: 720p at 30 fps, which is the
     /// shape a car's decoder is surest of, and the same numbers the CarLife side
     /// falls back on when a car names no size.
@@ -260,7 +260,7 @@ impl Default for ScreenParams {
 /// what PlayPort's own panel does with a typed-in value.
 pub const UI_SCALES: [u32; 4] = [75, 85, 100, 115];
 
-impl ScreenParams {
+impl Geometry {
     /// The scale actually in force: one of the offered ones, or the default.
     pub fn ui_scale(&self) -> u32 {
         if UI_SCALES.contains(&self.ui_scale) {
@@ -298,16 +298,16 @@ impl ScreenParams {
 /// every other module takes a borrow of it rather than a list of the pieces it
 /// happens to want.
 pub struct Hu {
-    pub options: Arc<Options>,
+    pub machine: Arc<Machine>,
     pub pairings: Arc<Mutex<Pairings>>,
-    pub video_sink: Arc<dyn MediaSink>,
-    pub audio_sink: Arc<dyn MediaSink>,
+    pub video_sink: Arc<dyn StreamSink>,
+    pub audio_sink: Arc<dyn StreamSink>,
     /// Set by the CarLife session, once a head unit has named its own screen.
     /// Read by `GET /info`.
-    pub screen: watch::Receiver<Option<ScreenParams>>,
+    pub screen: watch::Receiver<Option<Geometry>>,
     /// Set by the CarLife session, once a head unit has said which channel it
     /// is. Read by `GET /info` to pick the icon and the label under it.
-    pub channel: watch::Receiver<Option<String>>,
+    pub channel_id: watch::Receiver<Option<String>>,
     /// Fired when what the phone should be rendering has changed. `/info` is
     /// answered once per session, so dropping the session is the only way a
     /// change lands: the phone reconnects, asks again, and gets the new answer.
@@ -329,7 +329,7 @@ pub struct Hu {
     pub audio_codec: Arc<Mutex<AudioCodec>>,
     /// Where input lands. Nothing dispatches into it yet; the CarLife side will,
     /// once it carries touch and keys back up.
-    pub press: Arc<Press>,
+    pub events: Arc<Events>,
     /// The one stream that runs both ways. Opened when the phone asks for
     /// bidirectional audio, and where audio captured at this end goes.
     pub mic: Arc<MicSink>,
@@ -409,9 +409,9 @@ pub async fn serve(self: &Arc<Self>) {
                 let current = newest.clone();
                 *self.timing.lock().await = SyncedClock::new();
                 self.audio_clock.lock().await.forget_streams();
-                let cfg = self.options.clone();
+                let cfg = self.machine.clone();
                 let screen = self.screen.clone();
-                let channel = self.channel.clone();
+                let channel_id = self.channel_id.clone();
                 let restart = self.restart.subscribe();
                 let restart_tx = self.restart.clone();
                 let shutdown = self.shutdown.subscribe();
@@ -419,7 +419,7 @@ pub async fn serve(self: &Arc<Self>) {
                 let video_sink = self.video_sink.clone();
                 let audio_sink = self.audio_sink.clone();
                 let codec = self.audio_codec.clone();
-                let press = self.press.clone();
+                let events = self.events.clone();
                 let mic = self.mic.clone();
                 let mfi = self.mfi.clone();
                 let audio_clock = self.audio_clock.clone();
@@ -431,7 +431,7 @@ pub async fn serve(self: &Arc<Self>) {
                     let mut session = Session {
                         cfg,
                         screen,
-                        channel,
+                        channel_id,
                         restart,
                         restart_tx,
                         shutdown,
@@ -439,7 +439,7 @@ pub async fn serve(self: &Arc<Self>) {
                         video_sink,
                         audio_sink,
                         codec,
-                        press,
+                        events,
                         mic,
                         mfi,
                         audio_clock,
@@ -604,12 +604,12 @@ struct Pump {
 }
 
 struct Session {
-    cfg: Arc<Options>,
+    cfg: Arc<Machine>,
     /// What the car asked for, if it has asked. Read when answering `/info`.
-    screen: watch::Receiver<Option<ScreenParams>>,
+    screen: watch::Receiver<Option<Geometry>>,
     /// Which channel the car's head unit is, if it has said. Read when
     /// answering `/info`.
-    channel: watch::Receiver<Option<String>>,
+    channel_id: watch::Receiver<Option<String>>,
     /// Fires when the session should end so the phone re-reads `/info`.
     restart: watch::Receiver<u64>,
     /// The sending end of that same signal, kept because the silence check is
@@ -621,10 +621,10 @@ struct Session {
     /// also the end of this one.
     shutdown: tokio::sync::broadcast::Receiver<()>,
     pairings: Arc<Mutex<Pairings>>,
-    video_sink: Arc<dyn MediaSink>,
-    audio_sink: Arc<dyn MediaSink>,
+    video_sink: Arc<dyn StreamSink>,
+    audio_sink: Arc<dyn StreamSink>,
     codec: Arc<Mutex<AudioCodec>>,
-    press: Arc<Press>,
+    events: Arc<Events>,
     /// The microphone uplink, opened for whichever audio stream the phone said
     /// it wants to hear on.
     mic: Arc<MicSink>,
@@ -993,7 +993,7 @@ impl Session {
     }
 
     /// What the phone has been asked to render, if anything has asked.
-    fn negotiated(&self) -> Option<ScreenParams> {
+    fn negotiated(&self) -> Option<Geometry> {
         *self.screen.borrow()
     }
 
@@ -1010,13 +1010,13 @@ impl Session {
         // wrong scale. No CarLife message carries a size, so the table says how
         // dense the panel is — 120 dpi where it says nothing — and the size
         // follows from that and the canvas above.
-        let channel = self.channel.borrow().clone();
+        let channel = self.channel_id.borrow().clone();
         let ppi = channels::of(channel.as_deref()).ppi;
         // Reported before the answer goes out: this is the only place the two
         // halves meet — what the car said its screen is, and what the phone is
         // therefore asked to draw — and the page is where that is worth seeing.
         self.status.with(|s| {
-            s.carplay.screen = Some(Screen {
+            s.carplay.screen = Some(Rendering {
                 width: screen.width,
                 height: screen.height,
                 fps,
@@ -1318,7 +1318,7 @@ impl Session {
         let reply = verify.handle(&req.body, &pairings)?;
         if let Some(keys) = verify.keys() {
             self.keys = Some(keys);
-            self.press.set_key(keys.events_write()).await;
+            self.events.set_key(keys.events_write()).await;
             self.status.with(|s| s.carplay.airplay.verified = true);
             tracing::info!("carplay.pairing.verified");
         }
@@ -1419,7 +1419,7 @@ impl Session {
         //
         // Every port here is the kernel's choice, not one of ours. A session that
         // has just ended leaves a socket or two behind for a moment — the event
-        // channel's write half in particular is held by `Press` until the
+        // channel's write half in particular is held by `Events` until the
         // connection actually goes away — and binding a number one of them still
         // holds fails with `EADDRINUSE`. That is precisely what the second SETUP
         // after a display change used to hit: the ports were handed out from a
@@ -1429,7 +1429,7 @@ impl Session {
             .map_err(|e| e.to_string())?;
         let event_port = listener.local_addr().map_err(|e| e.to_string())?.port();
         let read_key = SymKey::from_bytes(&keys.events_read()).map_err(|e| e.to_string())?;
-        let sink = self.press.clone();
+        let sink = self.events.clone();
         let responder = sink.clone();
         let event_status = self.status.clone();
         tokio::spawn(async move {
@@ -1844,7 +1844,7 @@ impl Session {
     async fn pump_video(
         socket: TcpStream,
         key: SymKey,
-        sink: Arc<dyn MediaSink>,
+        sink: Arc<dyn StreamSink>,
         status: Arc<Report>,
     ) {
         let mut rx = VideoReceiver::new(key, sink.clone());
@@ -1905,7 +1905,7 @@ impl Session {
         stream: StreamId,
         name: &str,
         codec: AudioCodec,
-        sink: Arc<dyn MediaSink>,
+        sink: Arc<dyn StreamSink>,
         clock: Arc<Mutex<AudioClock>>,
         id: u64,
         status: Arc<Report>,
@@ -2212,8 +2212,8 @@ fn is_mac(text: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn params(width: u32, height: u32, ui_scale: u32) -> ScreenParams {
-        ScreenParams {
+    fn params(width: u32, height: u32, ui_scale: u32) -> Geometry {
+        Geometry {
             width,
             height,
             fps: 60,

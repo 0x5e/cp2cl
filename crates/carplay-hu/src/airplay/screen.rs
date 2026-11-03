@@ -21,7 +21,7 @@
 //! holds, in front of the frames rather than out of band.
 
 use super::crypto::{open, SymKey};
-use crate::sink::{MediaSink, StreamEvent};
+use crate::sink::{StreamSink, StreamEvent};
 use std::sync::Arc;
 
 pub const HEADER_LEN: usize = 128;
@@ -39,13 +39,13 @@ pub struct VideoReceiver {
     /// Frames handed on. Its only reader is the one line that says a stream
     /// carried pictures at all: everything else about a frame is per-frame.
     frames: u64,
-    sink: Arc<dyn MediaSink>,
+    sink: Arc<dyn StreamSink>,
     /// Bytes in front of each NAL unit; whatever the avcC record said.
     nal_length_size: usize,
 }
 
 impl VideoReceiver {
-    pub fn new(key: SymKey, sink: Arc<dyn MediaSink>) -> Self {
+    pub fn new(key: SymKey, sink: Arc<dyn StreamSink>) -> Self {
         // The stream is H.264 from the first frame: that is the only family
         // `/info` offers, and waiting for the config message before handling
         // frames meant a config we could not parse silently discarded *every*

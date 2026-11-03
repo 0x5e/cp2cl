@@ -16,7 +16,7 @@ use livi_runtime::driver::spawn_link;
 use tokio::time::sleep;
 
 use super::{page, parse_mac, power, radios_present, ready, run_session, short};
-use crate::options::Options;
+use crate::machine::Machine;
 use crate::Hu;
 use crate::session::{carry_artwork, Ended};
 
@@ -27,7 +27,7 @@ use crate::session::{carry_artwork, Ended};
 /// Nothing pushes "a phone just paired" from outside, so a session that ends
 /// puts us back to waiting for the same phone to come again.
 pub(crate) async fn watch(hu: &Arc<Hu>) {
-    let cfg = hu.options.clone();
+    let cfg = hu.machine.clone();
     let auth = hu.mfi.clone();
     let airplay_port = hu.airplay_port;
     let accessory_key = hu.accessory_key.clone();
@@ -199,7 +199,7 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
             // The cover art is a file transfer of its own on the same link, and
             // it goes to the car's panel the same way the song it belongs to
             // does.
-            let carrying = tokio::spawn(carry_artwork(artwork, panel.clone(), cfg.cover_limit));
+            let carrying = tokio::spawn(carry_artwork(artwork, panel.clone(), cfg.artwork_limit));
             // Ending the session drops the descriptor, which is the only way a
             // BlueZ channel ever closes; paging the phone again is what brings
             // it back, and the loop above starts that over.
@@ -285,7 +285,7 @@ async fn wait_car_down(gate: &mut tokio::sync::watch::Receiver<bool>) {
 /// configuration at startup: a controller registers itself with the kernel
 /// whenever it is brought up, and a session that begins after that is a session
 /// that can have the real address.
-fn local_mac(cfg: &Options) -> [u8; 6] {
+fn local_mac(cfg: &Machine) -> [u8; 6] {
     parse_mac(&cfg.bt_address)
 }
 
@@ -317,7 +317,7 @@ const BLUEZ: &str = "org.bluez";
 ///
 /// Answers whether all three were found, because the caller has to tell a run
 /// that waited for them from one that went on without them.
-async fn wait_for_radios(cfg: &Options) -> bool {
+async fn wait_for_radios(cfg: &Machine) -> bool {
     let started = Instant::now();
     // The bus is a handshake, so it is had once and kept: what is asked of it
     // afterwards is a question about a name, not about the bus itself.
@@ -357,7 +357,7 @@ async fn wait_for_radios(cfg: &Options) -> bool {
 }
 
 /// What is not up yet, named as the log and the loop both want it.
-fn missing(cfg: &Options, wifi: bool, bt: bool, bluez: bool) -> String {
+fn missing(cfg: &Machine, wifi: bool, bt: bool, bluez: bool) -> String {
     let mut missing = Vec::new();
     if !wifi {
         missing.push(cfg.wifi_iface.as_str());

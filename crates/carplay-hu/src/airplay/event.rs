@@ -14,7 +14,7 @@
 //! Its keys come from the same shared secret as everything else, but unlike the
 //! control channel they are *not* read/write swapped (see `VerifyKeys`).
 //!
-//! The channel runs both ways. `Press` is the half the rest of the program
+//! The channel runs both ways. `Events` is the half the rest of the program
 //! talks to — the CarLife session is what hands it commands — and `pump_events`
 //! is the half that reads what the phone posts back and answers it.
 
@@ -39,7 +39,7 @@ const AXIS_DEFLECT: i8 = 127;
 
 /// Input only becomes possible after pair-verify derives the keys, so the sink
 /// exists the whole time and fills itself in as pieces arrive.
-pub struct Press {
+pub struct Events {
     key: Mutex<Option<SymKey>>,
     counter: Mutex<u64>,
     /// The write half of the newest event connection, with the number that
@@ -50,7 +50,7 @@ pub struct Press {
     next: std::sync::atomic::AtomicU64,
 }
 
-impl Press {
+impl Events {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             key: Mutex::new(None),
@@ -182,7 +182,7 @@ impl Press {
 pub(crate) async fn pump_events(
     mut read: OwnedReadHalf,
     read_key: SymKey,
-    sink: Arc<Press>,
+    sink: Arc<Events>,
     id: u64,
 ) {
     let mut buf = [0u8; 4096];

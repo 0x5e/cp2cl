@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
-use carlife_md::page::{self, Cover};
+use carlife_md::report::{Artwork, Report as CarReport};
 use carplay_hu::report::Report;
 
 use super::device::Device;
@@ -24,7 +24,7 @@ use super::device::Device;
 /// is what a live view of two independent processes looks like.
 pub struct Status {
     /// What the CarLife half reports. Written there, read here.
-    carlife: Arc<page::Page>,
+    carlife: Arc<CarReport>,
     /// What the CarPlay half reports. Written there, read here.
     report: Arc<Report>,
     /// What the board itself is doing, which is sampled rather than reported.
@@ -35,14 +35,14 @@ impl Status {
     /// Around the CarPlay half's own report, which it writes for itself.
     pub fn new(report: Arc<Report>) -> Self {
         Self {
-            carlife: Arc::new(page::Page::new()),
+            carlife: Arc::new(CarReport::new()),
             report,
             sampled: Mutex::new(Sampled::default()),
         }
     }
 
     /// The car's half, for the side that writes it.
-    pub fn carlife(&self) -> &Arc<page::Page> {
+    pub fn carlife(&self) -> &Arc<CarReport> {
         &self.carlife
     }
 
@@ -64,16 +64,16 @@ impl Status {
             held.clone()
         };
         json!({
-            "carlife": self.carlife.carlife_json(self.report.coding()),
+            "carlife": self.carlife.json(self.report.coding()),
             "carplay": self.report.json(),
-            "now_playing": self.carlife.now_playing_json(),
+            "now_playing": self.carlife.song_json(),
             "device": sampled.device.json(),
         })
     }
 
     /// The cover the car was last given, for the page to draw.
-    pub fn cover(&self) -> Option<Cover> {
-        self.carlife.cover()
+    pub fn artwork(&self) -> Option<Artwork> {
+        self.carlife.artwork()
     }
 }
 

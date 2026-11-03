@@ -34,12 +34,12 @@ use tokio::time::Instant;
 
 use super::{auth, guide};
 use crate::media::{Media, Navi};
-use crate::page::{Page, Size, Statistic};
+use crate::report::{Geometry, Report, Statistic};
 use crate::channels::{self, ChannelEntry};
-use crate::playing::{Playing, Track};
+use crate::now_playing::{NowPlaying, Track};
 use crate::ports::Ports;
 use crate::press::{Command, TouchContact, PHONE_DROP, PHONE_HOOK_SWITCH, PHONE_MUTE};
-use crate::settings::Settings;
+use crate::machine::Machine;
 use crate::{frame, gps, names, proto};
 
 // What the car sends, by name — the numbers are CarLifeVehicleLib's
@@ -263,7 +263,7 @@ const FALLBACK: (i32, i32, i32) = (1280, 720, 30);
 /// goes, what the host is told, the pictures it carries, and where it reports.
 pub async fn run<S>(
     stream: S,
-    settings: &Settings,
+    settings: &Machine,
     auth: Option<auth::Signer>,
     ports: &Ports<'_>,
 ) -> Result<()>
@@ -279,7 +279,7 @@ where
     // A panel that has just been plugged in has no song on it: what the last
     // session was showing belongs to a car that is no longer here, and the page
     // would otherwise go on showing it.
-    ports.page.now_playing_cleared();
+    ports.report.song_cleared();
     // Whether the phone has a screen stream open. One question, two uses: what
     // the car is shown — the guide until there is a picture — and whether a
     // keyframe can be asked for at all. It is the sink's own state, watched
@@ -293,7 +293,7 @@ where
                 ports.outlet.take_navi(),
                 ports.outlet.take_playing(),
                 Source::Live,
-                Some(ports.outlet.screen()),
+                Some(ports.outlet.streaming()),
             ),
             None => {
                 tracing::warn!("carlife.video_source_taken action=heartbeat_only");
@@ -363,7 +363,7 @@ where
         // size to look a guide up by.
         guide: None,
         phone_screen,
-        status: ports.page.clone(),
+        status: ports.report.clone(),
     };
 
     // A car that has configured the pipe and then said nothing is either one
@@ -456,7 +456,7 @@ where
             },
             // A tap on the phone's icon for us. The phone shows that icon in
             // place of the car's own interface, so the car is told to show it.
-            _ = ports.desktop.tapped() => {
+            _ = ports.home.notified() => {
                 if let Err(e) = session.send(GO_TO_DESKTOP, &[]).await {
                     break Err(e);
                 }
@@ -667,7 +667,7 @@ async fn prompt_idle_after(deadline: Option<Instant>) {
 }
 
 /// The same, for what the phone is playing.
-async fn recv_playing(playing: &mut Option<mpsc::Receiver<Playing>>) -> Option<Playing> {
+async fn recv_playing(playing: &mut Option<mpsc::Receiver<NowPlaying>>) -> Option<NowPlaying> {
     match playing {
         Some(rx) => rx.recv().await,
         None => std::future::pending().await,
@@ -691,7 +691,7 @@ struct Playhead {
 
 struct Session<'a, W> {
     writer: W,
-    settings: &'a Settings,
+    settings: &'a Machine,
     /// Everything the session needs from the program it runs in.
     ports: &'a Ports<'a>,
     /// The same number, kept here until the car has been told what a phone makes
@@ -807,7 +807,7 @@ struct Session<'a, W> {
     phone_screen: Option<watch::Receiver<bool>>,
     /// Where the status page reads this session from. Reported to and never
     /// read back: see `crate::web::status`.
-    status: Arc<Page>,
+    status: Arc<Report>,
 }
 
 /// Bytes as one run of lowercase hex, which is the shape a protobuf decoder is
@@ -980,7 +980,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 });
                 // `/info` is answered from this: the channel picks the icon and
                 // the label the phone shows for us.
-                self.ports.delegate.channel(Some(info.channel));
+                self.ports.delegate.channel_id(Some(info.channel));
                 // What the table says about this car's panel. The number arrives
                 // here and nowhere else, so it is read here: the size is what
                 // stands in for the one the car will name, and the density is
@@ -1236,12 +1236,12 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     channels::millimetres(in_force.height as u32, ppi),
                 );
                 self.status.with(|s| {
-                    s.carlife.requested = Some(Size {
+                    s.carlife.requested = Some(Geometry {
                         width: asked.width,
                         height: asked.height,
                         fps: asked.frame_rate,
                     });
-                    s.carlife.agreed = Some(Size {
+                    s.carlife.agreed = Some(Geometry {
                         width: in_force.width,
                         height: in_force.height,
                         fps: in_force.frame_rate,
@@ -1254,7 +1254,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // The channel is what the car decodes and what the phone draws,
                 // so this is the size the other half is told: the two halves
                 // meet here.
-                self.ports.delegate.screen(
+                self.ports.delegate.screen_named(
                     in_force.width as u32,
                     in_force.height as u32,
                     in_force.frame_rate as u32,
@@ -1632,7 +1632,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         let resolution = self
             .settings
             .screen
-            .resolution
+            .size
             .map(|r| (r.width as i32, r.height as i32, "config"))
             .or_else(|| table.map(|p| (p.width as i32, p.height as i32, "channel_map")))
             .unwrap_or((named.width, named.height, "car"));
@@ -1955,9 +1955,9 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     /// It is held until the phone sends another, or until a song that carries a
     /// length says a new one has started — see the arm below for why that is
     /// the only moment at which a stale cover can be told from an early one.
-    async fn send_playing(&mut self, item: Playing) -> Result<()> {
+    async fn send_playing(&mut self, item: NowPlaying) -> Result<()> {
         match item {
-            Playing::Track(update) => {
+            NowPlaying::Track(update) => {
                 // A length is sent for a song and never for a change of play
                 // state, and it arrives with the rest of the new song rather
                 // than after it — so it is what says here that a song has
@@ -1982,7 +1982,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             // of the song's. It is kept rather than sent: the phone reports it
             // when it changes and not on a clock, and `send_progress` is what
             // turns a reading into the position the car draws right now.
-            Playing::Position(position) => {
+            NowPlaying::Position(position) => {
                 let had_reading = self.playhead.is_some();
                 let was_moving = self.playhead.is_some_and(|playhead| playhead.moving);
                 // A reading with no play state is about the position alone:
@@ -2030,7 +2030,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 }
                 return Ok(());
             }
-            Playing::Artwork(image) => {
+            NowPlaying::Artwork(image) => {
                 // The car reads the song and its cover from one command-channel
                 // message, and the reference keeps a cover under 30 KB for it.
                 // A cover too large for that has already been re-encoded on the
@@ -2038,11 +2038,11 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // either small enough or not going to be. This is the backstop:
                 // the song still goes, the cover does not, and the message stays
                 // one the car can take.
-                if image.len() > proto::MAX_ART {
+                if image.len() > proto::MAX_ARTWORK {
                     tracing::warn!(
                         "carlife.media_cover_dropped bytes={} cap_bytes={}",
                         image.len(),
-                        proto::MAX_ART
+                        proto::MAX_ARTWORK
                     );
                     return Ok(());
                 }
@@ -2114,7 +2114,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     /// panel are meant to show one thing, and a cover that differs between them
     /// would be a difference with nothing behind it.
     fn publish_cover(&self) {
-        self.status.cover_changed(self.cover().to_vec());
+        self.status.artwork_changed(self.cover().to_vec());
     }
 
     /// The cover for the song: the phone's, or the built-in placeholder when the
@@ -2366,8 +2366,9 @@ fn adopt_clock(epoch_ms: u64) {
 mod tests {
     use super::*;
 
-    use crate::link::{Assets, Delegate, Desktop, Input};
+    use crate::link::{Assets, Delegate, Input};
     use crate::outlet::Outlet;
+    use tokio::sync::Notify;
 
     /// What a session tells the host, for a test to read back.
     #[derive(Default)]
@@ -2382,16 +2383,16 @@ mod tests {
             self.sessions.lock().unwrap().push(up);
         }
 
-        fn screen(&self, width: u32, height: u32, fps: u32) {
+        fn screen_named(&self, width: u32, height: u32, fps: u32) {
             self.screens.lock().unwrap().push((width, height, fps));
         }
 
-        fn channel(&self, channel: Option<&str>) {
+        fn channel_id(&self, channel: Option<&str>) {
             self.channels.lock().unwrap().push(channel.map(str::to_string));
         }
 
-        fn screen_override(&self) -> crate::settings::Screen {
-            crate::settings::Screen::default()
+        fn screen_chosen(&self) -> crate::machine::ScreenOverride {
+            crate::machine::ScreenOverride::default()
         }
 
         /// The one entry of the channel table the tests use: `20062104` is a
@@ -2450,17 +2451,17 @@ mod tests {
     fn ports<'a>(
         outlet: Arc<Outlet>,
         watched: &'a Watched,
-        desktop: Arc<dyn Desktop>,
-        page: Arc<Page>,
+        home: Arc<Notify>,
+        report: Arc<Report>,
         vehicle: Arc<Vehicle>,
     ) -> Ports<'a> {
         Ports {
             input: Arc::new(NoKeys),
             delegate: watched,
             assets: &PICTURES,
-            desktop,
+            home,
             outlet,
-            page,
+            report,
             vehicle,
         }
     }
@@ -2475,7 +2476,7 @@ mod tests {
         outlet
     }
 
-    use crate::playing::Position;
+    use crate::now_playing::Position;
     use std::sync::{Arc, Mutex};
     use tokio::io::DuplexStream;
 
@@ -2767,19 +2768,10 @@ mod tests {
         body
     }
 
-    /// The signal a tap on the phone's icon arrives on. A test that taps keeps
-    /// the handle and fires it; one that does not drops this and waits forever.
-    #[derive(Default)]
-    struct Tap(Arc<tokio::sync::Notify>);
-
-    impl Desktop for Tap {
-        fn tapped(&self) -> futures_util::future::BoxFuture<'_, ()> {
-            Box::pin(self.0.notified())
-        }
-    }
-
-    fn no_tap() -> Arc<dyn Desktop> {
-        Arc::new(Tap::default())
+    /// The signal a tap on the phone's icon arrives on, and the handle a test
+    /// fires it with.
+    fn home() -> Arc<Notify> {
+        Arc::new(Notify::new())
     }
 
     /// The car's statistics, which is where the channel number it is judged by
@@ -2802,10 +2794,10 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &Settings::default(),
+            &Machine::default(),
             None,
             &ports,
         )
@@ -2820,21 +2812,21 @@ mod tests {
     #[tokio::test]
     async fn a_tap_on_our_icon_asks_the_car_for_its_desktop() {
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let tap = Tap::default();
-        let tapping = tap.0.clone();
+        let tapping = home();
+        let tapped = tapping.clone();
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
             car.handshake(asked()).await;
-            tapping.notify_one();
+            tapped.notify_one();
             car.expect(GO_TO_DESKTOP).await
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, Arc::new(tap), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, tapping, Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &Settings::default(),
+            &Machine::default(),
             None,
             &ports,
         )
@@ -2880,7 +2872,7 @@ mod tests {
         use base64::Engine as _;
 
         let (pem, key) = a_key_of_its_own();
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let challenge = "9f2c1a_4.6.0";
 
@@ -2912,7 +2904,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -2926,7 +2918,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_handshake_is_answered_and_the_session_is_reported_up_then_down() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let car = tokio::spawn(async move {
@@ -2938,7 +2930,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -2956,7 +2948,7 @@ mod tests {
     /// else knows how big it is, so it is the car that decides.
     #[tokio::test]
     async fn the_cars_screen_is_reported_to_the_other_half() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         // Deliberately unlike the fallback, so a report of the fallback would
         // not pass.
@@ -2972,7 +2964,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -2994,7 +2986,7 @@ mod tests {
     /// its own.
     #[tokio::test]
     async fn a_preconfigured_number_is_served_the_size_the_table_names() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let car = tokio::spawn(async move {
@@ -3002,9 +2994,9 @@ mod tests {
             car.handshake_on("20062104", asked(), preset()).await;
         });
 
-        let status = Arc::new(Page::new());
+        let status = Arc::new(Report::new());
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, no_tap(), status.clone(), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), status.clone(), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -3032,15 +3024,15 @@ mod tests {
     /// 文件排在渠道表与车机之前：两项都有，表和车机都不作数。
     #[tokio::test]
     async fn the_settings_file_is_served_before_the_table_and_the_car() {
-        let cfg = Settings {
-            screen: crate::settings::Screen {
-                resolution: Some(crate::settings::Resolution {
+        let cfg = Machine {
+            screen: crate::machine::ScreenOverride {
+                size: Some(crate::machine::Size {
                     width: 1920,
                     height: 1080,
                 }),
                 fps: Some(60),
             },
-            ..Settings::default()
+            ..Machine::default()
         };
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
@@ -3060,9 +3052,9 @@ mod tests {
             .await;
         });
 
-        let status = Arc::new(Page::new());
+        let status = Arc::new(Report::new());
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, no_tap(), status.clone(), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), status.clone(), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -3083,15 +3075,15 @@ mod tests {
     /// 两项各自往下走：文件只选了尺寸，帧率还是渠道表的。
     #[tokio::test]
     async fn a_size_from_the_file_leaves_the_rate_to_the_table() {
-        let cfg = Settings {
-            screen: crate::settings::Screen {
-                resolution: Some(crate::settings::Resolution {
+        let cfg = Machine {
+            screen: crate::machine::ScreenOverride {
+                size: Some(crate::machine::Size {
                     width: 1280,
                     height: 480,
                 }),
                 fps: None,
             },
-            ..Settings::default()
+            ..Machine::default()
         };
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
@@ -3110,7 +3102,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -3125,12 +3117,12 @@ mod tests {
     /// 文件定死的帧率，车机再来改不作数。
     #[tokio::test]
     async fn a_rate_the_file_names_is_not_changed_by_the_car() {
-        let cfg = Settings {
-            screen: crate::settings::Screen {
-                resolution: None,
+        let cfg = Machine {
+            screen: crate::machine::ScreenOverride {
+                size: None,
                 fps: Some(60),
             },
-            ..Settings::default()
+            ..Machine::default()
         };
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
@@ -3146,7 +3138,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -3217,7 +3209,7 @@ mod tests {
     /// holds this: it compares the answer with the request field by field.
     #[tokio::test]
     async fn a_frame_rate_above_thirty_is_agreed_to_rather_than_cut_down() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let car = tokio::spawn(async move {
@@ -3231,7 +3223,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -3249,7 +3241,7 @@ mod tests {
     /// message, and the phone's own voice streams are not the car's music.
     #[tokio::test]
     async fn the_media_channel_is_told_the_format_before_it_is_given_any_sound() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
@@ -3334,7 +3326,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -3351,7 +3343,7 @@ mod tests {
     /// frames themselves, and an end that leaves the music's channel alone.
     #[tokio::test]
     async fn the_prompt_is_announced_and_ended_on_its_own_channel() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
@@ -3395,7 +3387,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -3412,7 +3404,7 @@ mod tests {
     /// the prompt is over. So silence ends it — once, and no more.
     #[tokio::test]
     async fn a_prompt_that_goes_quiet_is_ended_for_it() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
@@ -3454,7 +3446,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -3471,7 +3463,7 @@ mod tests {
     /// with the cover art joined onto the song it belongs to when it lands.
     #[tokio::test]
     async fn the_cars_panel_is_told_the_song_that_is_playing() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
@@ -3482,7 +3474,7 @@ mod tests {
             car.introduce("20062100").await;
 
             // The phone names the song, and nothing else about it yet.
-            sink.playing(Playing::Track(Track {
+            sink.playing(NowPlaying::Track(Track {
                 song: Some("Reeperbahn".into()),
                 ..Track::default()
             }));
@@ -3500,7 +3492,7 @@ mod tests {
             );
 
             // Then the artist, which is the same song described further.
-            sink.playing(Playing::Track(Track {
+            sink.playing(NowPlaying::Track(Track {
                 artist: Some("Hamburg".into()),
                 ..Track::default()
             }));
@@ -3519,7 +3511,7 @@ mod tests {
             );
 
             // The cover arrives as a file of its own, after the song it is of.
-            sink.playing(Playing::Artwork(vec![0xff, 0xd8, 0xff]));
+            sink.playing(NowPlaying::Artwork(vec![0xff, 0xd8, 0xff]));
             let covered = car.expect(MEDIA_INFO).await;
             assert_eq!(
                 covered.body,
@@ -3536,7 +3528,7 @@ mod tests {
 
             // The same song again is not worth a fourth message.
             for _ in 0..2 {
-                sink.playing(Playing::Track(Track {
+                sink.playing(NowPlaying::Track(Track {
                     song: Some("Reeperbahn".into()),
                     ..Track::default()
                 }));
@@ -3545,7 +3537,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -3565,7 +3557,7 @@ mod tests {
     /// that repeats the state is nothing at all.
     #[tokio::test]
     async fn the_car_is_told_when_the_song_stops_and_starts() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
@@ -3589,7 +3581,7 @@ mod tests {
             // The song is already playing when the phone first says where it
             // is: the song starting is not a resume, and the module was told
             // before the first sample went out.
-            sink.playing(Playing::Position(Position {
+            sink.playing(NowPlaying::Position(Position {
                 elapsed_ms: 0,
                 playing: Some(true),
             }));
@@ -3597,7 +3589,7 @@ mod tests {
 
             // Paused: the media channel is told, and the module is left alone —
             // it is still the one the song on the panel is from.
-            sink.playing(Playing::Position(Position {
+            sink.playing(NowPlaying::Position(Position {
                 elapsed_ms: 42_000,
                 playing: Some(false),
             }));
@@ -3606,7 +3598,7 @@ mod tests {
 
             // And playing again is a resume: the message that says so, and then
             // everything a start is given, in the order a start gives it.
-            sink.playing(Playing::Position(Position {
+            sink.playing(NowPlaying::Position(Position {
                 elapsed_ms: 42_000,
                 playing: Some(true),
             }));
@@ -3628,7 +3620,7 @@ mod tests {
 
             // A reading that says where the song is without saying whether it
             // moved is not a change of play state either.
-            sink.playing(Playing::Position(Position {
+            sink.playing(NowPlaying::Position(Position {
                 elapsed_ms: 43_000,
                 playing: None,
             }));
@@ -3636,7 +3628,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -3652,7 +3644,7 @@ mod tests {
     /// thrown away when the song turns up.
     #[tokio::test]
     async fn a_cover_that_arrives_before_the_song_is_kept_for_it() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
@@ -3663,12 +3655,12 @@ mod tests {
             car.introduce("20062100").await;
 
             // The cover arrives first, with no song to attach it to yet.
-            sink.playing(Playing::Artwork(vec![0xff, 0xd8, 0xff]));
+            sink.playing(NowPlaying::Artwork(vec![0xff, 0xd8, 0xff]));
             car.expect_silence(Duration::from_millis(300)).await;
 
             // Then the song: the cover is still there, and the message carries
             // both.
-            sink.playing(Playing::Track(Track {
+            sink.playing(NowPlaying::Track(Track {
                 song: Some("Reeperbahn".into()),
                 ..Track::default()
             }));
@@ -3687,7 +3679,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -3705,7 +3697,7 @@ mod tests {
     /// the song it belongs to has not gone anywhere.
     #[tokio::test]
     async fn a_line_of_lyrics_keeps_the_cover() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
@@ -3723,9 +3715,9 @@ mod tests {
                 ..Track::default()
             };
 
-            sink.playing(Playing::Track(reeperbahn.clone()));
+            sink.playing(NowPlaying::Track(reeperbahn.clone()));
             car.expect(MEDIA_INFO).await;
-            sink.playing(Playing::Artwork(vec![0xff, 0xd8]));
+            sink.playing(NowPlaying::Artwork(vec![0xff, 0xd8]));
             let covered = car.expect(MEDIA_INFO).await;
             assert_eq!(
                 covered.body,
@@ -3733,7 +3725,7 @@ mod tests {
             );
 
             // The next line of the lyrics: a title, and nothing else said.
-            sink.playing(Playing::Track(Track {
+            sink.playing(NowPlaying::Track(Track {
                 song: Some("Reeperbahn — line two".into()),
                 ..Track::default()
             }));
@@ -3746,7 +3738,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -3764,7 +3756,7 @@ mod tests {
     /// which is what a phone with no cover of its own sends.
     #[tokio::test]
     async fn an_empty_cover_puts_the_last_one_down() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
@@ -3779,23 +3771,23 @@ mod tests {
             let mut car = Car { pipe };
             car.introduce("20062100").await;
 
-            sink.playing(Playing::Track(song.clone()));
+            sink.playing(NowPlaying::Track(song.clone()));
             car.expect(MEDIA_INFO).await;
 
             // A picture, which the car is given.
             let art = vec![0xff, 0xd8, 0xff];
-            sink.playing(Playing::Artwork(art.clone()));
+            sink.playing(NowPlaying::Artwork(art.clone()));
             let told = car.expect(MEDIA_INFO).await;
             assert_eq!(told.body, rebuilt(&told.body, &song, &art));
 
             // And the phone saying there is none takes it back.
-            sink.playing(Playing::Artwork(Vec::new()));
+            sink.playing(NowPlaying::Artwork(Vec::new()));
             let told = car.expect(MEDIA_INFO).await;
             assert_eq!(told.body, rebuilt(&told.body, &song, placeholder()));
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -3813,7 +3805,7 @@ mod tests {
     /// the page is given the same picture the car is.
     #[tokio::test]
     async fn a_song_with_a_length_puts_the_last_cover_down() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
@@ -3829,39 +3821,39 @@ mod tests {
             ..Track::default()
         };
 
-        let status = Arc::new(Page::new());
+        let status = Arc::new(Report::new());
         let page = status.clone();
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
             car.introduce("20062100").await;
 
-            sink.playing(Playing::Track(first.clone()));
+            sink.playing(NowPlaying::Track(first.clone()));
             car.expect(MEDIA_INFO).await;
 
             let art = vec![0xff, 0xd8, 0xff];
-            sink.playing(Playing::Artwork(art.clone()));
+            sink.playing(NowPlaying::Artwork(art.clone()));
             let told = car.expect(MEDIA_INFO).await;
             assert_eq!(told.body, rebuilt(&told.body, &first, &art));
-            assert!(page.cover().is_some(), "the page has the picture");
+            assert!(page.artwork().is_some(), "the page has the picture");
 
             // The next song announces itself with its length.
-            sink.playing(Playing::Track(next.clone()));
+            sink.playing(NowPlaying::Track(next.clone()));
             let told = car.expect(MEDIA_INFO).await;
             assert_eq!(told.body, rebuilt(&told.body, &next, placeholder()));
             assert_eq!(
-                page.cover().expect("the page has one").bytes.as_slice(),
+                page.artwork().expect("the page has one").bytes.as_slice(),
                 placeholder(),
                 "and the page is given the placeholder"
             );
 
             // Its own picture then goes out with it, as any cover does.
-            sink.playing(Playing::Artwork(vec![0x89, 0x50]));
+            sink.playing(NowPlaying::Artwork(vec![0x89, 0x50]));
             let told = car.expect(MEDIA_INFO).await;
             assert_eq!(told.body, rebuilt(&told.body, &next, &[0x89, 0x50]));
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, no_tap(), status.clone(), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), status.clone(), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -3878,7 +3870,7 @@ mod tests {
     /// worse than one the car never updated.
     #[tokio::test]
     async fn the_play_state_on_its_own_is_not_a_song() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
@@ -3888,14 +3880,14 @@ mod tests {
             let mut car = Car { pipe };
             car.introduce("20062100").await;
 
-            sink.playing(Playing::Track(Track {
+            sink.playing(NowPlaying::Track(Track {
                 source: Some("Music".into()),
                 ..Track::default()
             }));
             car.expect_silence(Duration::from_millis(300)).await;
 
             // And the song that follows carries the app with it.
-            sink.playing(Playing::Track(Track {
+            sink.playing(NowPlaying::Track(Track {
                 song: Some("Reeperbahn".into()),
                 ..Track::default()
             }));
@@ -3914,7 +3906,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -3933,7 +3925,7 @@ mod tests {
     /// own panel does with the same messages.
     #[tokio::test]
     async fn every_word_from_the_phone_goes_out_at_once() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
@@ -3944,7 +3936,7 @@ mod tests {
             car.introduce("20062100").await;
 
             // The title, and nothing else yet.
-            sink.playing(Playing::Track(Track {
+            sink.playing(NowPlaying::Track(Track {
                 song: Some("Reeperbahn".into()),
                 ..Track::default()
             }));
@@ -3962,7 +3954,7 @@ mod tests {
             );
 
             // The artist, which goes out with the title already known.
-            sink.playing(Playing::Track(Track {
+            sink.playing(NowPlaying::Track(Track {
                 artist: Some("Hamburg".into()),
                 ..Track::default()
             }));
@@ -3981,7 +3973,7 @@ mod tests {
             );
 
             // And the album, which is the last of it.
-            sink.playing(Playing::Track(Track {
+            sink.playing(NowPlaying::Track(Track {
                 album: Some("Stadt".into()),
                 ..Track::default()
             }));
@@ -4002,7 +3994,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -4018,7 +4010,7 @@ mod tests {
     /// the panel loses the picture, not the song.
     #[tokio::test]
     async fn a_cover_too_large_for_the_cars_message_is_left_out() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
@@ -4034,20 +4026,20 @@ mod tests {
             };
 
             // One byte past what the message may carry.
-            sink.playing(Playing::Artwork(vec![0xff; proto::MAX_ART + 1]));
-            sink.playing(Playing::Track(track.clone()));
+            sink.playing(NowPlaying::Artwork(vec![0xff; proto::MAX_ARTWORK + 1]));
+            sink.playing(NowPlaying::Track(track.clone()));
             let told = car.expect(MEDIA_INFO).await;
             assert_eq!(told.body, rebuilt(&told.body, &track, placeholder()));
 
             // And one that fits exactly is the car's to draw.
-            let fits = vec![0x89; proto::MAX_ART];
-            sink.playing(Playing::Artwork(fits.clone()));
+            let fits = vec![0x89; proto::MAX_ARTWORK];
+            sink.playing(NowPlaying::Artwork(fits.clone()));
             let covered = car.expect(MEDIA_INFO).await;
             assert_eq!(covered.body, rebuilt(&covered.body, &track, &fits));
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -4065,7 +4057,7 @@ mod tests {
     /// of the two.
     #[tokio::test]
     async fn a_message_larger_than_its_channel_allows_is_dropped() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
@@ -4103,7 +4095,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -4120,7 +4112,7 @@ mod tests {
     /// answer is the same for all of them.
     #[tokio::test]
     async fn the_cars_question_about_what_this_device_can_provide_is_answered() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let car = tokio::spawn(async move {
@@ -4139,7 +4131,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -4181,9 +4173,9 @@ mod tests {
     /// the same, because nothing that takes a report is behind having asked.
     #[tokio::test]
     async fn a_car_below_protocol_three_is_not_asked_for_its_data_but_is_heard() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let status = Arc::new(Page::new());
+        let status = Arc::new(Report::new());
         let reported = status.clone();
 
         let car = tokio::spawn(async move {
@@ -4202,13 +4194,13 @@ mod tests {
             car.send(HU_GO_TO_FOREGROUND, &[]).await;
             car.expect(GO_TO_FOREGROUND_RESPONSE).await;
 
-            let carlife = reported.carlife_json(serde_json::Value::Null).clone();
+            let carlife = reported.json(serde_json::Value::Null).clone();
             assert_eq!(carlife["gps"]["latitude"], 30_317_880);
             assert_eq!(carlife["speed"], 37);
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, no_tap(), status.clone(), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), status.clone(), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -4225,9 +4217,9 @@ mod tests {
     /// the car, and the fix is worth having either way.
     #[tokio::test]
     async fn the_cars_position_is_asked_for_and_reported() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let status = Arc::new(Page::new());
+        let status = Arc::new(Report::new());
         let reported = status.clone();
 
         let car = tokio::spawn(async move {
@@ -4259,7 +4251,7 @@ mod tests {
             car.send(HU_GO_TO_FOREGROUND, &[]).await;
             car.expect(GO_TO_FOREGROUND_RESPONSE).await;
 
-            let gps = reported.carlife_json(serde_json::Value::Null)["gps"].clone();
+            let gps = reported.json(serde_json::Value::Null)["gps"].clone();
             assert_eq!(gps["antenna_state"], 1);
             assert_eq!(gps["latitude"], 30_317_880);
             assert_eq!(gps["longitude"], 120_128_094);
@@ -4273,7 +4265,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, no_tap(), status.clone(), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), status.clone(), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -4287,12 +4279,12 @@ mod tests {
         // A fix belongs to the car that reported it, so the page is not left
         // showing where the last one was.
         assert!(
-            status.carlife_json(serde_json::Value::Null)["gps"].is_null(),
+            status.json(serde_json::Value::Null)["gps"].is_null(),
             "the position goes when the car does"
         );
         // The speed is the same kind of report and goes the same way.
         assert!(
-            status.carlife_json(serde_json::Value::Null)["speed"].is_null(),
+            status.json(serde_json::Value::Null)["speed"].is_null(),
             "the speed goes with it"
         );
     }
@@ -4302,7 +4294,7 @@ mod tests {
     /// sending half — which is the one handed in here.
     #[tokio::test]
     async fn the_cars_position_is_handed_to_the_phone() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let vehicle = Arc::new(Vehicle::default());
         let feed = vehicle.feed();
@@ -4323,7 +4315,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), vehicle.clone());
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), vehicle.clone());
         run(
             device,
             &cfg,
@@ -4344,7 +4336,7 @@ mod tests {
     /// was given for as long as it stays connected.
     #[tokio::test]
     async fn a_lost_fix_takes_the_position_back() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let vehicle = Arc::new(Vehicle::default());
         let feed = vehicle.feed();
@@ -4364,7 +4356,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), vehicle.clone());
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), vehicle.clone());
         run(
             device,
             &cfg,
@@ -4385,7 +4377,7 @@ mod tests {
     /// there, on a wireless link that outlives the car's.
     #[tokio::test]
     async fn the_position_goes_when_the_car_does() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let vehicle = Arc::new(Vehicle::default());
         let feed = vehicle.feed();
@@ -4402,7 +4394,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), vehicle.clone());
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), vehicle.clone());
         run(
             device,
             &cfg,
@@ -4455,7 +4447,7 @@ mod tests {
 
     #[tokio::test]
     async fn nothing_is_sent_on_the_video_channel_until_the_car_starts_it() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let car = tokio::spawn(async move {
@@ -4466,7 +4458,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -4485,9 +4477,9 @@ mod tests {
     /// whether or not the machine it runs on was built with a key.
     #[tokio::test]
     async fn a_challenge_with_no_key_behind_it_is_left_alone() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let status = Arc::new(Page::new());
+        let status = Arc::new(Report::new());
         let reported = status.clone();
 
         let car = tokio::spawn(async move {
@@ -4502,7 +4494,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, no_tap(), reported.clone(), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), reported.clone(), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -4514,7 +4506,7 @@ mod tests {
         car.await.unwrap();
 
         assert_eq!(
-            status.carlife_json(serde_json::Value::Null)["challenge_answered"],
+            status.json(serde_json::Value::Null)["challenge_answered"],
             false,
             "the challenge is reported as asked and unanswered"
         );
@@ -4522,13 +4514,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_frame_from_the_carplay_side_goes_out_as_it_arrives() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let outlet = Arc::new(Outlet::new());
         // The phone's screen stream is open before any of this: what is being
         // tested is a picture going through, and a closed screen is the guide's
         // case, which has tests of its own.
-        outlet.sink().screen(true);
+        outlet.sink().stream(true);
 
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let car = tokio::spawn(async move {
@@ -4555,7 +4547,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -4606,7 +4598,7 @@ mod tests {
     /// look stuck.
     #[tokio::test]
     async fn the_guide_is_what_the_car_is_shown_until_the_phones_screen_opens() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let outlet = Arc::new(Outlet::new());
 
@@ -4634,7 +4626,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -4650,7 +4642,7 @@ mod tests {
     /// pictures, which is the whole of the switch between the two.
     #[tokio::test]
     async fn the_phones_pictures_take_over_from_the_guide() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let outlet = Arc::new(Outlet::new());
 
@@ -4674,12 +4666,12 @@ mod tests {
         let arriving_outlet = outlet.clone();
         let arriving = tokio::spawn(async move {
             let _ = guiding_rx.await;
-            arriving_outlet.sink().screen(true);
+            arriving_outlet.sink().stream(true);
             arriving_outlet.sink().video(phone_picture);
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -4694,7 +4686,7 @@ mod tests {
 
     #[tokio::test]
     async fn every_channel_is_given_back_when_the_session_ends() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let outlet = Arc::new(Outlet::new());
 
@@ -4705,7 +4697,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,
@@ -4735,7 +4727,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_panel_key_is_read_rather_than_dropped_on_the_floor() {
-        let cfg = Settings::default();
+        let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let car = tokio::spawn(async move {
@@ -4748,7 +4740,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &cfg,

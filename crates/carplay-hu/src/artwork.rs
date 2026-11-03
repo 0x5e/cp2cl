@@ -162,7 +162,7 @@ impl fmt::Display for Why {
 /// A cover made small enough to travel in the car's media message.
 ///
 /// `budget` is the most the picture itself may take, which is what the message
-/// has left after the song's fields — see `crate::carlife::proto::MAX_ART`.
+/// has left after the song's fields — see `carlife_md::MAX_ARTWORK`.
 pub fn fit(bytes: &[u8], budget: usize) -> Fitted {
     if bytes.len() <= budget {
         return Fitted::AsIs(bytes.to_vec());

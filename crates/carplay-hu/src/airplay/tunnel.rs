@@ -39,9 +39,9 @@ use tokio::sync::{mpsc, watch, Notify};
 use tokio::task::JoinHandle;
 
 use super::crypto::{hkdf32, open_frames, SymKey};
-use super::event::Press;
+use super::event::Events;
 use crate::link::Panel;
-use crate::options::Options;
+use crate::machine::Machine;
 use crate::report::Report;
 use crate::session::{carry_artwork, run_bringup, Ended};
 use crate::wireless::{session_params, short, Handover, SessionParams};
@@ -72,7 +72,7 @@ const PEER_WAIT: Duration = Duration::from_secs(15);
 /// read a moment ago, and the two have to agree or the phone is being offered a
 /// different accessory from the one it is already talking to.
 pub struct Setup {
-    pub cfg: Arc<Options>,
+    pub cfg: Arc<Machine>,
     pub auth: SharedCoprocessor,
     /// The AirPlay identity's public key, hex, which the start session names so
     /// the phone recognises the accessory on this stream as the one it paired
@@ -83,7 +83,7 @@ pub struct Setup {
     pub panel: Arc<dyn Panel>,
     pub vehicle: Arc<Vehicle>,
     pub status: Arc<Report>,
-    pub events: Arc<Press>,
+    pub events: Arc<Events>,
     pub handover: Arc<Handover>,
     /// Fires when what the phone renders changes. The AirPlay session ends on
     /// it, so the session on the tunnel is told the same thing.
@@ -227,7 +227,7 @@ impl Tunnel {
             ..LinkConfig::default()
         };
         let (channel, artwork) = spawn_link_stream(link_side, link_config, true);
-        let carrying = tokio::spawn(carry_artwork(artwork, setup.panel.clone(), setup.cfg.cover_limit));
+        let carrying = tokio::spawn(carry_artwork(artwork, setup.panel.clone(), setup.cfg.artwork_limit));
 
         let (tx, rx) = mpsc::channel(64);
         let auth = setup.auth.clone();
@@ -411,7 +411,7 @@ fn take_packages(plain: &mut Vec<u8>, out: &mut Vec<Vec<u8>>) -> Result<(), usiz
 async fn pump(
     phone_side: DuplexStream,
     mut from_stream: mpsc::UnboundedReceiver<Vec<u8>>,
-    events: Arc<Press>,
+    events: Arc<Events>,
     connected: Arc<Notify>,
 ) {
     let (mut read, mut write) = tokio::io::split(phone_side);

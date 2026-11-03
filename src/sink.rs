@@ -14,10 +14,10 @@
 use std::sync::{Arc, Mutex};
 
 use carplay_hu::now_playing::NowPlaying;
-use carplay_hu::sink::{MediaSink, StreamEvent, StreamId};
+use carplay_hu::sink::{StreamSink, StreamEvent, StreamId};
 use carplay_hu::sink::{is_media, is_navigation};
 
-use crate::playing::{Playing, Position, Track};
+use crate::now_playing::{NowPlaying as Playing, Position, Track};
 
 // The two shapes the car's channels carry, which belong to the CarLife half.
 pub use carlife_md::media::{Media, Navi};
@@ -94,7 +94,7 @@ impl ClSink {
     }
 }
 
-impl MediaSink for ClSink {
+impl StreamSink for ClSink {
     fn push(&self, event: StreamEvent) {
         match event {
             // The car reads an elementary stream, so the parameter sets have to
@@ -185,7 +185,7 @@ impl MediaSink for ClSink {
             // pictures, which is what the guide is for, and a keyframe can only
             // be asked for while one is open.
             StreamEvent::ScreenActive(open) => {
-                self.queues.screen(open);
+                self.queues.stream(open);
             }
         }
     }
@@ -399,8 +399,8 @@ mod tests {
     fn the_screen_stream_is_open_for_exactly_as_long_as_it_is() {
         let outlet = Outlet::new();
         let sink = ClSink::new(outlet.sink());
-        let screen = outlet.screen();
-        let open = || *screen.borrow();
+        let streaming = outlet.streaming();
+        let open = || *streaming.borrow();
 
         assert!(!open(), "nothing is open yet");
         sink.push(StreamEvent::ScreenActive(true));

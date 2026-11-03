@@ -31,9 +31,9 @@ use super::auth;
 use crate::desc;
 use super::session;
 use super::usb::{Endpoints, Usb};
-use crate::page::Page;
+use crate::report::Report;
 use crate::ports::Ports;
-use crate::settings::Settings;
+use crate::machine::Machine;
 
 /// How long to let the answer to `start accessory` leave before the device is
 /// taken away. The transfer is closed by `complete`, and the host takes its
@@ -69,14 +69,14 @@ enum Answered {
 /// Built by the program and run in a task of its own: what it does is answer a
 /// car, and the car decides when that is.
 pub struct Md<'a> {
-    settings: &'a Settings,
+    settings: &'a Machine,
     ports: &'a Ports<'a>,
     replug: mpsc::Receiver<()>,
 }
 
 impl<'a> Md<'a> {
     pub fn new(
-        settings: &'a Settings,
+        settings: &'a Machine,
         ports: &'a Ports<'a>,
         replug: mpsc::Receiver<()>,
     ) -> Self {
@@ -109,11 +109,11 @@ impl<'a> Md<'a> {
     // A device that is on the controller and not yet enumerated is a cable, a
     // port or a car, and saying so is what makes "nothing is happening" mean
     // something specific.
-    ports.page.with(|s| {
+    ports.report.with(|s| {
         s.carlife.usb.controller = Some(usb.controller().to_string());
         s.carlife.usb.enumerated = Some(false);
     });
-    describe_identity(&ports.page, &identity);
+    describe_identity(&ports.report, &identity);
 
     tracing::info!("usb.waiting_for_host");
 
@@ -142,7 +142,7 @@ impl<'a> Md<'a> {
         identity,
         tokio::fs::File::from_std(control),
         events_tx,
-        ports.page.clone(),
+        ports.report.clone(),
     ));
 
     let bus = udc.clone();
@@ -163,7 +163,7 @@ impl<'a> Md<'a> {
             // thing on the channel, a session is silent, so the one that turns out
             // not to be needed costs nothing.
             Event::Enabled => {
-                ports.page.with(|s| s.carlife.usb.enumerated = Some(true));
+                ports.report.with(|s| s.carlife.usb.enumerated = Some(true));
                 match bulk(&from_car, &to_car) {
                     Ok(pair) => {
                         // What the car negotiated, beside the fact that it
@@ -173,7 +173,7 @@ impl<'a> Md<'a> {
                         // The page can change the size while the program runs, so
                         // it is read again for each session.
                         let mut settings = settings.clone();
-                        settings.screen = ports.delegate.screen_override();
+                        settings.screen = ports.delegate.screen_chosen();
                         if let Err(e) =
                             session::run(pair, &settings, auth.clone(), ports).await
                         {
@@ -192,11 +192,11 @@ impl<'a> Md<'a> {
                 }
             }
             Event::Disabled => {
-                ports.page.with(|s| s.carlife.usb.enumerated = Some(false));
+                ports.report.with(|s| s.carlife.usb.enumerated = Some(false));
                 tracing::info!("usb.host_gone");
             }
             Event::Accessory => {
-                ports.page.with(|s| s.carlife.accessory = true);
+                ports.report.with(|s| s.carlife.accessory = true);
                 tracing::info!("usb.accessory_mode state=on")
             }
         }
@@ -230,7 +230,7 @@ async fn control_loop(
     mut identity: desc::Identity,
     mut ep0: tokio::fs::File,
     events: mpsc::Sender<Event>,
-    status: Arc<Page>,
+    status: Arc<Report>,
 ) {
     loop {
         // The whole event is twelve bytes: the eight of a `usb_ctrlrequest`, the
@@ -281,7 +281,7 @@ async fn answer(
     identity: &mut desc::Identity,
     ep0: &mut tokio::fs::File,
     raw: &[u8; 12],
-    status: &Page,
+    status: &Report,
 ) -> Result<Answered> {
     let setup = desc::Setup::decode(raw).ok_or_else(|| anyhow!("a setup event with no setup packet"))?;
 
@@ -418,7 +418,7 @@ async fn switch(usb: &Usb, identity: &mut desc::Identity) -> Result<()> {
 /// Reported wherever the identity changes rather than once: the device presents
 /// two of them, and which one is on the wire is the difference between a car
 /// seeing a phone and a car seeing an accessory.
-fn describe_identity(status: &Page, identity: &desc::Identity) {
+fn describe_identity(status: &Report, identity: &desc::Identity) {
     status.with(|s| {
         s.carlife.usb.vid = Some(identity.vid);
         s.carlife.usb.pid = Some(identity.pid);

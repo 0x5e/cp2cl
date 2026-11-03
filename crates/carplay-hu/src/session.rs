@@ -42,7 +42,7 @@ use tokio::sync::{mpsc, watch};
 use crate::artwork::{self, Fitted};
 use crate::link::Panel;
 use crate::now_playing::{NowPlaying, Position, Track};
-use crate::options::Options;
+use crate::machine::Machine;
 use crate::report::Report;
 use crate::Hu;
 use crate::wireless::{parse_mac, short};
@@ -147,7 +147,7 @@ async fn carkit(mux: &Arc<iap2_usbmux::MuxDevice>) -> anyhow::Result<Box<dyn ide
 /// session names it so the phone recognises the accessory on the cable as the
 /// one it paired with.
 pub(crate) async fn watch(hu: &Arc<Hu>) {
-    let cfg = hu.options.clone();
+    let cfg = hu.machine.clone();
     let auth = hu.mfi.clone();
     let airplay_port = hu.airplay_port;
     let accessory_key = hu.accessory_key.clone();
@@ -229,7 +229,7 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
 /// the accessory's answer to the phone's own `CarPlayAvailability`, and a phone
 /// that has already started CarPlay has no question outstanding.
 async fn attach(
-    cfg: &Options,
+    cfg: &Machine,
     auth: SharedCoprocessor,
     phone: &Phone,
     airplay_port: u32,
@@ -294,7 +294,7 @@ async fn attach(
         // The cover art is a file transfer of its own on the same link, so it is
         // carried across as it lands rather than waited for: the update that
         // names the song says only that art is coming.
-        let carrying = tokio::spawn(carry_artwork(artwork, panel.clone(), cfg.cover_limit));
+        let carrying = tokio::spawn(carry_artwork(artwork, panel.clone(), cfg.artwork_limit));
 
         let cp = CpConfig {
             wifi_iface: String::new(),

@@ -28,7 +28,7 @@ use livi_wifi::{Channel, OnAir, Security};
 use tokio::sync::{mpsc, watch};
 
 use crate::link::Panel;
-use crate::options::Options;
+use crate::machine::Machine;
 use crate::report::Report;
 use crate::session::{run_bringup, Ended};
 
@@ -119,7 +119,7 @@ pub(crate) struct SessionParams {
 /// rather than read here: it belongs to the pairing the caller already holds
 /// open, and a second copy read off disk could disagree with it.
 pub(crate) fn session_params(
-    cfg: &Options,
+    cfg: &Machine,
     airplay_port: u32,
     bt_mac: [u8; 6],
     accessory_key: &str,
@@ -217,7 +217,7 @@ pub(crate) fn session_params(
 /// again on the first line.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_session(
-    cfg: &Options,
+    cfg: &Machine,
     auth: SharedCoprocessor,
     channel: LinkChannel,
     airplay_port: u32,
@@ -454,7 +454,7 @@ fn device_path(adapter: &str, mac: &str) -> String {
 /// Checked before the Bluetooth service is published, so a configuration
 /// mistake is one line at startup rather than a pairing prompt followed by
 /// nothing.
-pub(crate) fn ready(cfg: &Options) -> Result<(), String> {
+pub(crate) fn ready(cfg: &Machine) -> Result<(), String> {
     access_point(&cfg.wifi_iface).map(|_| ())
 }
 

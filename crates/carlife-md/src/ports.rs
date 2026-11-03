@@ -4,10 +4,11 @@
 use std::sync::Arc;
 
 use livi_runtime::vehicle::Vehicle;
+use tokio::sync::Notify;
 
-use crate::link::{Assets, Delegate, Desktop, Input};
+use crate::link::{Assets, Delegate, Input};
 use crate::outlet::Outlet;
-use crate::page::Page;
+use crate::report::Report;
 
 /// Everything a session needs from the program it runs in.
 pub struct Ports<'a> {
@@ -19,12 +20,12 @@ pub struct Ports<'a> {
     pub assets: &'a dyn Assets,
     /// Fires when the phone's icon for us is tapped: on the phone that icon
     /// stands for the car's own interface, so the car is asked to show it.
-    pub desktop: Arc<dyn Desktop>,
+    pub home: Arc<Notify>,
     /// The queues towards the car: what the other half produces and a session
     /// drains for as long as it runs.
     pub outlet: Arc<Outlet>,
     /// Where the session reports, for the page.
-    pub page: Arc<Page>,
+    pub report: Arc<Report>,
     /// Where the car's position goes, for the phone to read.
     pub vehicle: Arc<Vehicle>,
 }

@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 /// Everything the CarPlay half is told about the machine.
-pub struct Options {
+pub struct Machine {
     /// Whether the phone is to be found over Bluetooth and Wi-Fi instead of the
     /// cable. Decides whether a wireless phone's tunnel is set up at all.
     pub wireless: bool,
@@ -26,10 +26,10 @@ pub struct Options {
     pub data_dir: PathBuf,
     /// The largest cover the car's message can carry, which is what decides when
     /// one has to be shrunk before it is sent. The limit is the consumer's.
-    pub cover_limit: usize,
+    pub artwork_limit: usize,
 }
 
-impl Default for Options {
+impl Default for Machine {
     /// What a machine that cannot say anything about itself reports.
     fn default() -> Self {
         Self {
@@ -40,7 +40,7 @@ impl Default for Options {
             vendor: "Unknown".to_string(),
             bt_address: "00:11:22:33:44:55".to_string(),
             data_dir: PathBuf::new(),
-            cover_limit: 0,
+            artwork_limit: 0,
         }
     }
 }

@@ -21,7 +21,7 @@
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Track {
     /// The app it is playing from, which the page shows as the song's source.
-    /// The car is not given it: see `crate::carlife::proto::media_info`.
+    /// The car is not given it: see `crate::proto::media_info`.
     pub source: Option<String>,
     pub song: Option<String>,
     pub artist: Option<String>,
@@ -95,7 +95,7 @@ pub struct Position {
 
 /// One thing the phone said, on its way to the car.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Playing {
+pub enum NowPlaying {
     /// What the phone said about the song, as far as it said it.
     Track(Track),
     /// Where in it the song was playing.

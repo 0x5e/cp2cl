@@ -160,7 +160,7 @@ pub enum StreamEvent {
 /// Never blocks: the implementation drops instead, because a live stream should
 /// glitch rather than fall behind, and a consumer that is gone for good says so
 /// once instead of forever.
-pub trait MediaSink: Send + Sync {
+pub trait StreamSink: Send + Sync {
     fn push(&self, event: StreamEvent);
 }
 

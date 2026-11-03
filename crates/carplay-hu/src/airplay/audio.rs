@@ -20,7 +20,7 @@
 //! The car at the other end of the bridge takes 16-bit PCM on its media channel
 //! and its navigation channel, a phone on wireless CarPlay sends its music as
 //! AAC-LC and its prompts as Opus, so both codecs come off on this side of the
-//! `MediaSink` — the stream's codec is known exactly here and nowhere later. The
+//! `StreamSink` — the stream's codec is known exactly here and nowhere later. The
 //! two voice streams that are not prompts, a call and the voice assistant,
 //! belong to the car's own channels; they arrive as Opus too and are not decoded
 //! at all, because nothing downstream of here is going to be given them.
@@ -33,7 +33,7 @@ use rusty_opus::OpusDecoder;
 
 use super::crypto::{open, SymKey};
 use crate::aac;
-use crate::sink::{self, AudioCodec, MediaSink, StreamEvent, StreamId};
+use crate::sink::{self, AudioCodec, StreamSink, StreamEvent, StreamId};
 use std::sync::Arc;
 
 pub const RTP_HEADER_LEN: usize = 12;
@@ -58,7 +58,7 @@ pub struct AudioReceiver {
     /// What the phone sends, which decides how a packet's counter is turned into
     /// a moment.
     codec: AudioCodec,
-    sink: Arc<dyn MediaSink>,
+    sink: Arc<dyn StreamSink>,
     /// What takes the codec off, when what the phone sends is not already what
     /// the car takes. `None` for PCM, which needs nothing, and for the Opus of a
     /// stream the car is never given.
@@ -82,7 +82,7 @@ impl AudioReceiver {
         stream: StreamId,
         codec: AudioCodec,
         name: &str,
-        sink: Arc<dyn MediaSink>,
+        sink: Arc<dyn StreamSink>,
     ) -> Self {
         let delivered = delivered(codec, name);
         let decoder = match codec {

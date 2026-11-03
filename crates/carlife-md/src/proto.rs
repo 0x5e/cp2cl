@@ -15,7 +15,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::playing::Track;
+use crate::now_playing::Track;
 
 /// One field, as it appears on the wire.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -300,7 +300,7 @@ pub fn media_progress_bar(elapsed_ms: i32) -> Vec<u8> {
 /// This layer does not re-compress: a cover is made to fit before it gets here
 /// (`crate::artwork`), and one that still does not is left out rather than sent
 /// as a message the car cannot take.
-pub const MAX_ART: usize = 30 * 1024;
+pub const MAX_ARTWORK: usize = 30 * 1024;
 
 /// `MSG_CMD_MEDIA_INFO` — what the car's panel is told about the song that is
 /// playing. The guide calls this one "当前歌曲播放信息" and says the refresh is

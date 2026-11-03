@@ -23,7 +23,7 @@ mod web;
 // The input vocabulary and the playing record belong to the CarLife half and
 // live in that crate. Re-exported under their old names so the paths inside the
 // program still read the same.
-pub use carlife_md::playing;
+pub use carlife_md::now_playing;
 pub use carlife_md::press as commands;
 
 use std::path::PathBuf;
@@ -38,9 +38,9 @@ use tokio::sync::{watch, Notify};
 use tracing_subscriber::prelude::*;
 
 use carlife_md::outlet::Outlet;
-use carplay_hu::{Press, ScreenParams};
+use carplay_hu::{Events, Geometry};
 use carplay_hu::report::Report;
-use carplay_hu::sink::MediaSink;
+use carplay_hu::sink::StreamSink;
 
 use crate::config::hostname;
 use crate::sink::ClSink;
@@ -194,21 +194,22 @@ async fn main() -> Result<()> {
     // What the phone is asked to render: the CarLife session writes it once a
     // head unit has said what its screen is, and `GET /info` is answered from it.
     // Until then nothing has, and the default stands.
-    let (screen, screen_in) = watch::channel::<Option<ScreenParams>>(None);
+    let (screen, screen_in) = watch::channel::<Option<Geometry>>(None);
 
     // Which channel the head unit on the other end is, once it has said. `GET
     // /info` is answered from it, so the phone is shown the icon and the label
     // that go with the car it is plugged into.
-    let (channel, channel_in) = watch::channel::<Option<String>>(None);
+    let (channel_id, channel_id_in) = watch::channel::<Option<String>>(None);
 
     // Fired when the phone's icon for us is tapped. The car can be plugged out
     // and back in, and whoever is waiting at the time is the one that matters:
-    // a tap with nobody waiting is kept until there is.
-    let tap = Arc::new(Notify::new());
+    // a tap with nobody waiting is kept until there is. The CarLife half waits
+    // on it; the hook that fires it holds the other handle.
+    let home = Arc::new(Notify::new());
 
     // Input goes out through here whatever produced it. Built now and filled in
     // later: the keys only exist once pair-verify has run.
-    let press = Press::new();
+    let press = Events::new();
 
     // What a running session is told when what to render changes. `/info` is
     // answered once per session and never asked again, so a new size only lands
@@ -235,7 +236,7 @@ async fn main() -> Result<()> {
     // and where it is going, go through the same object, which is why it is kept
     // whole rather than erased into the two traits below.
     let sink = Arc::new(ClSink::new(outlet.sink()));
-    let (video_sink, audio_sink): (Arc<dyn MediaSink>, Arc<dyn MediaSink>) =
+    let (video_sink, audio_sink): (Arc<dyn StreamSink>, Arc<dyn StreamSink>) =
         (sink.clone(), sink.clone());
 
     // Worth saying out loud: nothing here draws a picture, and what the phone is
@@ -256,7 +257,7 @@ async fn main() -> Result<()> {
     // What the CarPlay half is told about the machine, and the two of these that
     // are not properties of it: how much room the car's media message leaves for
     // a cover, which is the consumer's number rather than the phone's.
-    let options = Arc::new(carplay_hu::options::Options {
+    let machine = Arc::new(carplay_hu::machine::Machine {
         wireless: cfg.wireless,
         wifi_iface: cfg.wifi_iface.clone(),
         bt_adapter: cfg.bt_adapter.clone(),
@@ -264,7 +265,7 @@ async fn main() -> Result<()> {
         vendor: config::dt_vendor(),
         bt_address: config::bt_address(&cfg.bt_adapter),
         data_dir: data_dir.clone(),
-        cover_limit: carlife_md::MAX_ART,
+        artwork_limit: carlife_md::MAX_ARTWORK,
     });
 
     // Whether the CarPlay half is open for the phone at all. It starts shut and
@@ -282,8 +283,8 @@ async fn main() -> Result<()> {
         gateway.clone(),
         restart.clone(),
         screen,
-        channel,
-        tap,
+        channel_id,
+        home.clone(),
         led.clone(),
         press.clone(),
     );
@@ -304,7 +305,7 @@ async fn main() -> Result<()> {
     );
 
     let phone = carplay_hu::Hu::new(carplay_hu::Ports {
-        options,
+        machine,
         assets: &assets::TABLE,
         mfi: auth,
         listener,
@@ -312,12 +313,12 @@ async fn main() -> Result<()> {
         video_sink,
         audio_sink,
         panel: sink,
-        press,
+        events: press,
         report: report.clone(),
         vehicle: vehicle.clone(),
         delegate: hooks.clone(),
         screen: screen_in,
-        channel: channel_in,
+        channel_id: channel_id_in,
         restart: restart.clone(),
     })?;
 
@@ -331,7 +332,7 @@ async fn main() -> Result<()> {
     // and the controller holds its own address. The screen is the one exception,
     // and it is read out of the settings file — for each session, because the
     // page can change it while the program runs.
-    let settings = carlife_md::settings::Settings {
+    let settings = carlife_md::machine::Machine {
         screen: hooks.screen_chosen(),
         name: hostname(),
         vendor: config::dt_vendor(),
@@ -357,9 +358,9 @@ async fn main() -> Result<()> {
             input: car.clone(),
             delegate: &*car,
             assets: &*car,
-            desktop: car.clone(),
+            home: home.clone(),
             outlet,
-            page: reported,
+            report: reported,
             vehicle: handed,
         };
         let outcome = carlife_md::Md::new(&settings, &ports, replug_requested)

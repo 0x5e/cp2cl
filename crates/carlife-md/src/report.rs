@@ -15,11 +15,11 @@ use crate::proto::CarGps;
 /// six; they are kept for the page and do not rename the device.
 const ASKED: usize = 6;
 
-pub struct Page {
+pub struct Report {
     inner: Mutex<Snapshot>,
 }
 
-impl Page {
+impl Report {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(Snapshot::default()),
@@ -37,42 +37,42 @@ impl Page {
 
     /// The car's half of the page. `video` is the stream's coding, which the
     /// other half reports and this one does not name: it is put in as it stands.
-    pub fn carlife_json(&self, video: Value) -> Value {
+    pub fn json(&self, video: Value) -> Value {
         let held = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut body = held.carlife.json();
         body["video"] = video;
         body
     }
 
-    pub fn now_playing_json(&self) -> Value {
+    pub fn song_json(&self) -> Value {
         let held = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         held.now_playing.json()
     }
 
     /// The cover the car was last given, with the name the page asks for it by.
-    pub fn cover(&self) -> Option<Cover> {
+    pub fn artwork(&self) -> Option<Artwork> {
         let held = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        held.now_playing.cover.clone()
+        held.now_playing.artwork.clone()
     }
 
     /// An empty one is the phone saying this song has none, and it puts the
     /// last one down.
-    pub fn cover_changed(&self, bytes: Vec<u8>) {
-        let cover = (!bytes.is_empty()).then(|| Cover {
-            id: cover_id(&bytes),
+    pub fn artwork_changed(&self, bytes: Vec<u8>) {
+        let artwork = (!bytes.is_empty()).then(|| Artwork {
+            id: artwork_id(&bytes),
             bytes: Arc::new(bytes),
         });
-        self.with(|report| report.now_playing.cover = cover);
+        self.with(|report| report.now_playing.artwork = artwork);
     }
 
     /// A new session starts with no song: what the last car was showing belongs
     /// to a car that is no longer there.
-    pub fn now_playing_cleared(&self) {
-        self.with(|report| report.now_playing = NowPlaying::default());
+    pub fn song_cleared(&self) {
+        self.with(|report| report.now_playing = Song::default());
     }
 }
 
-impl Default for Page {
+impl Default for Report {
     fn default() -> Self {
         Self::new()
     }
@@ -83,7 +83,7 @@ pub struct Snapshot {
     /// The car's half: a head unit talking CarLife to the device we present.
     pub carlife: Carlife,
     /// The song the car's panel is showing, which belongs to neither end.
-    pub now_playing: NowPlaying,
+    pub now_playing: Song,
 }
 
 /// What the CarLife side knows, which is everything the car told us.
@@ -113,8 +113,8 @@ pub struct Carlife {
     /// The head unit's own verdict on us, from `HU_AUTHEN_RESULT`.
     pub accepted: Option<bool>,
     /// What the head unit asked to be rendered at, and what we agreed to.
-    pub requested: Option<Size>,
-    pub agreed: Option<Size>,
+    pub requested: Option<Geometry>,
+    pub agreed: Option<Geometry>,
     /// What the agreed size works out to on the car's panel, in millimetres.
     pub physical: Option<(u32, u32)>,
     /// Whether the head unit has the encoder running.
@@ -153,13 +153,13 @@ pub struct Usb {
 
 /// A screen, as either end of the bridge names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Size {
+pub struct Geometry {
     pub width: i32,
     pub height: i32,
     pub fps: i32,
 }
 
-impl Size {
+impl Geometry {
     fn json(&self) -> Value {
         json!({ "width": self.width, "height": self.height, "fps": self.fps })
     }
@@ -195,7 +195,7 @@ impl Statistic {
 
 /// The song on the car's panel.
 #[derive(Debug, Clone, Default)]
-pub struct NowPlaying {
+pub struct Song {
     /// The app it is playing from, which the car shows as the song's source.
     pub source: Option<String>,
     pub song: Option<String>,
@@ -210,12 +210,12 @@ pub struct NowPlaying {
     pub playing: Option<bool>,
     /// The cover exactly as it went to the car. Kept when a song changes without
     /// one, because that is what the car does with it too.
-    pub cover: Option<Cover>,
+    pub artwork: Option<Artwork>,
 }
 
 /// A picture, and the name the page asks for it by.
 #[derive(Debug, Clone)]
-pub struct Cover {
+pub struct Artwork {
     /// The bytes, exactly as the car was given them.
     pub bytes: Arc<Vec<u8>>,
     /// A hash of those bytes, which is what the page puts in its request.
@@ -225,7 +225,7 @@ pub struct Cover {
 /// A hash rather than a counter: the page keeps what it has fetched and asks
 /// again only when the name changes, and a name that came round again would show
 /// a picture belonging to a song that has finished. FNV-1a over the bytes.
-fn cover_id(bytes: &[u8]) -> u64 {
+fn artwork_id(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     for byte in bytes {
         hash ^= u64::from(*byte);
@@ -258,8 +258,8 @@ impl Carlife {
             "challenge": self.challenge,
             "challenge_answered": self.challenge_answered,
             "accepted": self.accepted,
-            "requested": self.requested.as_ref().map(Size::json),
-            "agreed": self.agreed.as_ref().map(Size::json),
+            "requested": self.requested.as_ref().map(Geometry::json),
+            "agreed": self.agreed.as_ref().map(Geometry::json),
             "physical": self.physical.map(|(width_mm, height_mm)| json!({
                 "width_mm": width_mm,
                 "height_mm": height_mm,
@@ -274,7 +274,7 @@ impl Carlife {
             "media": self
                 .media
                 .map(|(rate, channels)| json!({ "rate": rate, "channels": channels, "bits": 16 })),
-            // Filled in by `Page::carlife_json`: the coding is the phone's
+            // Filled in by `Report::json`: the coding is the phone's
             // stream, which the other half of the bridge reports.
             "video": Value::Null,
             "error_bytes": self.error_bytes,
@@ -300,7 +300,7 @@ impl Carlife {
     }
 }
 
-impl NowPlaying {
+impl Song {
     fn json(&self) -> Value {
         json!({
             "source": self.source,
@@ -312,9 +312,9 @@ impl NowPlaying {
             "playing": self.playing,
             // The bytes are not in the answer: the page fetches the picture
             // from its own path, and this is what it asks for it by.
-            "cover": self.cover.as_ref().map(|cover| json!({
-                "id": format!("{:016x}", cover.id),
-                "bytes": cover.bytes.len(),
+            "cover": self.artwork.as_ref().map(|artwork| json!({
+                "id": format!("{:016x}", artwork.id),
+                "bytes": artwork.bytes.len(),
             })),
         })
     }
@@ -326,10 +326,10 @@ mod tests {
 
     #[test]
     fn a_report_is_one_write_and_the_page_reads_it_back() {
-        let page = Page::new();
-        page.with(|report| {
+        let report = Report::new();
+        report.with(|report| {
             report.carlife.session_up = true;
-            report.carlife.agreed = Some(Size {
+            report.carlife.agreed = Some(Geometry {
                 width: 1280,
                 height: 720,
                 fps: 30,
@@ -337,41 +337,41 @@ mod tests {
             report.now_playing.song = Some("a song".into());
         });
 
-        assert_eq!(page.carlife_json(Value::Null)["session_up"], json!(true));
+        assert_eq!(report.json(Value::Null)["session_up"], json!(true));
         assert_eq!(
-            page.carlife_json(Value::Null)["agreed"],
+            report.json(Value::Null)["agreed"],
             json!({ "width": 1280, "height": 720, "fps": 30 })
         );
-        assert_eq!(page.now_playing_json()["song"], json!("a song"));
+        assert_eq!(report.song_json()["song"], json!("a song"));
     }
 
     #[test]
     fn the_coding_is_whatever_the_other_half_reports() {
-        let page = Page::new();
+        let report = Report::new();
         let video = json!({ "codec": "H.264", "profile": "High", "level": "4" });
-        assert_eq!(page.carlife_json(video.clone())["video"], video);
+        assert_eq!(report.json(video.clone())["video"], video);
     }
 
     /// A cover is named by its bytes, and an empty one puts the last down.
     #[test]
     fn the_cover_is_named_by_what_it_is() {
-        let page = Page::new();
-        page.cover_changed(vec![1, 2, 3]);
-        let first = page.cover().expect("a picture");
+        let report = Report::new();
+        report.artwork_changed(vec![1, 2, 3]);
+        let first = report.artwork().expect("a picture");
         assert_eq!(first.bytes.as_slice(), &[1, 2, 3]);
 
-        page.cover_changed(vec![1, 2, 3]);
-        assert_eq!(page.cover().expect("still there").id, first.id);
+        report.artwork_changed(vec![1, 2, 3]);
+        assert_eq!(report.artwork().expect("still there").id, first.id);
 
-        page.cover_changed(Vec::new());
-        assert!(page.cover().is_none(), "no picture is not a picture");
+        report.artwork_changed(Vec::new());
+        assert!(report.artwork().is_none(), "no picture is not a picture");
     }
 
     #[test]
     fn a_new_session_starts_with_no_song() {
-        let page = Page::new();
-        page.with(|report| report.now_playing.song = Some("a song".into()));
-        page.now_playing_cleared();
-        assert!(page.now_playing_json()["song"].is_null());
+        let report = Report::new();
+        report.with(|report| report.now_playing.song = Some("a song".into()));
+        report.song_cleared();
+        assert!(report.song_json()["song"].is_null());
     }
 }

@@ -165,7 +165,7 @@ pub struct Carplay {
     /// The connection the phone has open to the airplay receiver.
     pub airplay: Airplay,
     /// What the phone is being asked to render.
-    pub screen: Option<Screen>,
+    pub screen: Option<Rendering>,
     /// The screen stream.
     pub video: Video,
     /// Every audio stream the phone has open, keyed by nothing: the type and the
@@ -246,8 +246,11 @@ impl Rtt {
 }
 
 /// What the phone has been asked to render, and what that works out to.
+///
+/// The page's record rather than the request: [`Geometry`] is what a car named,
+/// and this is that, the canvas it became and the size the phone was told.
 #[derive(Debug, Clone, Default)]
-pub struct Screen {
+pub struct Rendering {
     pub width: u32,
     pub height: u32,
     pub fps: u32,

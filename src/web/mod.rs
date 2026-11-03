@@ -239,7 +239,7 @@ fn json_answer(status: StatusCode, body: serde_json::Value) -> Response {
 /// song's picture under another song's name and leave it in a cache that never
 /// expires.
 async fn cover(State(status): State<Arc<Status>>, RawQuery(query): RawQuery) -> Response {
-    let Some(cover) = status.cover() else {
+    let Some(cover) = status.artwork() else {
         return (StatusCode::NOT_FOUND, "no cover\n").into_response();
     };
     if named(&query) != Some(cover.id) {
@@ -388,7 +388,7 @@ async fn not_found() -> impl IntoResponse {
 mod tests {
     use super::*;
 
-    use carlife_md::page::Size;
+    use carlife_md::report::Geometry;
 
     /// A page with both halves empty and nothing sampled yet: what is served
     /// before a run has learned anything.
@@ -598,7 +598,7 @@ mod tests {
         assert_eq!(status.json()["now_playing"]["playing"], true);
 
         // A new session starts having told the car nothing at all.
-        status.carlife().now_playing_cleared();
+        status.carlife().song_cleared();
         assert!(status.json()["now_playing"]["progress_ms"].is_null());
         assert!(status.json()["now_playing"]["playing"].is_null());
 
@@ -624,29 +624,29 @@ mod tests {
     #[test]
     fn a_cover_is_named_by_what_is_in_it() {
         let status = empty_status();
-        assert!(status.cover().is_none(), "nothing to draw yet");
+        assert!(status.artwork().is_none(), "nothing to draw yet");
 
-        status.carlife().cover_changed(vec![0xff, 0xd8, 0xff]);
+        status.carlife().artwork_changed(vec![0xff, 0xd8, 0xff]);
         let first = status.json()["now_playing"]["cover"]["id"].clone();
-        assert_eq!(status.cover().map(|c| c.bytes.len()), Some(3));
+        assert_eq!(status.artwork().map(|c| c.bytes.len()), Some(3));
 
         // The same bytes again are the same picture, so the page keeps it.
-        status.carlife().cover_changed(vec![0xff, 0xd8, 0xff]);
+        status.carlife().artwork_changed(vec![0xff, 0xd8, 0xff]);
         assert_eq!(status.json()["now_playing"]["cover"]["id"], first);
 
         // Another picture is another name.
-        status.carlife().cover_changed(vec![0x42]);
+        status.carlife().artwork_changed(vec![0x42]);
         assert_ne!(status.json()["now_playing"]["cover"]["id"], first);
 
         // An empty one is the phone saying this song has no picture.
-        status.carlife().cover_changed(Vec::new());
-        assert!(status.cover().is_none());
+        status.carlife().artwork_changed(Vec::new());
+        assert!(status.artwork().is_none());
         assert!(status.json()["now_playing"]["cover"].is_null());
 
         // And a new session starts with nothing, which lets the bytes go.
-        status.carlife().cover_changed(vec![1, 2, 3]);
-        status.carlife().now_playing_cleared();
-        assert!(status.cover().is_none());
+        status.carlife().artwork_changed(vec![1, 2, 3]);
+        status.carlife().song_cleared();
+        assert!(status.artwork().is_none());
         assert!(status.json()["now_playing"]["song"].is_null());
     }
 
@@ -669,8 +669,8 @@ mod tests {
         // Nothing to draw yet, whatever is asked for.
         assert_eq!(ask(Some("id=0")).await.status(), StatusCode::NOT_FOUND);
 
-        status.carlife().cover_changed(vec![0xff, 0xd8, 0xff]);
-        let name = format!("{:016x}", status.cover().unwrap().id);
+        status.carlife().artwork_changed(vec![0xff, 0xd8, 0xff]);
+        let name = format!("{:016x}", status.artwork().unwrap().id);
 
         let answer = ask(Some(&format!("id={name}"))).await;
         assert_eq!(answer.status(), StatusCode::OK);
@@ -756,7 +756,7 @@ mod tests {
         );
 
         status.carlife().with(|s| {
-            s.carlife.agreed = Some(Size {
+            s.carlife.agreed = Some(Geometry {
                 width: 1920,
                 height: 720,
                 fps: 30,

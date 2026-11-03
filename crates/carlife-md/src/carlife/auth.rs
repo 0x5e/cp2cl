@@ -31,7 +31,7 @@ use rsa::pkcs8::DecodePrivateKey;
 use rsa::traits::PublicKeyParts;
 use rsa::RsaPrivateKey;
 
-use crate::settings::Settings;
+use crate::machine::Machine;
 
 /// The credential the phone's CarLife key is read from.
 ///
@@ -68,7 +68,7 @@ impl Signer {
     /// a board without one is a board whose build had no key to install. `None`
     /// is said out loud and leaves the CarLife side unable to answer a challenge:
     /// a supported way to run, so the line is a warning and the session goes on.
-    pub fn load(settings: &Settings) -> Option<Self> {
+    pub fn load(settings: &Machine) -> Option<Self> {
         let path = settings.data_file(KEY_FILE);
         match std::fs::read_to_string(&path) {
             Ok(pem) => Self::from_pem(&pem),
