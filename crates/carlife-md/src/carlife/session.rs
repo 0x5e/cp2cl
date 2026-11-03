@@ -29,18 +29,18 @@ use base64::Engine as _;
 use chrono::{DateTime, FixedOffset, SecondsFormat};
 use livi_runtime::vehicle::Vehicle;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
-use super::{auth, frame, gps, guide, names, proto};
-use crate::link::{Assets, Delegate, Input};
+use super::{auth, guide};
 use crate::media::{Media, Navi};
-use crate::outlet::Outlet;
 use crate::page::{Page, Size, Statistic};
 use crate::panel::{self, Panel};
 use crate::playing::{Playing, Track};
+use crate::ports::Ports;
 use crate::press::{Command, TouchContact, PHONE_DROP, PHONE_HOOK_SWITCH, PHONE_MUTE};
 use crate::settings::Settings;
+use crate::{frame, gps, names, proto};
 
 // What the car sends, by name — the numbers are CarLifeVehicleLib's
 // `EPackageHeadType`.
@@ -182,20 +182,6 @@ const TTS_IDLE: Duration = Duration::from_millis(700);
 const MIN_FPS: i32 = 3;
 const MAX_FPS: i32 = 60;
 
-/// Where the video channel's pictures come from: the CarPlay session, or — for
-/// the tests — nothing at all.
-pub enum Frames {
-    /// Nothing but heartbeats: the session is up and the car is kept waiting.
-    /// The program reaches the same state through a `Live` outlet with no
-    /// stream taken, so only a test names this one.
-    #[cfg_attr(not(test), allow(dead_code))]
-    None,
-    /// The CarPlay side, as it arrives. Frames are written to the car as they
-    /// come in rather than on the session's own clock: they are a coded stream,
-    /// and it is the phone's encoder that decides the rate.
-    Live(Arc<Outlet>),
-}
-
 /// Splits an annex-B stream into access units, one per coded picture.
 ///
 /// What a decoder is handed is a picture together with the parameter sets that
@@ -261,23 +247,6 @@ fn access_units(bytes: &[u8]) -> Vec<Vec<u8>> {
 /// car's decoder is surest of.
 const FALLBACK: (i32, i32, i32) = (1280, 720, 30);
 
-/// Everything a session needs from the program it runs in.
-pub struct Ports<'a> {
-    /// Where the car's touch and panel keys go.
-    pub input: Arc<dyn Input>,
-    /// What the host is told as the session runs.
-    pub delegate: &'a dyn Delegate,
-    /// The guide's pictures and the cover a song without artwork gets.
-    pub assets: &'a dyn Assets,
-    /// Fires when the phone's icon for us is tapped: on the phone that icon
-    /// stands for the car's own interface, so the car is asked to show it.
-    pub desktop: broadcast::Sender<()>,
-    /// Where the session reports, for the page.
-    pub page: Arc<Page>,
-    /// Where the car's position goes, for the phone to read.
-    pub vehicle: Arc<Vehicle>,
-}
-
 /// Runs one session until the car goes away.
 ///
 /// `carplay` is told `true` the first time the car has been given our device
@@ -294,7 +263,6 @@ pub struct Ports<'a> {
 /// goes, what the host is told, the pictures it carries, and where it reports.
 pub async fn run<S>(
     stream: S,
-    frames: &Frames,
     settings: &Settings,
     auth: Option<auth::Signer>,
     ports: &Ports<'_>,
@@ -302,10 +270,6 @@ pub async fn run<S>(
 where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
-    // Taken first, so a tap that lands while the session is still being built is
-    // not missed.
-    let mut desktop = ports.desktop.subscribe();
-
     // A session is what drains the bridge, so it takes all four receiving halves
     // for as long as it runs: one channel carries pictures, two the phone's
     // sound — the music and the navigation prompt — and the last what the phone
@@ -321,23 +285,21 @@ where
     // keyframe can be asked for at all. It is the sink's own state, watched
     // rather than copied: the stream opens and closes on the other side of the
     // bridge.
-    let (mut video, mut media, mut navi, mut playing, source, phone_screen) = match frames {
-        Frames::Live(outlet) => match outlet.take_video() {
+    let (mut video, mut media, mut navi, mut playing, source, phone_screen) =
+        match ports.outlet.take_video() {
             Some(rx) => (
                 Some(rx),
-                outlet.take_media(),
-                outlet.take_navi(),
-                outlet.take_playing(),
+                ports.outlet.take_media(),
+                ports.outlet.take_navi(),
+                ports.outlet.take_playing(),
                 Source::Live,
-                Some(outlet.screen()),
+                Some(ports.outlet.screen()),
             ),
             None => {
                 tracing::warn!("carlife.video_source_taken action=heartbeat_only");
                 (None, None, None, None, Source::None, None)
             }
-        },
-        Frames::None => (None, None, None, None, Source::None, None),
-    };
+        };
 
     // Reads are their own task. A frame can be six hundred kilobytes and the
     // video tick fires while one is arriving, so the read cannot live inside a
@@ -494,7 +456,7 @@ where
             },
             // A tap on the phone's icon for us. The phone shows that icon in
             // place of the car's own interface, so the car is told to show it.
-            _ = desktop.recv() => {
+            _ = ports.desktop.tapped() => {
                 if let Err(e) = session.send(GO_TO_DESKTOP, &[]).await {
                     break Err(e);
                 }
@@ -526,19 +488,17 @@ where
     };
 
     reading.abort();
-    if let Frames::Live(outlet) = frames {
-        if let Some(rx) = video {
-            outlet.return_video(rx);
-        }
-        if let Some(rx) = media {
-            outlet.return_media(rx);
-        }
-        if let Some(rx) = navi {
-            outlet.return_navi(rx);
-        }
-        if let Some(rx) = playing {
-            outlet.return_playing(rx);
-        }
+    if let Some(rx) = video {
+        ports.outlet.return_video(rx);
+    }
+    if let Some(rx) = media {
+        ports.outlet.return_media(rx);
+    }
+    if let Some(rx) = navi {
+        ports.outlet.return_navi(rx);
+    }
+    if let Some(rx) = playing {
+        ports.outlet.return_playing(rx);
     }
     // The car has gone, and its position went with it: a phone still connected
     // to us would otherwise keep using the last place the car was.
@@ -2406,6 +2366,9 @@ fn adopt_clock(epoch_ms: u64) {
 mod tests {
     use super::*;
 
+    use crate::link::{Assets, Delegate, Desktop, Input};
+    use crate::outlet::Outlet;
+
     /// What a session tells the host, for a test to read back.
     #[derive(Default)]
     struct Watched {
@@ -2485,8 +2448,9 @@ mod tests {
     /// The ports a test runs with: nobody presses anything, the host is
     /// `watched`, and the only picture is the placeholder.
     fn ports<'a>(
+        outlet: Arc<Outlet>,
         watched: &'a Watched,
-        desktop: broadcast::Sender<()>,
+        desktop: Arc<dyn Desktop>,
         page: Arc<Page>,
         vehicle: Arc<Vehicle>,
     ) -> Ports<'a> {
@@ -2495,9 +2459,20 @@ mod tests {
             delegate: watched,
             assets: &PICTURES,
             desktop,
+            outlet,
             page,
             vehicle,
         }
+    }
+
+    /// A bridge with nothing coming down it: heartbeats only, which is what a
+    /// car sees when no phone is streaming. The video half is taken here so the
+    /// session finds none, and what it then does is the same as it would with
+    /// the CarPlay side absent.
+    fn quiet() -> Arc<Outlet> {
+        let outlet = Arc::new(Outlet::new());
+        let _ = outlet.take_video();
+        outlet
     }
 
     use crate::playing::Position;
@@ -2792,10 +2767,19 @@ mod tests {
         body
     }
 
-    /// The signal a tap on the phone's icon arrives on, for a test that does not
-    /// tap.
-    fn no_tap() -> broadcast::Sender<()> {
-        broadcast::channel(1).0
+    /// The signal a tap on the phone's icon arrives on. A test that taps keeps
+    /// the handle and fires it; one that does not drops this and waits forever.
+    #[derive(Default)]
+    struct Tap(Arc<tokio::sync::Notify>);
+
+    impl Desktop for Tap {
+        fn tapped(&self) -> futures_util::future::BoxFuture<'_, ()> {
+            Box::pin(self.0.notified())
+        }
+    }
+
+    fn no_tap() -> Arc<dyn Desktop> {
+        Arc::new(Tap::default())
     }
 
     /// The car's statistics, which is where the channel number it is judged by
@@ -2818,10 +2802,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &Frames::None,
             &Settings::default(),
             None,
             &ports,
@@ -2837,21 +2820,20 @@ mod tests {
     #[tokio::test]
     async fn a_tap_on_our_icon_asks_the_car_for_its_desktop() {
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let (tap, _) = broadcast::channel(1);
-        let tapping = tap.clone();
+        let tap = Tap::default();
+        let tapping = tap.0.clone();
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
             car.handshake(asked()).await;
-            tapping.send(()).expect("the session is listening");
+            tapping.notify_one();
             car.expect(GO_TO_DESKTOP).await
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, tap.clone(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, Arc::new(tap), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &Frames::None,
             &Settings::default(),
             None,
             &ports,
@@ -2930,10 +2912,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &Frames::None,
             &cfg,
             auth::Signer::from_pem(&pem),
             &ports,
@@ -2957,10 +2938,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &Frames::None,
             &cfg,
             None,
             &ports,
@@ -2992,10 +2972,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &Frames::None,
             &cfg,
             None,
             &ports,
@@ -3025,10 +3004,9 @@ mod tests {
 
         let status = Arc::new(Page::new());
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), status.clone(), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, no_tap(), status.clone(), Arc::new(Vehicle::default()));
         run(
             device,
-            &Frames::None,
             &cfg,
             None,
             &ports,
@@ -3084,10 +3062,9 @@ mod tests {
 
         let status = Arc::new(Page::new());
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), status.clone(), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, no_tap(), status.clone(), Arc::new(Vehicle::default()));
         run(
             device,
-            &Frames::None,
             &cfg,
             None,
             &ports,
@@ -3133,10 +3110,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &Frames::None,
             &cfg,
             None,
             &ports,
@@ -3170,10 +3146,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &Frames::None,
             &cfg,
             None,
             &ports,
@@ -3256,10 +3231,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &Frames::None,
             &cfg,
             None,
             &ports,
@@ -3279,7 +3253,6 @@ mod tests {
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
-        let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
         let car = tokio::spawn(async move {
@@ -3361,10 +3334,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &frames,
             &cfg,
             None,
             &ports,
@@ -3383,7 +3355,6 @@ mod tests {
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
-        let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
         let car = tokio::spawn(async move {
@@ -3424,10 +3395,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &frames,
             &cfg,
             None,
             &ports,
@@ -3446,7 +3416,6 @@ mod tests {
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
-        let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
         let car = tokio::spawn(async move {
@@ -3485,10 +3454,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &frames,
             &cfg,
             None,
             &ports,
@@ -3507,7 +3475,6 @@ mod tests {
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
-        let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
         let car = tokio::spawn(async move {
@@ -3578,10 +3545,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &frames,
             &cfg,
             None,
             &ports,
@@ -3603,7 +3569,6 @@ mod tests {
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
-        let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
         let car = tokio::spawn(async move {
@@ -3671,10 +3636,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &frames,
             &cfg,
             None,
             &ports,
@@ -3692,7 +3656,6 @@ mod tests {
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
-        let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
         let car = tokio::spawn(async move {
@@ -3724,10 +3687,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &frames,
             &cfg,
             None,
             &ports,
@@ -3747,7 +3709,6 @@ mod tests {
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
-        let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
         let car = tokio::spawn(async move {
@@ -3785,10 +3746,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &frames,
             &cfg,
             None,
             &ports,
@@ -3808,7 +3768,6 @@ mod tests {
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
-        let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
         let song = Track {
@@ -3836,10 +3795,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &frames,
             &cfg,
             None,
             &ports,
@@ -3859,7 +3817,6 @@ mod tests {
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
-        let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
         let first = Track {
@@ -3904,10 +3861,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), status.clone(), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, no_tap(), status.clone(), Arc::new(Vehicle::default()));
         run(
             device,
-            &frames,
             &cfg,
             None,
             &ports,
@@ -3926,7 +3882,6 @@ mod tests {
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
-        let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
         let car = tokio::spawn(async move {
@@ -3959,10 +3914,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &frames,
             &cfg,
             None,
             &ports,
@@ -3983,7 +3937,6 @@ mod tests {
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
-        let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
         let car = tokio::spawn(async move {
@@ -4049,10 +4002,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &frames,
             &cfg,
             None,
             &ports,
@@ -4070,7 +4022,6 @@ mod tests {
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
-        let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
         let car = tokio::spawn(async move {
@@ -4096,10 +4047,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &frames,
             &cfg,
             None,
             &ports,
@@ -4119,7 +4069,6 @@ mod tests {
         let (device, pipe) = tokio::io::duplex(64 * 1024);
 
         let outlet = Arc::new(Outlet::new());
-        let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
         let car = tokio::spawn(async move {
@@ -4154,10 +4103,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &frames,
             &cfg,
             None,
             &ports,
@@ -4191,10 +4139,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &Frames::None,
             &cfg,
             None,
             &ports,
@@ -4261,10 +4208,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), status.clone(), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, no_tap(), status.clone(), Arc::new(Vehicle::default()));
         run(
             device,
-            &Frames::None,
             &cfg,
             None,
             &ports,
@@ -4327,10 +4273,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), status.clone(), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, no_tap(), status.clone(), Arc::new(Vehicle::default()));
         run(
             device,
-            &Frames::None,
             &cfg,
             None,
             &ports,
@@ -4378,10 +4323,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), vehicle.clone());
+        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), vehicle.clone());
         run(
             device,
-            &Frames::None,
             &cfg,
             None,
             &ports,
@@ -4420,10 +4364,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), vehicle.clone());
+        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), vehicle.clone());
         run(
             device,
-            &Frames::None,
             &cfg,
             None,
             &ports,
@@ -4459,10 +4402,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), vehicle.clone());
+        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), vehicle.clone());
         run(
             device,
-            &Frames::None,
             &cfg,
             None,
             &ports,
@@ -4523,12 +4465,10 @@ mod tests {
             car.expect_silence(Duration::from_millis(500)).await;
         });
 
-        let frames = Frames::None;
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &frames,
             &cfg,
             None,
             &ports,
@@ -4562,10 +4502,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), reported.clone(), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, no_tap(), reported.clone(), Arc::new(Vehicle::default()));
         run(
             device,
-            &Frames::None,
             &cfg,
             None,
             &ports,
@@ -4586,7 +4525,6 @@ mod tests {
         let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let outlet = Arc::new(Outlet::new());
-        let frames = Frames::Live(outlet.clone());
         // The phone's screen stream is open before any of this: what is being
         // tested is a picture going through, and a closed screen is the guide's
         // case, which has tests of its own.
@@ -4607,17 +4545,19 @@ mod tests {
         // pause is not slack: the session has to have read START and marked the
         // encoder running, or the frame is dropped on arrival, the same way it
         // would be from a phone that sent one too early.
+        let pushing_outlet = outlet.clone();
         let pushing = tokio::spawn(async move {
             let _ = started_rx.await;
             tokio::time::sleep(Duration::from_millis(100)).await;
-            outlet.sink().video(vec![0x00, 0x00, 0x00, 0x01, 0x41]);
+            pushing_outlet
+                .sink()
+                .video(vec![0x00, 0x00, 0x00, 0x01, 0x41]);
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &frames,
             &cfg,
             None,
             &ports,
@@ -4669,7 +4609,6 @@ mod tests {
         let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let outlet = Arc::new(Outlet::new());
-        let frames = Frames::Live(outlet.clone());
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
@@ -4695,10 +4634,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &frames,
             &cfg,
             None,
             &ports,
@@ -4715,7 +4653,6 @@ mod tests {
         let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let outlet = Arc::new(Outlet::new());
-        let frames = Frames::Live(outlet.clone());
 
         let phone_picture = vec![0x00, 0x00, 0x00, 0x01, 0x41];
         let pressed = phone_picture.clone();
@@ -4734,17 +4671,17 @@ mod tests {
             assert!(picture.timestamp_ms.is_some());
         });
 
+        let arriving_outlet = outlet.clone();
         let arriving = tokio::spawn(async move {
             let _ = guiding_rx.await;
-            outlet.sink().screen(true);
-            outlet.sink().video(phone_picture);
+            arriving_outlet.sink().screen(true);
+            arriving_outlet.sink().video(phone_picture);
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &frames,
             &cfg,
             None,
             &ports,
@@ -4760,7 +4697,6 @@ mod tests {
         let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let outlet = Arc::new(Outlet::new());
-        let frames = Frames::Live(outlet.clone());
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
@@ -4769,10 +4705,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &frames,
             &cfg,
             None,
             &ports,
@@ -4813,10 +4748,9 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
-            &Frames::None,
             &cfg,
             None,
             &ports,

@@ -37,7 +37,7 @@ use livi_runtime::mfi_async::SharedCoprocessor;
 use livi_runtime::vehicle::{Fuels, Plugs, Vehicle};
 use livi_wifi::Channel;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{mpsc, watch};
 
 use crate::artwork::{self, Fitted};
 use crate::link::Panel;
@@ -234,7 +234,7 @@ async fn attach(
     phone: &Phone,
     airplay_port: u32,
     accessory_key: &str,
-    restart: &broadcast::Sender<()>,
+    restart: &watch::Sender<u64>,
     panel: &Arc<dyn Panel>,
     status: &Report,
     vehicle: &Arc<Vehicle>,
@@ -404,22 +404,21 @@ pub(crate) async fn run_bringup(
     airplay_port: u32,
     ssid: Option<&str>,
     mut rx: mpsc::Receiver<BringupEvent>,
-    changed: &mut broadcast::Receiver<()>,
+    changed: &mut watch::Receiver<u64>,
     panel: &Arc<dyn Panel>,
     status: &Report,
 ) -> Ended {
     loop {
         let event = tokio::select! {
             event = rx.recv() => event,
-            signal = changed.recv() => {
+            signal = changed.changed() => {
                 return match signal {
-                    // `Lagged` means more than one change arrived before this
-                    // one was read; either way one new session covers them all.
-                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => Ended::Restart,
+                    // Any change ends it: one new session covers them all.
+                    Ok(()) => Ended::Restart,
                     // Every sender is gone, so nothing can ask for a restart
                     // again; ending is both correct and the only way to stop
                     // this branch from firing forever.
-                    Err(broadcast::error::RecvError::Closed) => Ended::Finished,
+                    Err(_) => Ended::Finished,
                 };
             }
         };

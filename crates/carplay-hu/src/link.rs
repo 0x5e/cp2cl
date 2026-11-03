@@ -44,4 +44,9 @@ pub trait Delegate: Send + Sync {
     /// How far it had got, read back by the one caller that has to tell a phone
     /// that has gone from one that never arrived.
     fn link(&self) -> Link;
+
+    /// The phone's icon for us was tapped on the head unit's screen, which is
+    /// the car's own desktop being asked for. Nothing here can act on it: the
+    /// icon is drawn by the car, so only the car can answer.
+    fn tapped(&self);
 }

@@ -22,7 +22,7 @@ use super::audio::{self, AudioReceiver};
 use super::bplist::{to_binary, to_json};
 use super::clock::{ntp_diff, SyncedClock};
 use super::crypto::{self, aes_ctr128, open_frames, seal_frames, sha1_all, sha256_all, SymKey};
-use super::event::{pump_events, EventSink};
+use super::event::{pump_events, Press};
 use super::info;
 use super::mic::{MicConfig, MicSink};
 use super::pairing::{PairSetup, PairVerify, Pairings, VerifyKeys};
@@ -291,15 +291,6 @@ impl ScreenParams {
     }
 }
 
-/// What the phone should render at, as the CarLife session writes it. `None`
-/// means no head unit has named a screen yet, and the default stands.
-pub type SharedScreen = Arc<std::sync::Mutex<Option<ScreenParams>>>;
-
-/// The channel number the head unit reported, as the CarLife session writes it
-/// out of `MSG_CMD_HU_STATISTIC_INFO`. `None` means no head unit has reported
-/// one, and the default icon stands.
-pub type SharedChannel = Arc<std::sync::Mutex<Option<String>>>;
-
 /// Everything the half needs, owned once and shared by every part of it.
 ///
 /// Built by the program and handed over whole: there is one of these per run, and
@@ -312,17 +303,14 @@ pub struct Hu {
     pub audio_sink: Arc<dyn MediaSink>,
     /// Set by the CarLife session, once a head unit has named its own screen.
     /// Read by `GET /info`.
-    pub screen: SharedScreen,
+    pub screen: watch::Receiver<Option<ScreenParams>>,
     /// Set by the CarLife session, once a head unit has said which channel it
     /// is. Read by `GET /info` to pick the icon and the label under it.
-    pub channel: SharedChannel,
-    /// Fired when the phone's icon for us is tapped: that icon means the head
-    /// unit's own desktop, so the car is asked for it.
-    pub desktop: tokio::sync::broadcast::Sender<()>,
+    pub channel: watch::Receiver<Option<String>>,
     /// Fired when what the phone should be rendering has changed. `/info` is
     /// answered once per session, so dropping the session is the only way a
     /// change lands: the phone reconnects, asks again, and gets the new answer.
-    pub restart: tokio::sync::broadcast::Sender<()>,
+    pub restart: watch::Sender<u64>,
     /// Fired when the CarLife session this half of the bridge exists for has
     /// ended. Different from `restart` on purpose: a restart means "start over",
     /// and this means "there is nothing to start over for", so it closes a
@@ -340,7 +328,7 @@ pub struct Hu {
     pub audio_codec: Arc<Mutex<AudioCodec>>,
     /// Where input lands. Nothing dispatches into it yet; the CarLife side will,
     /// once it carries touch and keys back up.
-    pub event_sink: Arc<EventSink>,
+    pub press: Arc<Press>,
     /// The one stream that runs both ways. Opened when the phone asks for
     /// bidirectional audio, and where audio captured at this end goes.
     pub mic: Arc<MicSink>,
@@ -423,7 +411,6 @@ pub async fn serve(self: &Arc<Self>) {
                 let cfg = self.options.clone();
                 let screen = self.screen.clone();
                 let channel = self.channel.clone();
-                let desktop = self.desktop.clone();
                 let restart = self.restart.subscribe();
                 let restart_tx = self.restart.clone();
                 let shutdown = self.shutdown.subscribe();
@@ -431,7 +418,7 @@ pub async fn serve(self: &Arc<Self>) {
                 let video_sink = self.video_sink.clone();
                 let audio_sink = self.audio_sink.clone();
                 let codec = self.audio_codec.clone();
-                let event_sink = self.event_sink.clone();
+                let press = self.press.clone();
                 let mic = self.mic.clone();
                 let mfi = self.mfi.clone();
                 let audio_clock = self.audio_clock.clone();
@@ -444,7 +431,6 @@ pub async fn serve(self: &Arc<Self>) {
                         cfg,
                         screen,
                         channel,
-                        desktop,
                         restart,
                         restart_tx,
                         shutdown,
@@ -452,7 +438,7 @@ pub async fn serve(self: &Arc<Self>) {
                         video_sink,
                         audio_sink,
                         codec,
-                        event_sink,
+                        press,
                         mic,
                         mfi,
                         audio_clock,
@@ -619,19 +605,17 @@ struct Pump {
 struct Session {
     cfg: Arc<Options>,
     /// What the car asked for, if it has asked. Read when answering `/info`.
-    screen: SharedScreen,
+    screen: watch::Receiver<Option<ScreenParams>>,
     /// Which channel the car's head unit is, if it has said. Read when
     /// answering `/info`.
-    channel: SharedChannel,
-    /// Fired when the phone's icon for us is tapped.
-    desktop: tokio::sync::broadcast::Sender<()>,
+    channel: watch::Receiver<Option<String>>,
     /// Fires when the session should end so the phone re-reads `/info`.
-    restart: tokio::sync::broadcast::Receiver<()>,
+    restart: watch::Receiver<u64>,
     /// The sending end of that same signal, kept because the silence check is
     /// one of the things that can want a session over: a phone that has gone
     /// has to be asked to come back, and only the iAP2 half can ask it. See
     /// `Wakeup::Silent`.
-    restart_tx: tokio::sync::broadcast::Sender<()>,
+    restart_tx: watch::Sender<u64>,
     /// Fires when the CarLife session that this one feeds has ended, which is
     /// also the end of this one.
     shutdown: tokio::sync::broadcast::Receiver<()>,
@@ -639,7 +623,7 @@ struct Session {
     video_sink: Arc<dyn MediaSink>,
     audio_sink: Arc<dyn MediaSink>,
     codec: Arc<Mutex<AudioCodec>>,
-    event_sink: Arc<EventSink>,
+    press: Arc<Press>,
     /// The microphone uplink, opened for whichever audio stream the phone said
     /// it wants to hear on.
     mic: Arc<MicSink>,
@@ -752,13 +736,13 @@ impl Session {
         loop {
             let wakeup = tokio::select! {
                 result = reader.read(&mut buf) => Wakeup::Read(result?),
-                signal = self.restart.recv() => match signal {
-                    // `Lagged` means a second change arrived before this one was
-                    // read; either way the answer is the same session restart.
-                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => Wakeup::Restart,
+                signal = self.restart.changed() => match signal {
+                    // Any change is the same answer: `/info` is asked once, so
+                    // the session has to be built again to read the new one.
+                    Ok(()) => Wakeup::Restart,
                     // Unreachable while any sender lives, and dropping a healthy
                     // session over it would be the wrong answer.
-                    Err(broadcast::error::RecvError::Closed) => continue,
+                    Err(_) => continue,
                 },
                 signal = self.shutdown.recv() => match signal {
                     Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => Wakeup::Shutdown,
@@ -820,7 +804,7 @@ impl Session {
                         PHONE_SILENT.as_secs()
                     );
                     self.close_streams().await;
-                    let _ = self.restart_tx.send(());
+                    self.restart_tx.send_modify(|seen| *seen += 1);
                     return Ok(());
                 }
             };
@@ -837,7 +821,7 @@ impl Session {
                 // quiet: that one is the phone's.
                 self.close_streams().await;
                 if self.newest.load(Ordering::SeqCst) == self.serial {
-                    let _ = self.restart_tx.send(());
+                    self.restart_tx.send_modify(|seen| *seen += 1);
                 }
                 return Ok(());
             }
@@ -1009,7 +993,7 @@ impl Session {
 
     /// What the phone has been asked to render, if anything has asked.
     fn negotiated(&self) -> Option<ScreenParams> {
-        self.screen.lock().ok().and_then(|g| *g)
+        *self.screen.borrow()
     }
 
     fn info(&self) -> Result<Response, String> {
@@ -1025,8 +1009,8 @@ impl Session {
         // wrong scale. No CarLife message carries a size, so the table says how
         // dense the panel is — 120 dpi where it says nothing — and the size
         // follows from that and the canvas above.
-        let channel = self.channel.lock().ok().and_then(|c| c.clone());
-        let ppi = info::panel(channel.as_deref()).ppi;
+        let channel = self.channel.borrow().clone();
+        let ppi = info::entry(channel.as_deref()).ppi;
         // Reported before the answer goes out: this is the only place the two
         // halves meet — what the car said its screen is, and what the phone is
         // therefore asked to draw — and the page is where that is worth seeing.
@@ -1091,7 +1075,7 @@ impl Session {
             Some("requestUI") => {
                 tracing::info!("carplay.airplay.request_ui action=ask_car_for_desktop");
                 // Nobody to tell is not a failure: the car may have gone.
-                let _ = self.desktop.send(());
+                self.delegate.tapped();
             }
             Some("suggestUI") => {
                 let urls = params
@@ -1333,7 +1317,7 @@ impl Session {
         let reply = verify.handle(&req.body, &pairings)?;
         if let Some(keys) = verify.keys() {
             self.keys = Some(keys);
-            self.event_sink.set_key(keys.events_write()).await;
+            self.press.set_key(keys.events_write()).await;
             self.status.with(|s| s.carplay.airplay.verified = true);
             tracing::info!("carplay.pairing.verified");
         }
@@ -1434,7 +1418,7 @@ impl Session {
         //
         // Every port here is the kernel's choice, not one of ours. A session that
         // has just ended leaves a socket or two behind for a moment — the event
-        // channel's write half in particular is held by `EventSink` until the
+        // channel's write half in particular is held by `Press` until the
         // connection actually goes away — and binding a number one of them still
         // holds fails with `EADDRINUSE`. That is precisely what the second SETUP
         // after a display change used to hit: the ports were handed out from a
@@ -1444,7 +1428,7 @@ impl Session {
             .map_err(|e| e.to_string())?;
         let event_port = listener.local_addr().map_err(|e| e.to_string())?.port();
         let read_key = SymKey::from_bytes(&keys.events_read()).map_err(|e| e.to_string())?;
-        let sink = self.event_sink.clone();
+        let sink = self.press.clone();
         let responder = sink.clone();
         let event_status = self.status.clone();
         tokio::spawn(async move {

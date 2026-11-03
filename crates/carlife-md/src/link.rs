@@ -18,6 +18,13 @@ pub trait Input: Send + Sync {
     fn press(&self, command: Command) -> BoxFuture<'_, io::Result<()>>;
 }
 
+/// What the car's session waits on: a tap on the phone's icon for us, which on
+/// the phone stands for the car's own interface.
+pub trait Desktop: Send + Sync {
+    /// Resolves on the next tap.
+    fn tapped(&self) -> BoxFuture<'_, ()>;
+}
+
 /// What the host is told as the session runs.
 pub trait Delegate: Send + Sync {
     /// `true` once the car has been given our device information, `false` when

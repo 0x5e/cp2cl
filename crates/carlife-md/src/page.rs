@@ -16,19 +16,19 @@ use crate::proto::CarGps;
 const ASKED: usize = 6;
 
 pub struct Page {
-    inner: Mutex<Report>,
+    inner: Mutex<Snapshot>,
 }
 
 impl Page {
     pub fn new() -> Self {
         Self {
-            inner: Mutex::new(Report::default()),
+            inner: Mutex::new(Snapshot::default()),
         }
     }
 
     /// The closure is handed the whole report so a report that touches two
     /// fields at once stays one write.
-    pub fn with(&self, report: impl FnOnce(&mut Report)) {
+    pub fn with(&self, report: impl FnOnce(&mut Snapshot)) {
         // A poisoned lock means a report panicked half way through. What is
         // behind it is still the best account anyone has.
         let mut held = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -79,7 +79,7 @@ impl Default for Page {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct Report {
+pub struct Snapshot {
     /// The car's half: a head unit talking CarLife to the device we present.
     pub carlife: Carlife,
     /// The song the car's panel is showing, which belongs to neither end.

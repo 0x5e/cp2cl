@@ -26,14 +26,14 @@ use anyhow::{anyhow, Context, Result};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::mpsc;
 
-use crate::page::Page;
-use crate::settings::Settings;
-
 use super::aio::{Context as AioContext, IoEvent};
 use super::auth;
-use super::desc;
-use super::session::{self, Frames, Ports};
+use crate::desc;
+use super::session;
 use super::usb::{Endpoints, Usb};
+use crate::page::Page;
+use crate::ports::Ports;
+use crate::settings::Settings;
 
 /// How long to let the answer to `start accessory` leave before the device is
 /// taken away. The transfer is closed by `complete`, and the host takes its
@@ -64,18 +64,42 @@ enum Answered {
     Switched,
 }
 
-/// Runs one CarLife session after another over the device this program composed.
+/// The CarLife half, ready to present itself to a head unit.
 ///
-/// The session outlives the form the device is in — the device stays up, and only
-/// what it calls itself changes — so a session that ends leaves it ready for the
-/// next head unit rather than needing to be rebuilt.
-pub async fn run(
-    settings: &Settings,
-    frames: &Frames,
-    ports: &Ports<'_>,
-    mut replug: mpsc::Receiver<()>,
-) -> Result<()> {
-    let identity = desc::Identity::phone(&settings.name, &settings.vendor);
+/// Built by the program and run in a task of its own: what it does is answer a
+/// car, and the car decides when that is.
+pub struct Carlife<'a> {
+    settings: &'a Settings,
+    ports: &'a Ports<'a>,
+    replug: mpsc::Receiver<()>,
+}
+
+impl<'a> Carlife<'a> {
+    pub fn new(
+        settings: &'a Settings,
+        ports: &'a Ports<'a>,
+        replug: mpsc::Receiver<()>,
+    ) -> Self {
+        Self {
+            settings,
+            ports,
+            replug,
+        }
+    }
+
+    /// Runs one CarLife session after another over the device this program
+    /// composed.
+    ///
+    /// The session outlives the form the device is in — the device stays up, and
+    /// only what it calls itself changes — so a session that ends leaves it
+    /// ready for the next head unit rather than needing to be rebuilt.
+    pub async fn serve(self) -> Result<()> {
+        let Self {
+            settings,
+            ports,
+            mut replug,
+        } = self;
+        let identity = desc::Identity::phone(&settings.name, &settings.vendor);
     let (usb, endpoints) = Usb::open(&identity)?;
     let Endpoints {
         control,
@@ -151,7 +175,7 @@ pub async fn run(
                         let mut settings = settings.clone();
                         settings.screen = ports.delegate.screen_override();
                         if let Err(e) =
-                            session::run(pair, frames, &settings, auth.clone(), ports).await
+                            session::run(pair, &settings, auth.clone(), ports).await
                         {
                             // A session that ends because the device left the
                             // bus is not one that failed: every transfer on a
@@ -181,6 +205,7 @@ pub async fn run(
     controlling.abort();
     tracing::info!("usb.control_closed");
     Ok(())
+    }
 }
 
 /// Whether a session ended because the device left the bus.
@@ -581,7 +606,7 @@ impl AsyncWrite for Bulk {
 mod tests {
     use super::*;
 
-    use crate::carlife::frame;
+    use crate::frame;
 
     /// A reader holding a queue that can be filled the way the reading thread
     /// fills it.

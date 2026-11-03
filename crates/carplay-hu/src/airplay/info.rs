@@ -181,7 +181,7 @@ pub struct Preset {
 /// Both fields are optional and neither implies the other: a make may name the
 /// size to serve, the density of its panel, or both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Panel {
+pub struct Entry {
     /// The size and rate the phone is asked for, when the entry names one.
     pub preset: Option<Preset>,
     /// The density the panel's millimetres are worked out at: the entry's own
@@ -189,7 +189,7 @@ pub struct Panel {
     pub ppi: u32,
 }
 
-impl Default for Panel {
+impl Default for Entry {
     fn default() -> Self {
         Self {
             preset: None,
@@ -202,10 +202,10 @@ impl Default for Panel {
 /// something about their panel. The fields belong to the number rather than to
 /// the make: one make answers on several numbers, and only some of them are wrong
 /// about their screen.
-static CHANNEL_PANELS: OnceLock<HashMap<String, Panel>> = OnceLock::new();
+static CHANNEL_ENTRIES: OnceLock<HashMap<String, Entry>> = OnceLock::new();
 
-fn channel_panels() -> &'static HashMap<String, Panel> {
-    CHANNEL_PANELS.get_or_init(|| {
+fn channel_entries() -> &'static HashMap<String, Entry> {
+    CHANNEL_ENTRIES.get_or_init(|| {
         let mut panels = HashMap::new();
         for entry in map_entries() {
             let channels = entry["channels"].as_array().into_iter().flatten();
@@ -221,7 +221,7 @@ fn channel_panels() -> &'static HashMap<String, Panel> {
                 if preset.is_none() && ppi.is_none() {
                     continue;
                 }
-                let panel = Panel {
+                let panel = Entry {
                     preset,
                     ppi: ppi.unwrap_or(DEFAULT_PPI),
                 };
@@ -235,9 +235,9 @@ fn channel_panels() -> &'static HashMap<String, Panel> {
 /// What the table says about the panel behind `channel`. A number it does not
 /// hold, or no number at all, is the default: 120 pixels per inch, and the size
 /// the car itself asked for.
-pub fn panel(channel: Option<&str>) -> Panel {
+pub fn entry(channel: Option<&str>) -> Entry {
     channel
-        .and_then(|number| channel_panels().get(number.trim()))
+        .and_then(|number| channel_entries().get(number.trim()))
         .copied()
         .unwrap_or_default()
 }
@@ -655,27 +655,27 @@ mod tests {
             fps: 30,
         };
         assert_eq!(
-            panel(Some("20062104")),
-            Panel {
+            entry(Some("20062104")),
+            Entry {
                 preset: Some(mercedes),
                 ppi: 120
             }
         );
         assert_eq!(
-            panel(Some(" 20062104 ")),
-            panel(Some("20062104")),
+            entry(Some(" 20062104 ")),
+            entry(Some("20062104")),
             "the number is trimmed as it is everywhere else"
         );
         assert_eq!(
-            panel(Some("20062100")),
-            Panel::default(),
+            entry(Some("20062100")),
+            Entry::default(),
             "the same make, a number with nothing of its own"
         );
-        assert_eq!(panel(Some("20062106")), Panel::default(), "not a number it answers on");
-        assert_eq!(panel(None), Panel::default());
+        assert_eq!(entry(Some("20062106")), Entry::default(), "not a number it answers on");
+        assert_eq!(entry(None), Entry::default());
         assert_eq!(
-            Panel::default(),
-            Panel {
+            Entry::default(),
+            Entry {
                 preset: None,
                 ppi: DEFAULT_PPI
             }

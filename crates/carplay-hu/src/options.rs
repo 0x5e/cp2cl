@@ -4,6 +4,8 @@
 //! owns the board reads those and hands the values over. The three radio fields
 //! are the settings file's; the rest are properties of the machine.
 
+use std::path::PathBuf;
+
 /// Everything the CarPlay half is told about the machine.
 pub struct Options {
     /// Whether the phone is to be found over Bluetooth and Wi-Fi instead of the
@@ -20,6 +22,8 @@ pub struct Options {
     pub vendor: String,
     /// The Bluetooth controller's own address.
     pub bt_address: String,
+    /// Where the firmware installs the credentials and the pairing record.
+    pub data_dir: PathBuf,
     /// The largest cover the car's message can carry, which is what decides when
     /// one has to be shrunk before it is sent. The limit is the consumer's.
     pub cover_limit: usize,
@@ -35,6 +39,7 @@ impl Default for Options {
             name: "cp2cl".to_string(),
             vendor: "Unknown".to_string(),
             bt_address: "00:11:22:33:44:55".to_string(),
+            data_dir: PathBuf::new(),
             cover_limit: 0,
         }
     }

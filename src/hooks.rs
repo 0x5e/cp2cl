@@ -7,7 +7,7 @@
 //! the other way, through the same sink the phone reads them from.
 //!
 //! The phone's half reports how far a phone got, which is the third fact the
-//! lights are drawn from, and nothing else.
+//! lights are drawn from, and says when its icon was tapped.
 //!
 //! Nothing here is policy either half could have had. A session is the only
 //! thing that knows when the CarPlay half should be open, which is why that
@@ -15,13 +15,13 @@
 
 use std::sync::Arc;
 
-use carlife_md::link::{Assets, Delegate, Input};
+use carlife_md::link::{Assets, Desktop, Delegate, Input};
 use carlife_md::panel::Panel;
 use carlife_md::press::Command;
 use carlife_md::settings::Screen;
-use carplay_hu::airplay::{EventSink, ScreenParams, SharedChannel, SharedScreen};
+use carplay_hu::{Press, ScreenParams};
 use carplay_hu::link::Link;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{watch, Notify};
 
 use crate::led;
 
@@ -31,32 +31,37 @@ pub struct Hooks {
     /// Whether the CarPlay half accepts anything at all. Shut until a head unit
     /// has been told who this device is, and shut again when it goes.
     carplay: watch::Sender<bool>,
-    /// What a running CarPlay session is told when what it renders changes.
-    restart: broadcast::Sender<()>,
+    /// Bumped when a running CarPlay session should read `/info` again.
+    restart: watch::Sender<u64>,
     /// The size the car named, which is what `/info` answers with.
-    screen: SharedScreen,
+    screen: watch::Sender<Option<ScreenParams>>,
     /// The channel number the car named, which picks the icon `/info` carries.
-    channel: SharedChannel,
+    channel: watch::Sender<Option<String>>,
+    /// Fired by the phone's half and waited on by the car's: on the phone our
+    /// icon stands for the car's own desktop.
+    tap: Arc<Notify>,
     /// The bridge's own light.
     lights: Arc<led::Signals>,
     /// Where a key pressed in the car arrives for the phone.
-    events: Arc<EventSink>,
+    events: Arc<Press>,
 }
 
 impl Hooks {
     pub fn new(
         carplay: watch::Sender<bool>,
-        restart: broadcast::Sender<()>,
-        screen: SharedScreen,
-        channel: SharedChannel,
+        restart: watch::Sender<u64>,
+        screen: watch::Sender<Option<ScreenParams>>,
+        channel: watch::Sender<Option<String>>,
+        tap: Arc<Notify>,
         lights: Arc<led::Signals>,
-        events: Arc<EventSink>,
+        events: Arc<Press>,
     ) -> Arc<Self> {
         Arc::new(Self {
             carplay,
             restart,
             screen,
             channel,
+            tap,
             lights,
             events,
         })
@@ -78,6 +83,12 @@ impl Hooks {
             fps: picked.fps,
         }
     }
+
+    /// Asks a running session to read `/info` again, which costs the phone a
+    /// session: it reads that answer once and never asks again.
+    fn changed(&self) {
+        self.restart.send_modify(|seen| *seen += 1);
+    }
 }
 
 impl Delegate for Hooks {
@@ -87,7 +98,7 @@ impl Delegate for Hooks {
         if up {
             // The phone will not start CarPlay on its own — it has to be told
             // again — and a fresh iAP2 session is how it is told.
-            let _ = self.restart.send(());
+            self.changed();
         }
     }
 
@@ -101,22 +112,16 @@ impl Delegate for Hooks {
             fps,
             ..ScreenParams::default()
         };
-        let Ok(mut slot) = self.screen.lock() else {
-            return;
-        };
-        if (*slot).unwrap_or_default() == wanted {
+        if *self.screen.borrow() == Some(wanted) {
             return;
         }
         tracing::info!("carplay.video.screen_named width={width} height={height} fps={fps}");
-        *slot = Some(wanted);
-        drop(slot);
-        let _ = self.restart.send(());
+        let _ = self.screen.send(Some(wanted));
+        self.changed();
     }
 
     fn channel(&self, channel: Option<&str>) {
-        if let Ok(mut reported) = self.channel.lock() {
-            *reported = channel.map(str::to_string);
-        }
+        let _ = self.channel.send(channel.map(str::to_string));
     }
 
     /// Read again for each session, because the page can change it while the
@@ -129,7 +134,7 @@ impl Delegate for Hooks {
     /// too — so the entry is looked up here and handed over as the CarLife half
     /// reads it.
     fn panel(&self, channel: Option<&str>) -> Panel {
-        let entry = carplay_hu::airplay::info::panel(channel);
+        let entry = carplay_hu::entry(channel);
         Panel {
             preset: entry.preset.map(|preset| carlife_md::panel::Preset {
                 width: preset.width,
@@ -138,6 +143,12 @@ impl Delegate for Hooks {
             }),
             ppi: entry.ppi,
         }
+    }
+}
+
+impl Desktop for Hooks {
+    fn tapped(&self) -> futures_util::future::BoxFuture<'_, ()> {
+        Box::pin(self.tap.notified())
     }
 }
 
@@ -157,6 +168,12 @@ impl carplay_hu::link::Delegate for Hooks {
     /// arrived.
     fn link(&self) -> Link {
         self.lights.phone()
+    }
+
+    /// A tap on our icon on the phone's screen, which is the car's own desktop
+    /// being asked for. Kept if the car is not waiting yet.
+    fn tapped(&self) {
+        self.tap.notify_one();
     }
 }
 

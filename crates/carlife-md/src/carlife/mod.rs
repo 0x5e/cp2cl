@@ -15,16 +15,12 @@
 //! plain code with no USB in them, which is what lets them be tested against an
 //! in-memory pipe. `usb`, `gadget` and `aio` are the ones that need the board.
 
-pub mod auth;
-pub mod guide;
-pub mod session;
+pub(crate) mod auth;
+pub(crate) mod guide;
+pub(crate) mod session;
 
 mod aio;
-pub mod gadget;
-pub mod usb;
+pub(crate) mod gadget;
+pub(crate) mod usb;
 
-// The protocol layers and the device descriptor sit at the crate root; named
-// here so `carlife::proto` and friends keep their meaning.
-pub use crate::{desc, frame, gps, names, proto};
-
-pub use gadget::run as serve;
+pub use gadget::Carlife;

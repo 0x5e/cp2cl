@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 
-use super::desc::{self, Identity};
+use crate::desc::{self, Identity};
 
 /// Where configfs keeps gadgets, and the name this program's has in it.
 const CONFIGFS: &str = "/sys/kernel/config/usb_gadget";

@@ -699,13 +699,13 @@ mod tests {
         let body = status.json();
         assert_eq!(
             body["carplay"]["video"]["codec"],
-            carplay_hu::airplay::screen::CODEC,
+            carplay_hu::CODEC,
             "which is what the snapshot carries"
         );
         assert!(body["carplay"]["video"]["profile"].is_null(), "nothing described yet");
         assert_eq!(
             body["carlife"]["video"]["codec"],
-            carplay_hu::airplay::screen::CODEC
+            carplay_hu::CODEC
         );
 
         report.with(|s| {
@@ -788,7 +788,7 @@ mod tests {
         );
 
         status.carlife().with(|s| {
-            s.carlife.gps = Some(carlife_md::proto::CarGps {
+            s.carlife.gps = Some(carlife_md::CarGps {
                 antenna_state: 1,
                 latitude: 30_317_880,
                 longitude: 120_128_094,

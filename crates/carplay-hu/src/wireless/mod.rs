@@ -25,7 +25,7 @@ use livi_runtime::ident::{Identity, Transport};
 use livi_runtime::mfi_async::SharedCoprocessor;
 use livi_runtime::vehicle::{Fuels, Plugs, Vehicle};
 use livi_wifi::{Channel, OnAir, Security};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{mpsc, watch};
 
 use crate::link::Panel;
 use crate::options::Options;
@@ -224,7 +224,7 @@ pub(crate) async fn run_session(
     bt_mac: [u8; 6],
     accessory_key: &str,
     peer: &str,
-    restart: &broadcast::Sender<()>,
+    restart: &watch::Sender<u64>,
     panel: &Arc<dyn Panel>,
     status: &Report,
     vehicle: &Arc<Vehicle>,

@@ -35,11 +35,11 @@ use livi_runtime::mfi_async::SharedCoprocessor;
 use livi_runtime::vehicle::Vehicle;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc, Notify};
+use tokio::sync::{mpsc, watch, Notify};
 use tokio::task::JoinHandle;
 
 use super::crypto::{hkdf32, open_frames, SymKey};
-use super::event::EventSink;
+use super::event::Press;
 use crate::link::Panel;
 use crate::options::Options;
 use crate::report::Report;
@@ -83,11 +83,11 @@ pub struct Setup {
     pub panel: Arc<dyn Panel>,
     pub vehicle: Arc<Vehicle>,
     pub status: Arc<Report>,
-    pub events: Arc<EventSink>,
+    pub events: Arc<Press>,
     pub handover: Arc<Handover>,
     /// Fires when what the phone renders changes. The AirPlay session ends on
     /// it, so the session on the tunnel is told the same thing.
-    pub restart: broadcast::Sender<()>,
+    pub restart: watch::Sender<u64>,
 }
 
 /// One open stream of type 130, from the SETUP that named it to the end of the
@@ -411,7 +411,7 @@ fn take_packages(plain: &mut Vec<u8>, out: &mut Vec<Vec<u8>>) -> Result<(), usiz
 async fn pump(
     phone_side: DuplexStream,
     mut from_stream: mpsc::UnboundedReceiver<Vec<u8>>,
-    events: Arc<EventSink>,
+    events: Arc<Press>,
     connected: Arc<Notify>,
 ) {
     let (mut read, mut write) = tokio::io::split(phone_side);
