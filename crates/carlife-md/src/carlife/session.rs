@@ -24,22 +24,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine as _;
 use chrono::{DateTime, FixedOffset, SecondsFormat};
-use livi_runtime::vehicle::Vehicle;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
 use super::{auth, guide};
-use crate::media::{Media, Navi};
-use crate::report::{Geometry, Report, Statistic};
 use crate::channels::{self, ChannelEntry};
+use crate::link::Location;
+use crate::machine::Machine;
+use crate::media::{Media, Navi};
 use crate::now_playing::{NowPlaying, Track};
 use crate::ports::Ports;
 use crate::press::{Command, TouchContact, PHONE_DROP, PHONE_HOOK_SWITCH, PHONE_MUTE};
-use crate::machine::Machine;
+use crate::report::{Geometry, Report, Statistic};
 use crate::{frame, gps, names, proto};
 
 // What the car sends, by name — the numbers are CarLifeVehicleLib's
@@ -356,7 +354,7 @@ where
         // fix that arrives before it would not be subscribed to anyway.
         gcj02: false,
         car_version: None,
-        vehicle: ports.vehicle.clone(),
+        location: ports.location.clone(),
         up: false,
         last_touch: None,
         // Both wait for the car to name its screen: until it does, there is no
@@ -787,7 +785,7 @@ struct Session<'a, W> {
     car_version: Option<(i32, i32)>,
     /// The iAP2 side's sending half, shared with whichever session is up: a
     /// position only reaches the phone through it.
-    vehicle: Arc<Vehicle>,
+    location: Arc<dyn Location>,
     next_tick: Instant,
     up: bool,
     /// Where the finger was the last time the car said. A release has to name it
@@ -1442,10 +1440,9 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         }
     }
 
-    /// The one way to the phone, which takes the block base64'd. A block encoded
-    /// here cannot fail to decode again, so there is nothing to report.
+    /// The one way to the phone: the block of sentences, as it stands.
     fn push_location(&self, block: &str) {
-        let _ = self.vehicle.push_location(&BASE64.encode(block));
+        self.location.fix(block);
     }
 
     /// The car's authentication challenge, answered with the phone's key.
@@ -2366,9 +2363,33 @@ fn adopt_clock(epoch_ms: u64) {
 mod tests {
     use super::*;
 
-    use crate::link::{Assets, Delegate, Input};
+    use crate::link::{Assets, Delegate, Input, Location};
     use crate::outlet::Outlet;
     use tokio::sync::Notify;
+
+    /// Where the car's position goes, as a test reads it back: the blocks the
+    /// session handed over, in the order it handed them over.
+    #[derive(Default)]
+    struct WatchedLocation(Mutex<Vec<String>>);
+
+    impl Location for WatchedLocation {
+        fn fix(&self, nmea: &str) {
+            self.0.lock().unwrap().push(nmea.to_string());
+        }
+    }
+
+    impl WatchedLocation {
+        /// The last block, which is what a test about one fix reads.
+        fn said(&self) -> String {
+            self.0.lock().unwrap().last().cloned().unwrap_or_default()
+        }
+    }
+
+    /// A session whose position goes nowhere: the tests that are not about a
+    /// fix have nothing to read back.
+    fn no_location() -> Arc<dyn Location> {
+        Arc::new(WatchedLocation::default())
+    }
 
     /// What a session tells the host, for a test to read back.
     #[derive(Default)]
@@ -2453,7 +2474,7 @@ mod tests {
         watched: &'a Watched,
         home: Arc<Notify>,
         report: Arc<Report>,
-        vehicle: Arc<Vehicle>,
+        location: Arc<dyn Location>,
     ) -> Ports<'a> {
         Ports {
             input: Arc::new(NoKeys),
@@ -2462,7 +2483,7 @@ mod tests {
             home,
             outlet,
             report,
-            vehicle,
+            location,
         }
     }
 
@@ -2794,7 +2815,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &Machine::default(),
@@ -2823,7 +2844,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, tapping, Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, tapping, Arc::new(Report::new()), no_location());
         run(
             device,
             &Machine::default(),
@@ -2904,7 +2925,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,
@@ -2930,7 +2951,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,
@@ -2964,7 +2985,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,
@@ -2996,7 +3017,7 @@ mod tests {
 
         let status = Arc::new(Report::new());
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, home(), status.clone(), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), status.clone(), no_location());
         run(
             device,
             &cfg,
@@ -3054,7 +3075,7 @@ mod tests {
 
         let status = Arc::new(Report::new());
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, home(), status.clone(), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), status.clone(), no_location());
         run(
             device,
             &cfg,
@@ -3102,7 +3123,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,
@@ -3138,7 +3159,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,
@@ -3223,7 +3244,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,
@@ -3326,7 +3347,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,
@@ -3387,7 +3408,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,
@@ -3446,7 +3467,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,
@@ -3537,7 +3558,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,
@@ -3628,7 +3649,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,
@@ -3679,7 +3700,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,
@@ -3738,7 +3759,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,
@@ -3787,7 +3808,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,
@@ -3853,7 +3874,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, home(), status.clone(), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), status.clone(), no_location());
         run(
             device,
             &cfg,
@@ -3906,7 +3927,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,
@@ -3994,7 +4015,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,
@@ -4039,7 +4060,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,
@@ -4095,7 +4116,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,
@@ -4131,7 +4152,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,
@@ -4200,7 +4221,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, home(), status.clone(), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), status.clone(), no_location());
         run(
             device,
             &cfg,
@@ -4265,7 +4286,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, home(), status.clone(), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), status.clone(), no_location());
         run(
             device,
             &cfg,
@@ -4296,8 +4317,7 @@ mod tests {
     async fn the_cars_position_is_handed_to_the_phone() {
         let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let vehicle = Arc::new(Vehicle::default());
-        let feed = vehicle.feed();
+        let location = Arc::new(WatchedLocation::default());
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
@@ -4315,7 +4335,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), vehicle.clone());
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), location.clone());
         run(
             device,
             &cfg,
@@ -4326,7 +4346,7 @@ mod tests {
             .expect("the session ends cleanly");
         car.await.unwrap();
 
-        let said = feed.location.borrow().1.clone();
+        let said = location.said();
         assert!(said.starts_with("$GPGGA,"), "{said}");
         assert!(said.contains("\r\n$GPRMC,"), "{said}");
     }
@@ -4338,8 +4358,7 @@ mod tests {
     async fn a_lost_fix_takes_the_position_back() {
         let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let vehicle = Arc::new(Vehicle::default());
-        let feed = vehicle.feed();
+        let location = Arc::new(WatchedLocation::default());
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
@@ -4356,7 +4375,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), vehicle.clone());
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), location.clone());
         run(
             device,
             &cfg,
@@ -4367,7 +4386,7 @@ mod tests {
         .expect("the session ends cleanly");
         car.await.unwrap();
 
-        let said = feed.location.borrow().1.clone();
+        let said = location.said();
         assert!(said.contains(",0,00,"), "the fix quality is none: {said}");
         assert!(said.contains(",V,"), "and RMC says the same: {said}");
         assert!(!said.contains("3019.0728"), "and no position is left: {said}");
@@ -4379,8 +4398,7 @@ mod tests {
     async fn the_position_goes_when_the_car_does() {
         let cfg = Machine::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let vehicle = Arc::new(Vehicle::default());
-        let feed = vehicle.feed();
+        let location = Arc::new(WatchedLocation::default());
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
@@ -4394,7 +4412,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), vehicle.clone());
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), location.clone());
         run(
             device,
             &cfg,
@@ -4405,7 +4423,7 @@ mod tests {
         .expect("the session ends cleanly");
         car.await.unwrap();
 
-        let said = feed.location.borrow().1.clone();
+        let said = location.said();
         assert!(said.contains(",0,00,"), "the position was taken back: {said}");
         assert!(!said.contains("3019.0728"), "and none is left: {said}");
     }
@@ -4458,7 +4476,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,
@@ -4494,7 +4512,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, home(), reported.clone(), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), reported.clone(), no_location());
         run(
             device,
             &cfg,
@@ -4547,7 +4565,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,
@@ -4626,7 +4644,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,
@@ -4671,7 +4689,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,
@@ -4697,7 +4715,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(outlet.clone(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,
@@ -4740,7 +4758,7 @@ mod tests {
         });
 
         let watched = Watched::default();
-        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), Arc::new(Vehicle::default()));
+        let ports = ports(quiet(), &watched, home(), Arc::new(Report::new()), no_location());
         run(
             device,
             &cfg,

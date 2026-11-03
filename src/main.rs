@@ -287,6 +287,7 @@ async fn main() -> Result<()> {
         home.clone(),
         led.clone(),
         press.clone(),
+        vehicle.clone(),
     );
 
     // Bound either way, and bound now: this port is what the phone is told, so
@@ -350,7 +351,6 @@ async fn main() -> Result<()> {
     // The car's own input goes the way everything else does, so the session gets
     // the same sink the CarPlay side fills in.
     let reported = status.carlife().clone();
-    let handed = vehicle.clone();
     tokio::spawn(async move {
         // Held in this task rather than in `main`: the ports are borrows of it,
         // and both have to outlive the loop that runs one session after another.
@@ -361,7 +361,7 @@ async fn main() -> Result<()> {
             home: home.clone(),
             outlet,
             report: reported,
-            vehicle: handed,
+            location: car.clone(),
         };
         let outcome = carlife_md::Md::new(&settings, &ports, replug_requested)
             .serve()

@@ -3,10 +3,9 @@
 
 use std::sync::Arc;
 
-use livi_runtime::vehicle::Vehicle;
 use tokio::sync::Notify;
 
-use crate::link::{Assets, Delegate, Input};
+use crate::link::{Assets, Delegate, Input, Location};
 use crate::outlet::Outlet;
 use crate::report::Report;
 
@@ -27,5 +26,5 @@ pub struct Ports<'a> {
     /// Where the session reports, for the page.
     pub report: Arc<Report>,
     /// Where the car's position goes, for the phone to read.
-    pub vehicle: Arc<Vehicle>,
+    pub location: Arc<dyn Location>,
 }

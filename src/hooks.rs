@@ -19,8 +19,11 @@ use carlife_md::channels::ChannelEntry;
 use carlife_md::link::{Assets, Delegate, Input};
 use carlife_md::machine::{ScreenOverride, Size};
 use carlife_md::press::Command;
-use carplay_hu::{Events, Geometry};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use carplay_hu::link::Link;
+use carplay_hu::{Events, Geometry};
+use livi_runtime::vehicle::Vehicle;
 use tokio::sync::{watch, Notify};
 
 use crate::led;
@@ -44,6 +47,9 @@ pub struct Hooks {
     lights: Arc<led::Signals>,
     /// Where a key pressed in the car arrives for the phone.
     events: Arc<Events>,
+    /// Where the car's position goes. The phone's half reads the same object,
+    /// which is why it is handed in rather than made here.
+    vehicle: Arc<Vehicle>,
 }
 
 impl Hooks {
@@ -55,6 +61,7 @@ impl Hooks {
         home: Arc<Notify>,
         lights: Arc<led::Signals>,
         events: Arc<Events>,
+        vehicle: Arc<Vehicle>,
     ) -> Arc<Self> {
         Arc::new(Self {
             carplay,
@@ -64,6 +71,7 @@ impl Hooks {
             home,
             lights,
             events,
+            vehicle,
         })
     }
 
@@ -166,6 +174,15 @@ impl carplay_hu::link::Delegate for Hooks {
     /// being asked for. Kept if the car is not waiting yet.
     fn tapped(&self) {
         self.home.notify_one();
+    }
+}
+
+impl carlife_md::link::Location for Hooks {
+    /// The car's position goes to the phone through the object the iAP2 session
+    /// reads, which takes the block base64'd: the encoding is that object's
+    /// convention rather than CarLife's, so it is done here.
+    fn fix(&self, nmea: &str) {
+        let _ = self.vehicle.push_location(&BASE64.encode(nmea));
     }
 }
 

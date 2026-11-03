@@ -49,3 +49,9 @@ pub trait Assets: Send + Sync {
     /// and the set is whatever was built rather than a list kept beside them.
     fn names(&self) -> Vec<&'static str>;
 }
+
+/// Where the car's position goes, as a block of NMEA sentences: either a fix or
+/// the sentences that withdraw one. The phone reads it as its own location.
+pub trait Location: Send + Sync {
+    fn fix(&self, nmea: &str);
+}
