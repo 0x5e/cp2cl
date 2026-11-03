@@ -10,7 +10,7 @@
 //! build carrying no guide at all leaves the channel to its heartbeats, which is
 //! what it had before there was a guide.
 
-use crate::assets;
+use crate::link::Assets;
 
 /// Where the coded streams are, and what their names state:
 /// `guide/1920x720.h264`.
@@ -47,9 +47,9 @@ impl Guide {
 ///
 /// `None` is a build with no guide in it, which is a state the session already
 /// knows how to run in.
-pub fn picture(width: u32, height: u32) -> Option<&'static [u8]> {
+pub fn picture(assets: &dyn Assets, width: u32, height: u32) -> Option<&'static [u8]> {
     let exact = format!("{DIR}{width}x{height}{SUFFIX}");
-    if let Some(bytes) = assets::get(&exact) {
+    if let Some(bytes) = assets.get(&exact) {
         return Some(bytes);
     }
     // Nothing was built at this size. The file whose shape is closest is the one
@@ -58,9 +58,9 @@ pub fn picture(width: u32, height: u32) -> Option<&'static [u8]> {
     // shape beats a black screen.
     let wanted = width.max(1) as f64 / height.max(1) as f64;
     let mut best: Option<(f64, &'static [u8])> = None;
-    for name in assets::names() {
+    for name in assets.names() {
         let Some((w, h)) = stated(name) else { continue };
-        let Some(bytes) = assets::get(name) else { continue };
+        let Some(bytes) = assets.get(name) else { continue };
         let off = (w as f64 / h as f64 / wanted).ln().abs();
         if best.map_or(true, |(known, _)| off < known) {
             best = Some((off, bytes));

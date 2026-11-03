@@ -33,12 +33,14 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::Instant;
 
 use super::{auth, frame, gps, guide, names, proto};
-use crate::airplay::{info, EventSink, ScreenParams, SharedChannel};
-use crate::commands::{Command, TouchContact, PHONE_DROP, PHONE_HOOK_SWITCH, PHONE_MUTE};
-use crate::config::{bt_address, hostname, Config};
+use crate::link::{Assets, Delegate, Input};
+use crate::media::{Media, Navi};
+use crate::outlet::Outlet;
+use crate::page::{Page, Size, Statistic};
+use crate::panel::{self, Panel};
 use crate::playing::{Playing, Track};
-use crate::sink::{ClOutlet, Media, Navi};
-use crate::web::{Size, Statistic, Status};
+use crate::press::{Command, TouchContact, PHONE_DROP, PHONE_HOOK_SWITCH, PHONE_MUTE};
+use crate::settings::Settings;
 
 // What the car sends, by name — the numbers are CarLifeVehicleLib's
 // `EPackageHeadType`.
@@ -191,7 +193,7 @@ pub enum Frames {
     /// The CarPlay side, as it arrives. Frames are written to the car as they
     /// come in rather than on the session's own clock: they are a coded stream,
     /// and it is the phone's encoder that decides the rate.
-    Live(Arc<ClOutlet>),
+    Live(Arc<Outlet>),
 }
 
 /// Splits an annex-B stream into access units, one per coded picture.
@@ -255,10 +257,26 @@ fn access_units(bytes: &[u8]) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// Where the size a head unit asks to be rendered at is reported, once it has
-/// named one: width, height and frame rate. It has to be `Send` because a session
-/// runs in a task of its own.
-pub type ScreenReport<'a> = &'a mut (dyn FnMut(u32, u32, u32) + Send);
+/// The size a car that names none is served: 720p at 30, which is the shape a
+/// car's decoder is surest of.
+const FALLBACK: (i32, i32, i32) = (1280, 720, 30);
+
+/// Everything a session needs from the program it runs in.
+pub struct Ports<'a> {
+    /// Where the car's touch and panel keys go.
+    pub input: Arc<dyn Input>,
+    /// What the host is told as the session runs.
+    pub delegate: &'a dyn Delegate,
+    /// The guide's pictures and the cover a song without artwork gets.
+    pub assets: &'a dyn Assets,
+    /// Fires when the phone's icon for us is tapped: on the phone that icon
+    /// stands for the car's own interface, so the car is asked to show it.
+    pub desktop: broadcast::Sender<()>,
+    /// Where the session reports, for the page.
+    pub page: Arc<Page>,
+    /// Where the car's position goes, for the phone to read.
+    pub vehicle: Arc<Vehicle>,
+}
 
 /// Runs one session until the car goes away.
 ///
@@ -272,41 +290,21 @@ pub type ScreenReport<'a> = &'a mut (dyn FnMut(u32, u32, u32) + Send);
 /// caller rather than from a file: the key is built into the binary, and a
 /// session handed `None` skips the challenge and runs on rather than failing.
 ///
-/// `screen` is told the size the car asked to be rendered at, as width, height
-/// and frame rate. The car is the one that knows its own screen, so this is where
-/// what the phone is asked to render comes from; `main` is what does something
-/// with it.
-///
-/// `events` is where the car's touch and panel keys go. It is the CarPlay side's
-/// own sink, so a key pressed on the car arrives at the phone by exactly the road
-/// a key from anywhere else would; the phone cannot tell them apart.
-///
-/// `channel` is where the channel number the car reports is kept, for `/info` to
-/// read: a head unit that names itself gets the icon and label that go with the
-/// make it belongs to.
-///
-/// `desktop` fires when the phone's icon for us is tapped. On the phone that
-/// icon stands for the car's own interface, so the car is asked to show it.
-pub async fn run<S, F>(
+/// `ports` is everything else the session needs from the program: where a key
+/// goes, what the host is told, the pictures it carries, and where it reports.
+pub async fn run<S>(
     stream: S,
     frames: &Frames,
-    cfg: &Config,
+    settings: &Settings,
     auth: Option<auth::Signer>,
-    screen: ScreenReport<'_>,
-    channel: SharedChannel,
-    events: Arc<EventSink>,
-    carplay: &mut F,
-    desktop: &broadcast::Sender<()>,
-    status: Arc<Status>,
-    vehicle: Arc<Vehicle>,
+    ports: &Ports<'_>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
-    F: FnMut(bool),
 {
     // Taken first, so a tap that lands while the session is still being built is
     // not missed.
-    let mut desktop = desktop.subscribe();
+    let mut desktop = ports.desktop.subscribe();
 
     // A session is what drains the bridge, so it takes all four receiving halves
     // for as long as it runs: one channel carries pictures, two the phone's
@@ -317,7 +315,7 @@ where
     // A panel that has just been plugged in has no song on it: what the last
     // session was showing belongs to a car that is no longer here, and the page
     // would otherwise go on showing it.
-    status.now_playing_cleared();
+    ports.page.now_playing_cleared();
     // Whether the phone has a screen stream open. One question, two uses: what
     // the car is shown — the guide until there is a picture — and whether a
     // keyframe can be asked for at all. It is the sink's own state, watched
@@ -363,15 +361,13 @@ where
 
     let mut session = Session {
         writer,
-        cfg,
-        screen,
-        channel,
+        settings,
+        ports,
         car_channel: None,
-        events,
         source,
         channel_touched: None,
         screen_in_force: None,
-        panel: info::Panel::default(),
+        panel: Panel::default(),
         started_at: None,
         keyframe_asked: None,
         media_format: None,
@@ -398,14 +394,14 @@ where
         // fix that arrives before it would not be subscribed to anyway.
         gcj02: false,
         car_version: None,
-        vehicle,
+        vehicle: ports.vehicle.clone(),
         up: false,
         last_touch: None,
         // Both wait for the car to name its screen: until it does, there is no
         // size to look a guide up by.
         guide: None,
         phone_screen,
-        status,
+        status: ports.page.clone(),
     };
 
     // A car that has configured the pipe and then said nothing is either one
@@ -427,7 +423,7 @@ where
         tokio::select! {
             arriving = rx.recv() => match arriving {
                 Some(ChunkOrEnd::Chunk(chunk)) => {
-                    if let Err(e) = session.handle(chunk, carplay).await {
+                    if let Err(e) = session.handle(chunk).await {
                         break Err(e);
                     }
                 }
@@ -548,7 +544,7 @@ where
     // to us would otherwise keep using the last place the car was.
     session.take_back_from_phone();
     if session.up {
-        carplay(false);
+        ports.delegate.session(false);
         tracing::info!("carlife.session_over action=close_carplay");
     }
     // A session that has ended is not one that is running, and the page has to
@@ -735,18 +731,14 @@ struct Playhead {
 
 struct Session<'a, W> {
     writer: W,
-    cfg: &'a Config,
-    /// Told the size the car asked to be rendered at, whenever it changes.
-    screen: ScreenReport<'a>,
-    /// Where the channel number the car reports is written, for `/info` to read.
-    channel: SharedChannel,
+    settings: &'a Settings,
+    /// Everything the session needs from the program it runs in.
+    ports: &'a Ports<'a>,
     /// The same number, kept here until the car has been told what a phone makes
     /// of it. The two are not the same moment: the number arrives with the
     /// statistics and the verdict goes out after `MD_INFO`, which is the order a
     /// phone sends them in.
     car_channel: Option<String>,
-    /// Where the car's touch and panel keys go.
-    events: Arc<EventSink>,
     source: Source,
     /// When the video channel last carried anything at all. With pictures
     /// arriving on their own clock, this is what decides whether the heartbeat
@@ -760,7 +752,7 @@ struct Session<'a, W> {
     /// that number has arrived: the size the phone is asked for, when the table
     /// preconfigures one, and the density the panel's millimetres are worked out
     /// at. Nothing has been said yet, so nothing is assumed but the default.
-    panel: info::Panel,
+    panel: Panel,
     /// When the encoder started, which is what the video channel's timestamps
     /// are measured from.
     started_at: Option<Instant>,
@@ -855,7 +847,7 @@ struct Session<'a, W> {
     phone_screen: Option<watch::Receiver<bool>>,
     /// Where the status page reads this session from. Reported to and never
     /// read back: see `crate::web::status`.
-    status: Arc<Status>,
+    status: Arc<Page>,
 }
 
 /// Bytes as one run of lowercase hex, which is the shape a protobuf decoder is
@@ -904,7 +896,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     }
 
     /// One message from the car.
-    async fn handle<F: FnMut(bool)>(&mut self, chunk: frame::Chunk, carplay: &mut F) -> Result<()> {
+    async fn handle(&mut self, chunk: frame::Chunk) -> Result<()> {
         if chunk.channel != frame::CMD {
             self.other_channel(chunk).await;
             return Ok(());
@@ -958,11 +950,11 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 self.send(FOREGROUND, &[]).await?;
                 let body = proto::device_info(&proto::DeviceInfo {
                     os: "Android".into(),
-                    brand: hostname(),
-                    model: hostname(),
+                    brand: self.settings.name.clone(),
+                    model: self.settings.name.clone(),
                     release: "10".into(),
                     sdk_int: 29,
-                    bt_address: bt_address(&self.cfg.bt_adapter),
+                    bt_address: self.settings.bt_address.clone(),
                 });
                 self.send(MD_INFO, &body).await?;
                 self.send(SCREEN_ON, &[]).await?;
@@ -995,7 +987,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     self.up = true;
                     self.status.with(|s| s.carlife.session_up = true);
                     tracing::info!("carlife.session_up");
-                    carplay(true);
+                    self.ports.delegate.session(true);
                 }
             }
             HU_STATISTIC_INFO => {
@@ -1028,16 +1020,14 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 });
                 // `/info` is answered from this: the channel picks the icon and
                 // the label the phone shows for us.
-                if let Ok(mut reported) = self.channel.lock() {
-                    *reported = Some(info.channel.to_string());
-                }
+                self.ports.delegate.channel(Some(info.channel));
                 // What the table says about this car's panel. The number arrives
                 // here and nowhere else, so it is read here: the size is what
                 // stands in for the one the car will name, and the density is
                 // what the millimetres are worked out at. Nothing is reported
                 // from it — `INIT_DONE` is where the screen is settled, and it is
                 // settled in one place.
-                self.panel = info::panel(Some(info.channel));
+                self.panel = self.ports.delegate.panel(Some(info.channel));
                 if let Some(preset) = self.panel.preset {
                     tracing::info!(
                         "carlife.panel_preset width={} height={} frameRate={} ppi={} \
@@ -1229,21 +1219,21 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             HU_VIDEO_ENCODER_INIT => {
                 let asked = proto::decode_video_encoder_info(&message.body);
                 // What the car names, clamped into what this side can produce.
-                let fallback = ScreenParams::default();
+                let (fallback_width, fallback_height, fallback_fps) = FALLBACK;
                 let named = proto::VideoEncoderInfo {
                     width: if asked.width > 0 {
                         asked.width
                     } else {
-                        fallback.width as i32
+                        fallback_width
                     },
                     height: if asked.height > 0 {
                         asked.height
                     } else {
-                        fallback.height as i32
+                        fallback_height
                     },
                     frame_rate: match asked.frame_rate {
                         MIN_FPS..=MAX_FPS => asked.frame_rate,
-                        _ => fallback.fps as i32,
+                        _ => fallback_fps,
                     },
                 };
                 // And what the channel carries, which is `INIT_DONE`'s answer:
@@ -1268,7 +1258,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // Looked up now because this is the moment the size is known,
                 // and it is the size the channel carries: the picture and the
                 // screen agree without anything being scaled at run time.
-                self.guide = guide::picture(in_force.width as u32, in_force.height as u32)
+                self.guide = guide::picture(self.ports.assets, in_force.width as u32, in_force.height as u32)
                     .and_then(|bytes| guide::Guide::cycle(access_units(bytes)));
                 tracing::info!(
                     "carlife.guide width={} height={} loaded={}",
@@ -1282,8 +1272,8 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // nothing. Nothing in the protocol carries a size.
                 let ppi = self.panel.ppi;
                 let physical = (
-                    info::millimetres(in_force.width as u32, ppi),
-                    info::millimetres(in_force.height as u32, ppi),
+                    panel::millimetres(in_force.width as u32, ppi),
+                    panel::millimetres(in_force.height as u32, ppi),
                 );
                 self.status.with(|s| {
                     s.carlife.requested = Some(Size {
@@ -1304,7 +1294,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // The channel is what the car decodes and what the phone draws,
                 // so this is the size the other half is told: the two halves
                 // meet here.
-                (self.screen)(
+                self.ports.delegate.screen(
                     in_force.width as u32,
                     in_force.height as u32,
                     in_force.frame_rate as u32,
@@ -1347,7 +1337,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // Only a car that nothing else has a rate for changes its own: the
                 // file's rate and a preset's are what the phone renders at, and
                 // another would leave the car pacing a picture it never sends.
-                let fixed = self.cfg.screen.fps.is_some() || self.panel.preset.is_some();
+                let fixed = self.settings.screen.fps.is_some() || self.panel.preset.is_some();
                 let current = self.screen_in_force.map_or(30, |screen| screen.frame_rate);
                 let accepted = match asked {
                     MIN_FPS..=MAX_FPS if !fixed => asked,
@@ -1432,7 +1422,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                     action_name(command),
                 );
                 if let Some(command) = command {
-                    if let Err(e) = self.events.dispatch(command).await {
+                    if let Err(e) = self.ports.input.press(command).await {
                         tracing::warn!("carlife.input_send_failed err={e}");
                     }
                 }
@@ -1641,7 +1631,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         };
         // Failures are the phone's to have: a press that arrives before the event
         // channel is up is dropped by the sink with a line of its own.
-        if let Err(e) = self.events.dispatch(command).await {
+        if let Err(e) = self.ports.input.press(command).await {
             tracing::warn!("carlife.input_send_failed err={e}");
         }
     }
@@ -1680,14 +1670,14 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     ) -> (proto::VideoEncoderInfo, &'static str, &'static str) {
         let table = self.panel.preset;
         let resolution = self
-            .cfg
+            .settings
             .screen
             .resolution
             .map(|r| (r.width as i32, r.height as i32, "config"))
             .or_else(|| table.map(|p| (p.width as i32, p.height as i32, "channel_map")))
             .unwrap_or((named.width, named.height, "car"));
         let fps = self
-            .cfg
+            .settings
             .screen
             .fps
             .map(|fps| (fps as i32, "config"))
@@ -1851,7 +1841,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             return;
         }
         self.keyframe_asked = Some(now);
-        if let Err(e) = self.events.dispatch(Command::KeyFrame).await {
+        if let Err(e) = self.ports.input.press(Command::KeyFrame).await {
             tracing::warn!("carlife.video.keyframe_request_failed err={e}");
         }
     }
@@ -2177,7 +2167,7 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     fn cover(&self) -> &[u8] {
         match self.art.as_deref() {
             Some(art) if !art.is_empty() => art,
-            _ => crate::assets::get(PLACEHOLDER_ART).expect("assets are built in"),
+            _ => self.ports.assets.get(PLACEHOLDER_ART).expect("assets are built in"),
         }
     }
 
@@ -2415,18 +2405,104 @@ fn adopt_clock(epoch_ms: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::playing::Position;
-    use crate::sink::{AudioCodec, MediaSink, StreamEvent, StreamId};
-    use std::sync::{Arc, Mutex};
-    use tokio::io::DuplexStream;
 
-    /// One stream: a type the phone names it with, and the instance it opened.
-    fn stream(stream_type: u8, connection_id: i64) -> StreamId {
-        StreamId {
-            stream_type,
-            connection_id,
+    /// What a session tells the host, for a test to read back.
+    #[derive(Default)]
+    struct Watched {
+        sessions: Mutex<Vec<bool>>,
+        screens: Mutex<Vec<(u32, u32, u32)>>,
+        channels: Mutex<Vec<Option<String>>>,
+    }
+
+    impl Delegate for Watched {
+        fn session(&self, up: bool) {
+            self.sessions.lock().unwrap().push(up);
+        }
+
+        fn screen(&self, width: u32, height: u32, fps: u32) {
+            self.screens.lock().unwrap().push((width, height, fps));
+        }
+
+        fn channel(&self, channel: Option<&str>) {
+            self.channels.lock().unwrap().push(channel.map(str::to_string));
+        }
+
+        fn screen_override(&self) -> crate::settings::Screen {
+            crate::settings::Screen::default()
+        }
+
+        /// The one entry of the channel table the tests use: `20062104` is a
+        /// panel the table preconfigures, and every other number is not.
+        fn panel(&self, channel: Option<&str>) -> Panel {
+            match channel {
+                Some("20062104") => Panel {
+                    preset: Some(crate::panel::Preset {
+                        width: 1920,
+                        height: 720,
+                        fps: 30,
+                    }),
+                    ppi: crate::panel::DEFAULT_PPI,
+                },
+                _ => Panel::default(),
+            }
         }
     }
+
+    /// The pictures a session falls back on: the one cover the binary carries,
+    /// and the guide built for the size the tests hand a car.
+    struct Pictures;
+
+    impl Assets for Pictures {
+        fn get(&self, name: &str) -> Option<&'static [u8]> {
+            match name {
+                PLACEHOLDER_ART => Some(&include_bytes!("../../../../assets/icons/iv_music_pic.png")[..]),
+                "guide/1280x720.h264" => {
+                    Some(&include_bytes!("../../../../assets/guide/1280x720.h264")[..])
+                }
+                _ => None,
+            }
+        }
+
+        fn names(&self) -> Vec<&'static str> {
+            vec!["guide/1280x720.h264"]
+        }
+    }
+
+    static PICTURES: Pictures = Pictures;
+
+    /// Where nothing is pressed.
+    struct NoKeys;
+
+    impl Input for NoKeys {
+        fn press(
+            &self,
+            _command: Command,
+        ) -> futures_util::future::BoxFuture<'_, std::io::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// The ports a test runs with: nobody presses anything, the host is
+    /// `watched`, and the only picture is the placeholder.
+    fn ports<'a>(
+        watched: &'a Watched,
+        desktop: broadcast::Sender<()>,
+        page: Arc<Page>,
+        vehicle: Arc<Vehicle>,
+    ) -> Ports<'a> {
+        Ports {
+            input: Arc::new(NoKeys),
+            delegate: watched,
+            assets: &PICTURES,
+            desktop,
+            page,
+            vehicle,
+        }
+    }
+
+    use crate::playing::Position;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::DuplexStream;
 
     /// The car's control of a module, as the two fields it is.
     fn control(module: i32, state: i32) -> proto::ModuleControl {
@@ -2435,7 +2511,7 @@ mod tests {
 
     /// The cover the panel is given for a song whose app sent none.
     fn placeholder() -> &'static [u8] {
-        crate::assets::get(PLACEHOLDER_ART).expect("the placeholder is built in")
+        PICTURES.get(PLACEHOLDER_ART).expect("the placeholder is built in")
     }
 
     /// The message the panel should have been given for `track` and `cover`,
@@ -2716,13 +2792,6 @@ mod tests {
         body
     }
 
-    /// Where `/info` reads the channel number from. A test that is about
-    /// something else leaves it empty, which is what a car that has not reported
-    /// one looks like.
-    fn no_icon() -> SharedChannel {
-        Arc::new(Mutex::new(None))
-    }
-
     /// The signal a tap on the phone's icon arrives on, for a test that does not
     /// tap.
     fn no_tap() -> broadcast::Sender<()> {
@@ -2741,7 +2810,6 @@ mod tests {
     /// What a phone makes of a car that names this channel.
     async fn verdict(channel: String) -> bool {
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
@@ -2749,18 +2817,14 @@ mod tests {
             proto::decode_authen_result(&answer.body).expect("a boolean")
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &Frames::None,
-            &Config::default(),
+            &Settings::default(),
             None,
-            &mut |_, _, _| {},
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -2775,7 +2839,6 @@ mod tests {
         let (device, pipe) = tokio::io::duplex(64 * 1024);
         let (tap, _) = broadcast::channel(1);
         let tapping = tap.clone();
-        let mut carplay = |_: bool| {};
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
@@ -2784,18 +2847,14 @@ mod tests {
             car.expect(GO_TO_DESKTOP).await
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, tap.clone(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &Frames::None,
-            &Config::default(),
+            &Settings::default(),
             None,
-            &mut |_, _, _| {},
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &tap,
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -2839,9 +2898,8 @@ mod tests {
         use base64::Engine as _;
 
         let (pem, key) = a_key_of_its_own();
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
         let challenge = "9f2c1a_4.6.0";
 
         let car = tokio::spawn(async move {
@@ -2871,18 +2929,14 @@ mod tests {
                 .expect("the car's check passes");
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &Frames::None,
             &cfg,
             auth::Signer::from_pem(&pem),
-            &mut |_, _, _| {},
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -2891,11 +2945,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_handshake_is_answered_and_the_session_is_reported_up_then_down() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let switches = Arc::new(Mutex::new(Vec::new()));
-        let seen = switches.clone();
-        let mut carplay = move |up: bool| seen.lock().unwrap().push(up);
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
@@ -2905,33 +2956,28 @@ mod tests {
             // Dropping the pipe is the car going away.
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &Frames::None,
             &cfg,
             None,
-            &mut |_, _, _| {},
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
         car.await.unwrap();
 
-        assert_eq!(*switches.lock().unwrap(), vec![true, false]);
+        assert_eq!(*watched.sessions.lock().unwrap(), vec![true, false]);
     }
 
     /// The car's own screen is what the other half is told to render at: no one
     /// else knows how big it is, so it is the car that decides.
     #[tokio::test]
     async fn the_cars_screen_is_reported_to_the_other_half() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
         // Deliberately unlike the fallback, so a report of the fallback would
         // not pass.
         let car_screen = proto::VideoEncoderInfo {
@@ -2945,29 +2991,20 @@ mod tests {
             car.handshake(car_screen).await;
         });
 
-        let screens = Arc::new(Mutex::new(Vec::new()));
-        let seen = screens.clone();
-        let mut screen = move |width: u32, height: u32, fps: u32| {
-            seen.lock().unwrap().push((width, height, fps));
-        };
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &Frames::None,
             &cfg,
             None,
-            &mut screen,
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
         car.await.unwrap();
 
-        assert_eq!(*screens.lock().unwrap(), vec![(1920, 480, 24)]);
+        assert_eq!(*watched.screens.lock().unwrap(), vec![(1920, 480, 24)]);
     }
 
     /// A number the channel table preconfigures is answered with the table's
@@ -2978,33 +3015,23 @@ mod tests {
     /// its own.
     #[tokio::test]
     async fn a_preconfigured_number_is_served_the_size_the_table_names() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
             car.handshake_on("20062104", asked(), preset()).await;
         });
 
-        let screens = Arc::new(Mutex::new(Vec::new()));
-        let seen = screens.clone();
-        let mut screen = move |width: u32, height: u32, fps: u32| {
-            seen.lock().unwrap().push((width, height, fps));
-        };
-        let status = Arc::new(Status::new());
+        let status = Arc::new(Page::new());
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), status.clone(), Arc::new(Vehicle::default()));
         run(
             device,
             &Frames::None,
             &cfg,
             None,
-            &mut screen,
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            status.clone(),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -3013,7 +3040,7 @@ mod tests {
         // The phone draws the table's size, so that is the size it is told — and
         // this callback is what `/info` reads, so it is also the size the phone
         // is asked for.
-        assert_eq!(*screens.lock().unwrap(), vec![(1920, 720, 30)]);
+        assert_eq!(*watched.screens.lock().unwrap(), vec![(1920, 720, 30)]);
         status.with(|s| {
             // One size, and it is the table's: the car's own numbers were
             // overwritten where they were stored, so this is all there is to read.
@@ -3027,7 +3054,7 @@ mod tests {
     /// 文件排在渠道表与车机之前：两项都有，表和车机都不作数。
     #[tokio::test]
     async fn the_settings_file_is_served_before_the_table_and_the_car() {
-        let cfg = Config {
+        let cfg = Settings {
             screen: crate::settings::Screen {
                 resolution: Some(crate::settings::Resolution {
                     width: 1920,
@@ -3035,10 +3062,9 @@ mod tests {
                 }),
                 fps: Some(60),
             },
-            ..Config::default()
+            ..Settings::default()
         };
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
@@ -3056,30 +3082,21 @@ mod tests {
             .await;
         });
 
-        let screens = Arc::new(Mutex::new(Vec::new()));
-        let seen = screens.clone();
-        let mut screen = move |width: u32, height: u32, fps: u32| {
-            seen.lock().unwrap().push((width, height, fps));
-        };
-        let status = Arc::new(Status::new());
+        let status = Arc::new(Page::new());
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), status.clone(), Arc::new(Vehicle::default()));
         run(
             device,
             &Frames::None,
             &cfg,
             None,
-            &mut screen,
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            status.clone(),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
         .expect("the session ends cleanly");
         car.await.expect("the car saw its answer");
 
-        assert_eq!(*screens.lock().unwrap(), vec![(1920, 1080, 60)]);
+        assert_eq!(*watched.screens.lock().unwrap(), vec![(1920, 1080, 60)]);
         status.with(|s| {
             let agreed = s.carlife.agreed.expect("the answer is on the page");
             assert_eq!((agreed.width, agreed.height, agreed.fps), (1920, 1080, 60));
@@ -3089,7 +3106,7 @@ mod tests {
     /// 两项各自往下走：文件只选了尺寸，帧率还是渠道表的。
     #[tokio::test]
     async fn a_size_from_the_file_leaves_the_rate_to_the_table() {
-        let cfg = Config {
+        let cfg = Settings {
             screen: crate::settings::Screen {
                 resolution: Some(crate::settings::Resolution {
                     width: 1280,
@@ -3097,10 +3114,9 @@ mod tests {
                 }),
                 fps: None,
             },
-            ..Config::default()
+            ..Settings::default()
         };
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
@@ -3116,18 +3132,14 @@ mod tests {
             .await;
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &Frames::None,
             &cfg,
             None,
-            &mut |_, _, _| {},
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
         .expect("the session ends cleanly");
@@ -3137,15 +3149,14 @@ mod tests {
     /// 文件定死的帧率，车机再来改不作数。
     #[tokio::test]
     async fn a_rate_the_file_names_is_not_changed_by_the_car() {
-        let cfg = Config {
+        let cfg = Settings {
             screen: crate::settings::Screen {
                 resolution: None,
                 fps: Some(60),
             },
-            ..Config::default()
+            ..Settings::default()
         };
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
@@ -3158,18 +3169,14 @@ mod tests {
             assert_eq!(car.change_rate(30).await, 60, "the file's rate stands");
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &Frames::None,
             &cfg,
             None,
-            &mut |_, _, _| {},
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
         .expect("the session ends cleanly");
@@ -3235,10 +3242,8 @@ mod tests {
     /// holds this: it compares the answer with the request field by field.
     #[tokio::test]
     async fn a_frame_rate_above_thirty_is_agreed_to_rather_than_cut_down() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
@@ -3250,18 +3255,14 @@ mod tests {
             .await;
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &Frames::None,
             &cfg,
             None,
-            &mut screen,
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -3274,12 +3275,10 @@ mod tests {
     /// message, and the phone's own voice streams are not the car's music.
     #[tokio::test]
     async fn the_media_channel_is_told_the_format_before_it_is_given_any_sound() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
 
-        let outlet = Arc::new(ClOutlet::new());
+        let outlet = Arc::new(Outlet::new());
         let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
@@ -3290,13 +3289,9 @@ mod tests {
             // The music: the stream opens, and then there is sound on it. A
             // start is what a phone sends as one — the player set up, put down
             // and set up again, and then the module idle and running.
-            sink.push(StreamEvent::AudioConfig {
-                stream: stream(102, 1),
-                codec: AudioCodec::AacLc {
-                    rate: 44_100,
-                    channels: 2,
-                },
-                name: "media".into(),
+            sink.media(Media::Format {
+                rate: 44_100,
+                channels: 2,
             });
             let init = car.expect(MEDIA_INIT).await;
             assert_eq!(init.body, proto::media_init(44_100, 2));
@@ -3316,9 +3311,8 @@ mod tests {
                 proto::module_status(proto::MUSIC_MODULE, proto::MUSIC_RUNNING)
             );
 
-            sink.push(StreamEvent::AudioPacket {
-                stream: stream(102, 1),
-                timestamp_us: 1_234_000,
+            sink.media(Media::Pcm {
+                timestamp_ms: 1234,
                 data: vec![0x11, 0x22, 0x33, 0x44],
             });
             let sound = car.expect(MEDIA_DATA).await;
@@ -3327,60 +3321,35 @@ mod tests {
 
             // The next track opens a stream of its own, in the format the car is
             // already holding: nothing to say, and the sound goes on.
-            sink.push(StreamEvent::AudioConfig {
-                stream: stream(102, 2),
-                codec: AudioCodec::AacLc {
-                    rate: 44_100,
-                    channels: 2,
-                },
-                name: "media".into(),
+            sink.media(Media::Format {
+                rate: 44_100,
+                channels: 2,
             });
-            sink.push(StreamEvent::AudioPacket {
-                stream: stream(102, 2),
-                timestamp_us: 1_300_000,
+            sink.media(Media::Pcm {
+                timestamp_ms: 1300,
                 data: vec![0x55, 0x66],
             });
             assert_eq!(car.expect(MEDIA_DATA).await.body, vec![0x55, 0x66]);
 
-            // A call is one of the car's own channels, not this one: what comes
-            // out next is the music, with nothing between them.
-            sink.push(StreamEvent::AudioConfig {
-                stream: stream(100, 3),
-                codec: AudioCodec::Opus {
-                    rate: 48_000,
-                    channels: 1,
-                },
-                name: "telephony".into(),
-            });
-            sink.push(StreamEvent::AudioPacket {
-                stream: stream(100, 3),
-                timestamp_us: 1_400_000,
-                data: vec![0x77],
-            });
-            sink.push(StreamEvent::AudioPacket {
-                stream: stream(102, 2),
-                timestamp_us: 1_500_000,
+            // A call is one of the car's own channels and never reaches this
+            // queue, so what is left on it is the music, going on.
+            sink.media(Media::Pcm {
+                timestamp_ms: 1500,
                 data: vec![0x88],
             });
             assert_eq!(car.expect(MEDIA_DATA).await.body, vec![0x88]);
 
             // The phone stopped playing, and the car is told rather than left
             // holding a player open over nothing.
-            sink.push(StreamEvent::AudioStopped {
-                stream: stream(102, 2),
-            });
+            sink.media(Media::Ended);
             car.expect(MEDIA_STOP).await;
 
             // A stream that opens again after the silence is another start, and
             // is given everything a start is given — the module told again with
             // it, because the module the car has was told for the song before.
-            sink.push(StreamEvent::AudioConfig {
-                stream: stream(102, 4),
-                codec: AudioCodec::AacLc {
-                    rate: 48_000,
-                    channels: 2,
-                },
-                name: "media".into(),
+            sink.media(Media::Format {
+                rate: 48_000,
+                channels: 2,
             });
             let init = car.expect(MEDIA_INIT).await;
             assert_eq!(init.body, proto::media_init(48_000, 2));
@@ -3391,18 +3360,14 @@ mod tests {
             car.expect_silence(Duration::from_millis(200)).await;
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &frames,
             &cfg,
             None,
-            &mut screen,
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -3414,12 +3379,10 @@ mod tests {
     /// frames themselves, and an end that leaves the music's channel alone.
     #[tokio::test]
     async fn the_prompt_is_announced_and_ended_on_its_own_channel() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
 
-        let outlet = Arc::new(ClOutlet::new());
+        let outlet = Arc::new(Outlet::new());
         let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
@@ -3429,21 +3392,16 @@ mod tests {
 
             // The stream opens. A player set up over silence is one the car
             // holds open with nothing in it, so nothing is said yet.
-            sink.push(StreamEvent::AudioConfig {
-                stream: stream(100, 5),
-                codec: AudioCodec::Pcm {
-                    rate: 16_000,
-                    channels: 1,
-                },
-                name: "default".into(),
+            sink.navi(Navi::Format {
+                rate: 16_000,
+                channels: 1,
             });
             car.expect_silence(Duration::from_millis(200)).await;
 
             // The first frame says both things: what the samples are, and then
             // the samples.
-            sink.push(StreamEvent::AudioPacket {
-                stream: stream(100, 5),
-                timestamp_us: 2_000_000,
+            sink.navi(Navi::Pcm {
+                timestamp_ms: 2000,
                 data: vec![0xaa, 0xbb],
             });
             let init = car.expect(NAVI_TTS_INIT).await;
@@ -3454,32 +3412,25 @@ mod tests {
 
             // The next frame is more of the same player, and says nothing about
             // the format.
-            sink.push(StreamEvent::AudioPacket {
-                stream: stream(100, 5),
-                timestamp_us: 2_020_000,
+            sink.navi(Navi::Pcm {
+                timestamp_ms: 2020,
                 data: vec![0xcc],
             });
             assert_eq!(car.expect(NAVI_TTS_DATA).await.body, vec![0xcc]);
 
             // The phone says the prompt is over.
-            sink.push(StreamEvent::AudioStopped {
-                stream: stream(100, 5),
-            });
+            sink.navi(Navi::Ended);
             car.expect(NAVI_TTS_END).await;
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &frames,
             &cfg,
             None,
-            &mut screen,
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -3491,12 +3442,10 @@ mod tests {
     /// the prompt is over. So silence ends it — once, and no more.
     #[tokio::test]
     async fn a_prompt_that_goes_quiet_is_ended_for_it() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
 
-        let outlet = Arc::new(ClOutlet::new());
+        let outlet = Arc::new(Outlet::new());
         let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
@@ -3504,17 +3453,12 @@ mod tests {
             let mut car = Car { pipe };
             car.introduce("20062100").await;
 
-            sink.push(StreamEvent::AudioConfig {
-                stream: stream(100, 6),
-                codec: AudioCodec::Pcm {
-                    rate: 16_000,
-                    channels: 1,
-                },
-                name: "alert".into(),
+            sink.navi(Navi::Format {
+                rate: 16_000,
+                channels: 1,
             });
-            sink.push(StreamEvent::AudioPacket {
-                stream: stream(100, 6),
-                timestamp_us: 3_000_000,
+            sink.navi(Navi::Pcm {
+                timestamp_ms: 3000,
                 data: vec![0x01],
             });
             car.expect(NAVI_TTS_INIT).await;
@@ -3529,9 +3473,8 @@ mod tests {
 
             // The same stream speaking again is a new player, announced with the
             // format it was last given.
-            sink.push(StreamEvent::AudioPacket {
-                stream: stream(100, 6),
-                timestamp_us: 4_000_000,
+            sink.navi(Navi::Pcm {
+                timestamp_ms: 4000,
                 data: vec![0x02],
             });
             assert_eq!(
@@ -3541,18 +3484,14 @@ mod tests {
             assert_eq!(car.expect(NAVI_TTS_DATA).await.body, vec![0x02]);
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &frames,
             &cfg,
             None,
-            &mut screen,
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -3564,12 +3503,10 @@ mod tests {
     /// with the cover art joined onto the song it belongs to when it lands.
     #[tokio::test]
     async fn the_cars_panel_is_told_the_song_that_is_playing() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
 
-        let outlet = Arc::new(ClOutlet::new());
+        let outlet = Arc::new(Outlet::new());
         let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
@@ -3640,18 +3577,14 @@ mod tests {
             car.expect_silence(Duration::from_millis(300)).await;
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &frames,
             &cfg,
             None,
-            &mut screen,
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -3666,12 +3599,10 @@ mod tests {
     /// that repeats the state is nothing at all.
     #[tokio::test]
     async fn the_car_is_told_when_the_song_stops_and_starts() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
 
-        let outlet = Arc::new(ClOutlet::new());
+        let outlet = Arc::new(Outlet::new());
         let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
@@ -3680,13 +3611,9 @@ mod tests {
             car.introduce("20062100").await;
 
             // The stream opens: the song has started, and the car is told so.
-            sink.push(StreamEvent::AudioConfig {
-                stream: stream(102, 1),
-                codec: AudioCodec::AacLc {
-                    rate: 44_100,
-                    channels: 2,
-                },
-                name: "media".into(),
+            sink.media(Media::Format {
+                rate: 44_100,
+                channels: 2,
             });
             car.expect(MEDIA_INIT).await;
             car.expect(MEDIA_STOP).await;
@@ -3743,18 +3670,14 @@ mod tests {
             car.expect_silence(Duration::from_millis(300)).await;
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &frames,
             &cfg,
             None,
-            &mut screen,
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -3765,12 +3688,10 @@ mod tests {
     /// thrown away when the song turns up.
     #[tokio::test]
     async fn a_cover_that_arrives_before_the_song_is_kept_for_it() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
 
-        let outlet = Arc::new(ClOutlet::new());
+        let outlet = Arc::new(Outlet::new());
         let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
@@ -3802,18 +3723,14 @@ mod tests {
             );
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &frames,
             &cfg,
             None,
-            &mut screen,
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -3826,12 +3743,10 @@ mod tests {
     /// the song it belongs to has not gone anywhere.
     #[tokio::test]
     async fn a_line_of_lyrics_keeps_the_cover() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
 
-        let outlet = Arc::new(ClOutlet::new());
+        let outlet = Arc::new(Outlet::new());
         let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
@@ -3869,18 +3784,14 @@ mod tests {
             assert_eq!(told.body, rebuilt(&told.body, &renamed, &[0xff, 0xd8]));
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &frames,
             &cfg,
             None,
-            &mut screen,
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -3893,12 +3804,10 @@ mod tests {
     /// which is what a phone with no cover of its own sends.
     #[tokio::test]
     async fn an_empty_cover_puts_the_last_one_down() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
 
-        let outlet = Arc::new(ClOutlet::new());
+        let outlet = Arc::new(Outlet::new());
         let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
@@ -3926,18 +3835,14 @@ mod tests {
             assert_eq!(told.body, rebuilt(&told.body, &song, placeholder()));
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &frames,
             &cfg,
             None,
-            &mut screen,
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -3950,12 +3855,10 @@ mod tests {
     /// the page is given the same picture the car is.
     #[tokio::test]
     async fn a_song_with_a_length_puts_the_last_cover_down() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
 
-        let outlet = Arc::new(ClOutlet::new());
+        let outlet = Arc::new(Outlet::new());
         let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
@@ -3969,7 +3872,7 @@ mod tests {
             ..Track::default()
         };
 
-        let status = Arc::new(Status::new());
+        let status = Arc::new(Page::new());
         let page = status.clone();
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
@@ -4000,18 +3903,14 @@ mod tests {
             assert_eq!(told.body, rebuilt(&told.body, &next, &[0x89, 0x50]));
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), status.clone(), Arc::new(Vehicle::default()));
         run(
             device,
             &frames,
             &cfg,
             None,
-            &mut screen,
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            status,
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -4023,12 +3922,10 @@ mod tests {
     /// worse than one the car never updated.
     #[tokio::test]
     async fn the_play_state_on_its_own_is_not_a_song() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
 
-        let outlet = Arc::new(ClOutlet::new());
+        let outlet = Arc::new(Outlet::new());
         let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
@@ -4061,18 +3958,14 @@ mod tests {
             );
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &frames,
             &cfg,
             None,
-            &mut screen,
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -4086,12 +3979,10 @@ mod tests {
     /// own panel does with the same messages.
     #[tokio::test]
     async fn every_word_from_the_phone_goes_out_at_once() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
 
-        let outlet = Arc::new(ClOutlet::new());
+        let outlet = Arc::new(Outlet::new());
         let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
@@ -4157,18 +4048,14 @@ mod tests {
             );
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &frames,
             &cfg,
             None,
-            &mut screen,
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -4179,12 +4066,10 @@ mod tests {
     /// the panel loses the picture, not the song.
     #[tokio::test]
     async fn a_cover_too_large_for_the_cars_message_is_left_out() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
 
-        let outlet = Arc::new(ClOutlet::new());
+        let outlet = Arc::new(Outlet::new());
         let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
@@ -4210,18 +4095,14 @@ mod tests {
             assert_eq!(covered.body, rebuilt(&covered.body, &track, &fits));
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &frames,
             &cfg,
             None,
-            &mut screen,
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -4234,12 +4115,10 @@ mod tests {
     /// of the two.
     #[tokio::test]
     async fn a_message_larger_than_its_channel_allows_is_dropped() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let mut screen = |_width: u32, _height: u32, _fps: u32| {};
 
-        let outlet = Arc::new(ClOutlet::new());
+        let outlet = Arc::new(Outlet::new());
         let frames = Frames::Live(outlet.clone());
         let sink = outlet.sink();
 
@@ -4247,13 +4126,9 @@ mod tests {
             let mut car = Car { pipe };
             car.introduce("20062100").await;
 
-            sink.push(StreamEvent::AudioConfig {
-                stream: stream(102, 1),
-                codec: AudioCodec::AacLc {
-                    rate: 48_000,
-                    channels: 2,
-                },
-                name: "media".into(),
+            sink.media(Media::Format {
+                rate: 48_000,
+                channels: 2,
             });
             car.expect(MEDIA_INIT).await;
             car.expect(MEDIA_STOP).await;
@@ -4262,17 +4137,15 @@ mod tests {
             car.expect(MODULE_STATUS).await;
 
             // One byte past the media channel's body cap.
-            sink.push(StreamEvent::AudioPacket {
-                stream: stream(102, 1),
-                timestamp_us: 1_000_000,
+            sink.media(Media::Pcm {
+                timestamp_ms: 1000,
                 data: vec![0x11; 100 * 1024 + 1],
             });
             car.expect_silence(Duration::from_millis(300)).await;
 
             // And the channel is still there, with nothing left over on it.
-            sink.push(StreamEvent::AudioPacket {
-                stream: stream(102, 1),
-                timestamp_us: 1_100_000,
+            sink.media(Media::Pcm {
+                timestamp_ms: 1100,
                 data: vec![0x22],
             });
             let sound = car.expect(MEDIA_DATA).await;
@@ -4280,18 +4153,14 @@ mod tests {
             assert_eq!(sound.timestamp_ms, Some(1_100));
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &frames,
             &cfg,
             None,
-            &mut screen,
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -4303,9 +4172,8 @@ mod tests {
     /// answer is the same for all of them.
     #[tokio::test]
     async fn the_cars_question_about_what_this_device_can_provide_is_answered() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
@@ -4322,18 +4190,14 @@ mod tests {
             assert_eq!(answer.body, proto::data_subscribe_done(&[(7, false)]));
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &Frames::None,
             &cfg,
             None,
-            &mut |_, _, _| {},
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -4370,10 +4234,9 @@ mod tests {
     /// the same, because nothing that takes a report is behind having asked.
     #[tokio::test]
     async fn a_car_below_protocol_three_is_not_asked_for_its_data_but_is_heard() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let status = Arc::new(Status::new());
+        let status = Arc::new(Page::new());
         let reported = status.clone();
 
         let car = tokio::spawn(async move {
@@ -4392,23 +4255,19 @@ mod tests {
             car.send(HU_GO_TO_FOREGROUND, &[]).await;
             car.expect(GO_TO_FOREGROUND_RESPONSE).await;
 
-            let carlife = reported.json()["carlife"].clone();
+            let carlife = reported.carlife_json(serde_json::Value::Null).clone();
             assert_eq!(carlife["gps"]["latitude"], 30_317_880);
             assert_eq!(carlife["speed"], 37);
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), status.clone(), Arc::new(Vehicle::default()));
         run(
             device,
             &Frames::None,
             &cfg,
             None,
-            &mut |_, _, _| {},
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            status,
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
         .expect("the session ends cleanly");
@@ -4420,10 +4279,9 @@ mod tests {
     /// the car, and the fix is worth having either way.
     #[tokio::test]
     async fn the_cars_position_is_asked_for_and_reported() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let status = Arc::new(Status::new());
+        let status = Arc::new(Page::new());
         let reported = status.clone();
 
         let car = tokio::spawn(async move {
@@ -4455,7 +4313,7 @@ mod tests {
             car.send(HU_GO_TO_FOREGROUND, &[]).await;
             car.expect(GO_TO_FOREGROUND_RESPONSE).await;
 
-            let gps = reported.json()["carlife"]["gps"].clone();
+            let gps = reported.carlife_json(serde_json::Value::Null)["gps"].clone();
             assert_eq!(gps["antenna_state"], 1);
             assert_eq!(gps["latitude"], 30_317_880);
             assert_eq!(gps["longitude"], 120_128_094);
@@ -4468,18 +4326,14 @@ mod tests {
             assert_eq!(gps["second"], 57);
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), status.clone(), Arc::new(Vehicle::default()));
         run(
             device,
             &Frames::None,
             &cfg,
             None,
-            &mut |_, _, _| {},
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            status.clone(),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -4488,12 +4342,12 @@ mod tests {
         // A fix belongs to the car that reported it, so the page is not left
         // showing where the last one was.
         assert!(
-            status.json()["carlife"]["gps"].is_null(),
+            status.carlife_json(serde_json::Value::Null)["gps"].is_null(),
             "the position goes when the car does"
         );
         // The speed is the same kind of report and goes the same way.
         assert!(
-            status.json()["carlife"]["speed"].is_null(),
+            status.carlife_json(serde_json::Value::Null)["speed"].is_null(),
             "the speed goes with it"
         );
     }
@@ -4503,9 +4357,8 @@ mod tests {
     /// sending half — which is the one handed in here.
     #[tokio::test]
     async fn the_cars_position_is_handed_to_the_phone() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
         let vehicle = Arc::new(Vehicle::default());
         let feed = vehicle.feed();
 
@@ -4524,18 +4377,14 @@ mod tests {
             car.expect(GO_TO_FOREGROUND_RESPONSE).await;
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), vehicle.clone());
         run(
             device,
             &Frames::None,
             &cfg,
             None,
-            &mut |_, _, _| {},
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            vehicle,
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -4551,9 +4400,8 @@ mod tests {
     /// was given for as long as it stays connected.
     #[tokio::test]
     async fn a_lost_fix_takes_the_position_back() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
         let vehicle = Arc::new(Vehicle::default());
         let feed = vehicle.feed();
 
@@ -4571,18 +4419,14 @@ mod tests {
             car.expect(GO_TO_FOREGROUND_RESPONSE).await;
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), vehicle.clone());
         run(
             device,
             &Frames::None,
             &cfg,
             None,
-            &mut |_, _, _| {},
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            vehicle,
+            &ports,
         )
         .await
         .expect("the session ends cleanly");
@@ -4598,9 +4442,8 @@ mod tests {
     /// there, on a wireless link that outlives the car's.
     #[tokio::test]
     async fn the_position_goes_when_the_car_does() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
         let vehicle = Arc::new(Vehicle::default());
         let feed = vehicle.feed();
 
@@ -4615,18 +4458,14 @@ mod tests {
             // And then the cable: the pipe closes behind the fix.
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), vehicle.clone());
         run(
             device,
             &Frames::None,
             &cfg,
             None,
-            &mut |_, _, _| {},
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            vehicle,
+            &ports,
         )
         .await
         .expect("the session ends cleanly");
@@ -4674,9 +4513,8 @@ mod tests {
 
     #[tokio::test]
     async fn nothing_is_sent_on_the_video_channel_until_the_car_starts_it() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
@@ -4686,18 +4524,14 @@ mod tests {
         });
 
         let frames = Frames::None;
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &frames,
             &cfg,
             None,
-            &mut |_, _, _| {},
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -4711,10 +4545,9 @@ mod tests {
     /// whether or not the machine it runs on was built with a key.
     #[tokio::test]
     async fn a_challenge_with_no_key_behind_it_is_left_alone() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let status = Arc::new(Status::new());
+        let status = Arc::new(Page::new());
         let reported = status.clone();
 
         let car = tokio::spawn(async move {
@@ -4728,25 +4561,21 @@ mod tests {
             car.introduce("20062100").await;
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), reported.clone(), Arc::new(Vehicle::default()));
         run(
             device,
             &Frames::None,
             &cfg,
             None,
-            &mut |_, _, _| {},
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            reported,
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
         car.await.unwrap();
 
         assert_eq!(
-            status.json()["carlife"]["challenge_answered"],
+            status.carlife_json(serde_json::Value::Null)["challenge_answered"],
             false,
             "the challenge is reported as asked and unanswered"
         );
@@ -4754,15 +4583,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_frame_from_the_carplay_side_goes_out_as_it_arrives() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let outlet = Arc::new(ClOutlet::new());
+        let outlet = Arc::new(Outlet::new());
         let frames = Frames::Live(outlet.clone());
         // The phone's screen stream is open before any of this: what is being
         // tested is a picture going through, and a closed screen is the guide's
         // case, which has tests of its own.
-        outlet.sink().push(StreamEvent::ScreenActive(true));
+        outlet.sink().screen(true);
 
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let car = tokio::spawn(async move {
@@ -4782,24 +4610,17 @@ mod tests {
         let pushing = tokio::spawn(async move {
             let _ = started_rx.await;
             tokio::time::sleep(Duration::from_millis(100)).await;
-            outlet.sink().push(StreamEvent::VideoFrame {
-                keyframe: false,
-                data: vec![0x00, 0x00, 0x00, 0x01, 0x41],
-            });
+            outlet.sink().video(vec![0x00, 0x00, 0x00, 0x01, 0x41]);
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &frames,
             &cfg,
             None,
-            &mut |_, _, _| {},
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -4845,10 +4666,9 @@ mod tests {
     /// look stuck.
     #[tokio::test]
     async fn the_guide_is_what_the_car_is_shown_until_the_phones_screen_opens() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let outlet = Arc::new(ClOutlet::new());
+        let outlet = Arc::new(Outlet::new());
         let frames = Frames::Live(outlet.clone());
 
         let car = tokio::spawn(async move {
@@ -4874,18 +4694,14 @@ mod tests {
             assert_eq!(opening_nal(&second.body), 1);
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &frames,
             &cfg,
             None,
-            &mut |_, _, _| {},
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -4896,10 +4712,9 @@ mod tests {
     /// pictures, which is the whole of the switch between the two.
     #[tokio::test]
     async fn the_phones_pictures_take_over_from_the_guide() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let outlet = Arc::new(ClOutlet::new());
+        let outlet = Arc::new(Outlet::new());
         let frames = Frames::Live(outlet.clone());
 
         let phone_picture = vec![0x00, 0x00, 0x00, 0x01, 0x41];
@@ -4921,25 +4736,18 @@ mod tests {
 
         let arriving = tokio::spawn(async move {
             let _ = guiding_rx.await;
-            outlet.sink().push(StreamEvent::ScreenActive(true));
-            outlet.sink().push(StreamEvent::VideoFrame {
-                keyframe: false,
-                data: phone_picture,
-            });
+            outlet.sink().screen(true);
+            outlet.sink().video(phone_picture);
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &frames,
             &cfg,
             None,
-            &mut |_, _, _| {},
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -4949,10 +4757,9 @@ mod tests {
 
     #[tokio::test]
     async fn every_channel_is_given_back_when_the_session_ends() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
-        let outlet = Arc::new(ClOutlet::new());
+        let outlet = Arc::new(Outlet::new());
         let frames = Frames::Live(outlet.clone());
 
         let car = tokio::spawn(async move {
@@ -4961,18 +4768,14 @@ mod tests {
             // Dropping the pipe is the car going away.
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &frames,
             &cfg,
             None,
-            &mut |_, _, _| {},
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");
@@ -4997,9 +4800,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_panel_key_is_read_rather_than_dropped_on_the_floor() {
-        let cfg = Config::default();
+        let cfg = Settings::default();
         let (device, pipe) = tokio::io::duplex(64 * 1024);
-        let mut carplay = |_: bool| {};
 
         let car = tokio::spawn(async move {
             let mut car = Car { pipe };
@@ -5010,18 +4812,14 @@ mod tests {
             car.expect_silence(Duration::from_millis(300)).await;
         });
 
+        let watched = Watched::default();
+        let ports = ports(&watched, no_tap(), Arc::new(Page::new()), Arc::new(Vehicle::default()));
         run(
             device,
             &Frames::None,
             &cfg,
             None,
-            &mut |_, _, _| {},
-            no_icon(),
-            EventSink::new(),
-            &mut carplay,
-            &no_tap(),
-            Arc::new(Status::new()),
-            Arc::new(Vehicle::default()),
+            &ports,
         )
         .await
             .expect("the session ends cleanly");

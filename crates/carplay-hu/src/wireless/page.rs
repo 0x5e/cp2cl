@@ -286,7 +286,7 @@ async fn managed(conn: &Connection) -> Result<Objects, Box<dyn std::error::Error
 /// three phones but leaves the fourth is worth more than one that clears none,
 /// and the one that failed is named rather than counted. The total is what
 /// went, so a caller that reads zero knows nothing was cleared.
-pub(crate) async fn unpair_all(adapter: &str) -> Result<usize, Failure> {
+pub async fn unpair_all(adapter: &str) -> Result<usize, Failure> {
     let conn = Connection::system().await?;
     let mut removed = 0;
     for phone in wanted(&managed(&conn).await?, adapter) {

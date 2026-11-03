@@ -23,18 +23,16 @@ use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use livi_runtime::vehicle::Vehicle;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 
-use crate::airplay::{EventSink, SharedChannel};
-use crate::config::{dt_vendor, hostname, Config};
-use crate::web::Status;
+use crate::page::Page;
+use crate::settings::Settings;
 
 use super::aio::{Context as AioContext, IoEvent};
 use super::auth;
 use super::desc;
-use super::session::{self, Frames};
+use super::session::{self, Frames, Ports};
 use super::usb::{Endpoints, Usb};
 
 /// How long to let the answer to `start accessory` leave before the device is
@@ -71,22 +69,13 @@ enum Answered {
 /// The session outlives the form the device is in — the device stays up, and only
 /// what it calls itself changes — so a session that ends leaves it ready for the
 /// next head unit rather than needing to be rebuilt.
-pub async fn run<F>(
-    cfg: Arc<Config>,
+pub async fn run(
+    settings: &Settings,
     frames: &Frames,
-    screen: session::ScreenReport<'_>,
-    channel: SharedChannel,
-    events: Arc<EventSink>,
-    carplay: &mut F,
-    desktop: &broadcast::Sender<()>,
-    status: Arc<Status>,
-    vehicle: Arc<Vehicle>,
+    ports: &Ports<'_>,
     mut replug: mpsc::Receiver<()>,
-) -> Result<()>
-where
-    F: FnMut(bool),
-{
-    let identity = desc::Identity::phone(&hostname(), &dt_vendor());
+) -> Result<()> {
+    let identity = desc::Identity::phone(&settings.name, &settings.vendor);
     let (usb, endpoints) = Usb::open(&identity)?;
     let Endpoints {
         control,
@@ -96,11 +85,11 @@ where
     // A device that is on the controller and not yet enumerated is a cable, a
     // port or a car, and saying so is what makes "nothing is happening" mean
     // something specific.
-    status.with(|s| {
+    ports.page.with(|s| {
         s.carlife.usb.controller = Some(usb.controller().to_string());
         s.carlife.usb.enumerated = Some(false);
     });
-    describe_identity(&status, &identity);
+    describe_identity(&ports.page, &identity);
 
     tracing::info!("usb.waiting_for_host");
 
@@ -114,7 +103,7 @@ where
     // skipped again, and the streams run either way. The key is Baidu's and not
     // every build is going to install it, so this is said once here and never
     // again.
-    let auth = auth::Signer::load();
+    let auth = auth::Signer::load(settings);
 
     let (events_tx, mut events_rx) = mpsc::channel(4);
     // Kept back from the task below, which owns the device: what the controller
@@ -129,7 +118,7 @@ where
         identity,
         tokio::fs::File::from_std(control),
         events_tx,
-        status.clone(),
+        ports.page.clone(),
     ));
 
     let bus = udc.clone();
@@ -150,31 +139,19 @@ where
             // thing on the channel, a session is silent, so the one that turns out
             // not to be needed costs nothing.
             Event::Enabled => {
-                status.with(|s| s.carlife.usb.enumerated = Some(true));
+                ports.page.with(|s| s.carlife.usb.enumerated = Some(true));
                 match bulk(&from_car, &to_car) {
                     Ok(pair) => {
                         // What the car negotiated, beside the fact that it
                         // configured the device: the two are what a session that
                         // never says anything has to be read against.
                         tracing::info!("usb.enumerated action=start_session {}", udc.link());
-                        let cfg = Config {
-                            screen: crate::settings::load().screen,
-                            ..(*cfg).clone()
-                        };
-                        if let Err(e) = session::run(
-                            pair,
-                            frames,
-                            &cfg,
-                            auth.clone(),
-                            &mut *screen,
-                            channel.clone(),
-                            events.clone(),
-                            carplay,
-                            desktop,
-                            status.clone(),
-                            vehicle.clone(),
-                        )
-                        .await
+                        // The page can change the size while the program runs, so
+                        // it is read again for each session.
+                        let mut settings = settings.clone();
+                        settings.screen = ports.delegate.screen_override();
+                        if let Err(e) =
+                            session::run(pair, frames, &settings, auth.clone(), ports).await
                         {
                             // A session that ends because the device left the
                             // bus is not one that failed: every transfer on a
@@ -191,11 +168,11 @@ where
                 }
             }
             Event::Disabled => {
-                status.with(|s| s.carlife.usb.enumerated = Some(false));
+                ports.page.with(|s| s.carlife.usb.enumerated = Some(false));
                 tracing::info!("usb.host_gone");
             }
             Event::Accessory => {
-                status.with(|s| s.carlife.accessory = true);
+                ports.page.with(|s| s.carlife.accessory = true);
                 tracing::info!("usb.accessory_mode state=on")
             }
         }
@@ -228,7 +205,7 @@ async fn control_loop(
     mut identity: desc::Identity,
     mut ep0: tokio::fs::File,
     events: mpsc::Sender<Event>,
-    status: Arc<Status>,
+    status: Arc<Page>,
 ) {
     loop {
         // The whole event is twelve bytes: the eight of a `usb_ctrlrequest`, the
@@ -279,7 +256,7 @@ async fn answer(
     identity: &mut desc::Identity,
     ep0: &mut tokio::fs::File,
     raw: &[u8; 12],
-    status: &Status,
+    status: &Page,
 ) -> Result<Answered> {
     let setup = desc::Setup::decode(raw).ok_or_else(|| anyhow!("a setup event with no setup packet"))?;
 
@@ -416,7 +393,7 @@ async fn switch(usb: &Usb, identity: &mut desc::Identity) -> Result<()> {
 /// Reported wherever the identity changes rather than once: the device presents
 /// two of them, and which one is on the wire is the difference between a car
 /// seeing a phone and a car seeing an accessory.
-fn describe_identity(status: &Status, identity: &desc::Identity) {
+fn describe_identity(status: &Page, identity: &desc::Identity) {
     status.with(|s| {
         s.carlife.usb.vid = Some(identity.vid);
         s.carlife.usb.pid = Some(identity.pid);

@@ -44,8 +44,9 @@ pub mod device;
 mod status;
 
 // The parts of a report that are built by name rather than by assignment. The
-// rest of the snapshot is reached through `Status::with` and never named.
-pub use status::{AccessPoint, Audio, Mic, Screen, Size, Statistic, Status};
+// rest of the answer is reached through `Status::with` and the two halves' own
+// reports.
+pub use status::Status;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -387,6 +388,14 @@ async fn not_found() -> impl IntoResponse {
 mod tests {
     use super::*;
 
+    use carlife_md::page::Size;
+
+    /// A page with both halves empty and nothing sampled yet: what is served
+    /// before a run has learned anything.
+    fn empty_status() -> Status {
+        Status::new(Arc::new(carplay_hu::report::Report::new()))
+    }
+
     /// The page and its stylesheet, as the binary carries them.
     fn page_text() -> &'static str {
         embedded(PAGE_NAME)
@@ -540,7 +549,7 @@ mod tests {
     /// to keep answering under those names.
     #[test]
     fn the_endpoint_answers_with_every_part() {
-        let status = Status::new();
+        let status = empty_status();
         let body = status.json();
         assert!(body.get("carlife").is_some());
         assert!(body.get("carplay").is_some());
@@ -568,7 +577,7 @@ mod tests {
             page_text().contains("duration_s"),
             "the page writes the length itself, from seconds"
         );
-        let body = Status::new().json();
+        let body = empty_status().json();
         assert!(body["now_playing"]["duration_s"].is_null());
     }
 
@@ -577,11 +586,11 @@ mod tests {
     /// wire, and then the page would be describing a bar that is not there.
     #[test]
     fn the_page_shows_the_bar_the_car_was_given() {
-        let status = Status::new();
+        let status = empty_status();
         assert!(status.json()["now_playing"]["progress_ms"].is_null());
         assert!(status.json()["now_playing"]["playing"].is_null());
 
-        status.with(|s| {
+        status.carlife().with(|s| {
             s.now_playing.progress_ms = Some(20_000);
             s.now_playing.playing = Some(true);
         });
@@ -589,7 +598,7 @@ mod tests {
         assert_eq!(status.json()["now_playing"]["playing"], true);
 
         // A new session starts having told the car nothing at all.
-        status.now_playing_cleared();
+        status.carlife().now_playing_cleared();
         assert!(status.json()["now_playing"]["progress_ms"].is_null());
         assert!(status.json()["now_playing"]["playing"].is_null());
 
@@ -614,29 +623,29 @@ mod tests {
     /// never reuses the name, and an empty one is no picture at all.
     #[test]
     fn a_cover_is_named_by_what_is_in_it() {
-        let status = Status::new();
+        let status = empty_status();
         assert!(status.cover().is_none(), "nothing to draw yet");
 
-        status.cover_changed(vec![0xff, 0xd8, 0xff]);
+        status.carlife().cover_changed(vec![0xff, 0xd8, 0xff]);
         let first = status.json()["now_playing"]["cover"]["id"].clone();
         assert_eq!(status.cover().map(|c| c.bytes.len()), Some(3));
 
         // The same bytes again are the same picture, so the page keeps it.
-        status.cover_changed(vec![0xff, 0xd8, 0xff]);
+        status.carlife().cover_changed(vec![0xff, 0xd8, 0xff]);
         assert_eq!(status.json()["now_playing"]["cover"]["id"], first);
 
         // Another picture is another name.
-        status.cover_changed(vec![0x42]);
+        status.carlife().cover_changed(vec![0x42]);
         assert_ne!(status.json()["now_playing"]["cover"]["id"], first);
 
         // An empty one is the phone saying this song has no picture.
-        status.cover_changed(Vec::new());
+        status.carlife().cover_changed(Vec::new());
         assert!(status.cover().is_none());
         assert!(status.json()["now_playing"]["cover"].is_null());
 
         // And a new session starts with nothing, which lets the bytes go.
-        status.cover_changed(vec![1, 2, 3]);
-        status.now_playing_cleared();
+        status.carlife().cover_changed(vec![1, 2, 3]);
+        status.carlife().now_playing_cleared();
         assert!(status.cover().is_none());
         assert!(status.json()["now_playing"]["song"].is_null());
     }
@@ -652,7 +661,7 @@ mod tests {
     async fn a_cover_is_only_served_under_its_own_name() {
         use axum::body::to_bytes;
 
-        let status = Arc::new(Status::new());
+        let status = Arc::new(empty_status());
         let ask = |query: Option<&str>| {
             cover(State(status.clone()), RawQuery(query.map(str::to_owned)))
         };
@@ -660,7 +669,7 @@ mod tests {
         // Nothing to draw yet, whatever is asked for.
         assert_eq!(ask(Some("id=0")).await.status(), StatusCode::NOT_FOUND);
 
-        status.cover_changed(vec![0xff, 0xd8, 0xff]);
+        status.carlife().cover_changed(vec![0xff, 0xd8, 0xff]);
         let name = format!("{:016x}", status.cover().unwrap().id);
 
         let answer = ask(Some(&format!("id={name}"))).await;
@@ -685,17 +694,21 @@ mod tests {
     fn the_page_reads_the_coding_from_the_answer() {
         assert!(page_text().contains("d.video"), "the page reads the field");
         assert!(!page_text().contains("H.264"), "and names no coding itself");
-        let status = Status::new();
+        let report = Arc::new(carplay_hu::report::Report::new());
+        let status = Status::new(report.clone());
         let body = status.json();
         assert_eq!(
             body["carplay"]["video"]["codec"],
-            crate::airplay::screen::CODEC,
+            carplay_hu::airplay::screen::CODEC,
             "which is what the snapshot carries"
         );
         assert!(body["carplay"]["video"]["profile"].is_null(), "nothing described yet");
-        assert_eq!(body["carlife"]["video"]["codec"], crate::airplay::screen::CODEC);
+        assert_eq!(
+            body["carlife"]["video"]["codec"],
+            carplay_hu::airplay::screen::CODEC
+        );
 
-        status.with(|s| {
+        report.with(|s| {
             s.video.profile = Some("Baseline".to_string());
             s.video.level = Some("3.1".to_string());
         });
@@ -714,8 +727,8 @@ mod tests {
             page_text().contains("d.physical"),
             "the page reads the field"
         );
-        let status = Status::new();
-        status.with(|s| s.carlife.physical = Some((407, 229)));
+        let status = empty_status();
+        status.carlife().with(|s| s.carlife.physical = Some((407, 229)));
         let body = status.json();
         assert_eq!(body["carlife"]["physical"]["width_mm"], 407);
         assert_eq!(body["carlife"]["physical"]["height_mm"], 229);
@@ -736,13 +749,13 @@ mod tests {
             "and the table is where the number comes from"
         );
 
-        let status = Status::new();
+        let status = empty_status();
         assert!(
             status.json()["carlife"]["agreed"].is_null(),
             "no screen has been named yet"
         );
 
-        status.with(|s| {
+        status.carlife().with(|s| {
             s.carlife.agreed = Some(Size {
                 width: 1920,
                 height: 720,
@@ -768,14 +781,14 @@ mod tests {
             "and the page reads the fix"
         );
 
-        let status = Status::new();
+        let status = empty_status();
         assert!(
             status.json()["carlife"]["gps"].is_null(),
             "a car that has not reported a position yet is not one at zero degrees"
         );
 
-        status.with(|s| {
-            s.carlife.gps = Some(crate::carlife::proto::CarGps {
+        status.carlife().with(|s| {
+            s.carlife.gps = Some(carlife_md::proto::CarGps {
                 antenna_state: 1,
                 latitude: 30_317_880,
                 longitude: 120_128_094,
@@ -800,14 +813,14 @@ mod tests {
             "and the page reads the speed"
         );
 
-        let status = Status::new();
+        let status = empty_status();
         assert!(
             status.json()["carlife"]["speed"].is_null(),
             "a car that has not reported a speed yet is not one at zero"
         );
 
         // Zero is a speed the car has reported, and it is shown as one.
-        status.with(|s| s.carlife.speed = Some(0));
+        status.carlife().with(|s| s.carlife.speed = Some(0));
         assert_eq!(status.json()["carlife"]["speed"], 0);
     }
 
@@ -932,7 +945,7 @@ mod tests {
             "and names the distribution the board is running on"
         );
         assert!(page_text().contains("d.kernel"), "and the kernel under it");
-        let status = Status::new();
+        let status = empty_status();
         assert!(
             status.json()["device"]["memory_total"].is_null(),
             "nothing sampled yet is not zero"

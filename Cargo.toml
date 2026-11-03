@@ -5,12 +5,25 @@ edition = "2021"
 description = "Headless CarPlay receiver that hands an iPhone's streams to a CarLife head unit"
 license = "GPL-3.0-or-later"
 
+# The two halves of the bridge live in their own crates: see `crates/`. They do
+# not share one, and this package is the program — it wires them together and
+# owns everything that is about the board rather than either end.
+#
+# `vendor` is excluded because the submodule's own Rust is a workspace of its
+# own; without this line Cargo would try to make its twenty crates members here.
+[workspace]
+members = ["crates/*"]
+exclude = ["vendor"]
+resolver = "2"
+
 # The LIVI crates come from the `vendor/LIVI` submodule, pinned to the
 # `feature/cp2cl-10.1` branch. LIVI's repository root is an app; its Rust lives
 # under `native/`, and every crate sits flat under `native/crates`. See README
 # "Depending on LIVI".
 
 [dependencies]
+carlife-md = { path = "crates/carlife-md" }
+carplay-hu = { path = "crates/carplay-hu" }
 livi-runtime = { path = "vendor/LIVI/native/crates/livi-runtime" }
 iap2-link = { path = "vendor/LIVI/native/crates/iap2-link" }
 iap2-wired = { path = "vendor/LIVI/native/crates/iap2-wired" }

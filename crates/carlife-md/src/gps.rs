@@ -15,7 +15,7 @@
 //! A car that loses its fix does not fall silent, and neither does this: the
 //! pair is sent again with nothing in it — see `no_fix`.
 
-use super::proto::CarGps;
+use crate::proto::CarGps;
 
 /// The two sentences for one fix, or `None` when the car has no fix to give.
 ///

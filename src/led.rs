@@ -136,18 +136,10 @@ impl Phase {
     }
 }
 
-/// How far a phone has got, which is the last of the three facts.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Carplay {
-    /// No phone, or none that has reached the receiver.
-    #[default]
-    Idle,
-    /// A phone has opened the receiver. Whether it will get anywhere is not
-    /// known yet.
-    Connecting,
-    /// The phone's screen is arriving.
-    Linked,
-}
+/// How far a phone has got, which is the last of the three facts. It is the
+/// CarPlay half's own answer rather than a copy of it: that half is the only
+/// place that knows, and a second spelling here would be one to keep in step.
+pub use carplay_hu::link::Link;
 
 /// What the lights are told, and the whole of what decides what they show.
 ///
@@ -163,7 +155,7 @@ pub struct Facts {
     /// information, which is past enumeration and past the point where the
     /// cable alone would be enough.
     pub carlife: bool,
-    pub carplay: Carplay,
+    pub carplay: Link,
 }
 
 impl Facts {
@@ -176,9 +168,9 @@ impl Facts {
     /// `Waiting` because that is what is left, not because anybody said so.
     fn phase(self) -> Phase {
         match (self.radios, self.carlife, self.carplay) {
-            (true, true, Carplay::Linked) => Phase::Linked,
-            (true, true, Carplay::Connecting) => Phase::Connecting,
-            (true, true, Carplay::Idle) => Phase::Standby,
+            (true, true, Link::Linked) => Phase::Linked,
+            (true, true, Link::Connecting) => Phase::Connecting,
+            (true, true, Link::Idle) => Phase::Standby,
             (true, false, _) => Phase::Waiting,
             (false, _, _) => Phase::Init,
         }
@@ -244,7 +236,7 @@ impl Signals {
     }
 
     /// How far the phone has got.
-    pub fn carplay(&self, state: Carplay) {
+    pub fn carplay(&self, state: Link) {
         self.facts.send_if_modified(|facts| {
             let changed = facts.carplay != state;
             facts.carplay = state;
@@ -254,7 +246,7 @@ impl Signals {
 
     /// How far the phone has got, read back by the one caller that has to tell
     /// a phone that has gone from one that never arrived.
-    pub fn phone(&self) -> Carplay {
+    pub fn phone(&self) -> Link {
         self.facts.borrow().carplay
     }
 }
@@ -465,21 +457,21 @@ mod tests {
             carlife,
             carplay,
         };
-        assert_eq!(facts(true, true, Carplay::Linked).phase(), Phase::Linked);
+        assert_eq!(facts(true, true, Link::Linked).phase(), Phase::Linked);
         assert_eq!(
-            facts(true, true, Carplay::Connecting).phase(),
+            facts(true, true, Link::Connecting).phase(),
             Phase::Connecting
         );
-        assert_eq!(facts(true, true, Carplay::Idle).phase(), Phase::Standby);
+        assert_eq!(facts(true, true, Link::Idle).phase(), Phase::Standby);
         // The car gone takes the phone's state with it: nothing is being handed
         // to a head unit that is not there.
-        for carplay in [Carplay::Idle, Carplay::Connecting, Carplay::Linked] {
+        for carplay in [Link::Idle, Link::Connecting, Link::Linked] {
             assert_eq!(facts(true, false, carplay).phase(), Phase::Waiting);
         }
-        for carplay in [Carplay::Idle, Carplay::Linked] {
+        for carplay in [Link::Idle, Link::Linked] {
             assert_eq!(facts(false, false, carplay).phase(), Phase::Init);
         }
-        assert_eq!(facts(false, true, Carplay::Linked).phase(), Phase::Init);
+        assert_eq!(facts(false, true, Link::Linked).phase(), Phase::Init);
     }
 
     /// The rates are the requirement, and they are the one thing here that a

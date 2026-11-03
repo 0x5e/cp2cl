@@ -101,7 +101,7 @@ pub async fn watch(adapter: String, replug: mpsc::Sender<()>) {
 async fn unpair_phones(adapter: &str, replug: &mpsc::Sender<()>) {
     // A count of zero is a press that could not clear anything, which the
     // per-device line inside `unpair_all` is the detail of.
-    match crate::wireless::unpair_all(adapter).await {
+    match carplay_hu::wireless::unpair_all(adapter).await {
         Ok(count) => tracing::info!("bt.unpaired count={count} adapter={adapter}"),
         Err(e) => tracing::warn!("bt.unpaired_unavailable adapter={adapter} err={e}"),
     }

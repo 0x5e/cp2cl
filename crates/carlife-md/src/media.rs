@@ -1,0 +1,24 @@
+//! What the media and Navi TTS channels carry.
+//!
+//! The camera side takes PCM, so the format travels on the queue with the
+//! samples rather than being a fixed property of the channel.
+
+/// One item for the car's media channel (`MSG_MEDIA_*`).
+#[derive(Debug)]
+pub enum Media {
+    Format { rate: u32, channels: u16 },
+    /// 16-bit signed little-endian PCM in the format above.
+    Pcm { timestamp_ms: u32, data: Vec<u8> },
+    Ended,
+}
+
+/// One item for the car's Navi TTS channel (`MSG_NAVI_TTS_*`).
+///
+/// Same shape as `Media`. `Ended` is also sent on a timeout: a head unit that
+/// took the channel up holds the music down until it hears the prompt is over.
+#[derive(Debug)]
+pub enum Navi {
+    Format { rate: u32, channels: u16 },
+    Pcm { timestamp_ms: u32, data: Vec<u8> },
+    Ended,
+}

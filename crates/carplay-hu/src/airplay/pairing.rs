@@ -104,8 +104,9 @@ pub struct Pairings {
 }
 
 impl Pairings {
-    pub fn load_or_create() -> std::io::Result<Self> {
-        let path = crate::config::data_dir()?.join("pairings.json");
+    pub fn load_or_create(dir: &std::path::Path) -> std::io::Result<Self> {
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join("pairings.json");
 
         if let Ok(text) = std::fs::read_to_string(&path) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {

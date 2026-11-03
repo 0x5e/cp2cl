@@ -1,0 +1,30 @@
+[package]
+name = "carlife-md"
+version = "0.14.0"
+edition = "2021"
+description = "The CarLife mobile-device end of cp2cl: an accessory a head unit can plug into"
+license = "GPL-3.0-or-later"
+publish = false
+
+[dependencies]
+# `Track`/`Position` read the phone's NowPlayingUpdate. They move to the CarPlay
+# half once that side is a crate of its own; until then this is where it sits.
+iap2-csm = { path = "../../vendor/LIVI/native/crates/iap2-csm" }
+# `Vehicle` is where the car's position goes, and it is the same object the
+# CarPlay half hands to the phone.
+livi-runtime = { path = "../../vendor/LIVI/native/crates/livi-runtime" }
+tokio = { version = "1", features = ["fs", "net", "io-util", "sync", "time", "macros", "rt"] }
+futures-util = "0.3"
+anyhow = "1"
+# The car's challenge is answered with the phone's own RSA key.
+rsa = "0.9"
+base64 = "0.22"
+# The car stamps its own reports, and a stamp is turned into a date.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+# Mounting the FunctionFS instance is one syscall each.
+libc = "0.2"
+tracing = "0.1"
+serde_json = "1"
+
+[dev-dependencies]
+rand = "0.8"

@@ -40,11 +40,11 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::artwork::{self, Fitted};
-use crate::carlife::proto;
-use crate::config::{bt_address, hostname, Config};
-use crate::playing::{Playing, Position, Track};
-use crate::sink::ClSink;
-use crate::web::Status;
+use crate::link::Panel;
+use crate::now_playing::{NowPlaying, Position, Track};
+use crate::options::Options;
+use crate::report::Report;
+use crate::Hu;
 use crate::wireless::{parse_mac, short};
 
 /// How often we ask who is attached. Cheap enough that a second is not rude, and
@@ -146,17 +146,16 @@ async fn carkit(mux: &Arc<iap2_usbmux::MuxDevice>) -> anyhow::Result<Box<dyn ide
 /// `accessory_key` is the AirPlay identity's public key in hex: the start
 /// session names it so the phone recognises the accessory on the cable as the
 /// one it paired with.
-pub async fn watch(
-    cfg: Arc<Config>,
-    auth: SharedCoprocessor,
-    airplay_port: u32,
-    accessory_key: String,
-    restart: broadcast::Sender<()>,
-    mut gate: tokio::sync::watch::Receiver<bool>,
-    panel: Arc<ClSink>,
-    status: Arc<Status>,
-    vehicle: Arc<Vehicle>,
-) {
+pub(crate) async fn watch(hu: &Arc<Hu>) {
+    let cfg = hu.options.clone();
+    let auth = hu.mfi.clone();
+    let airplay_port = hu.airplay_port;
+    let accessory_key = hu.accessory_key.clone();
+    let restart = hu.restart.clone();
+    let panel = hu.panel.clone();
+    let status = hu.status.clone();
+    let vehicle = hu.vehicle.clone();
+    let mut gate = hu.gate.clone();
     let mut busy: Option<String> = None;
     loop {
         while !*gate.borrow() {
@@ -230,14 +229,14 @@ pub async fn watch(
 /// the accessory's answer to the phone's own `CarPlayAvailability`, and a phone
 /// that has already started CarPlay has no question outstanding.
 async fn attach(
-    cfg: &Config,
+    cfg: &Options,
     auth: SharedCoprocessor,
     phone: &Phone,
     airplay_port: u32,
     accessory_key: &str,
     restart: &broadcast::Sender<()>,
-    panel: &Arc<ClSink>,
-    status: &Status,
+    panel: &Arc<dyn Panel>,
+    status: &Report,
     vehicle: &Arc<Vehicle>,
 ) -> anyhow::Result<Ended> {
     // Subscribed before anything opens, so a display change made while the
@@ -268,9 +267,9 @@ async fn attach(
         tracing::info!("carplay.carkit_up phone={} action=start_iap2", short(&phone.id));
 
         let identity = Identity {
-            name: hostname(),
-            ssid: hostname(),
-            bt_mac: parse_mac(&bt_address(&cfg.bt_adapter)),
+            name: cfg.name.clone(),
+            ssid: cfg.name.clone(),
+            bt_mac: parse_mac(&cfg.bt_address),
             fuels: Fuels::default(),
             // The board is not an EV and has no charge port to describe.
             plugs: Plugs::default(),
@@ -295,11 +294,11 @@ async fn attach(
         // The cover art is a file transfer of its own on the same link, so it is
         // carried across as it lands rather than waited for: the update that
         // names the song says only that art is coming.
-        let carrying = tokio::spawn(carry_artwork(artwork, panel.clone()));
+        let carrying = tokio::spawn(carry_artwork(artwork, panel.clone(), cfg.cover_limit));
 
         let cp = CpConfig {
             wifi_iface: String::new(),
-            ssid: hostname(),
+            ssid: cfg.name.clone(),
             passphrase: "00000000".into(),
             channel: Channel::of_number(36),
             airplay_port,
@@ -398,7 +397,7 @@ async fn attach(
 /// leaves alone.
 ///
 /// `status` is told how far the conversation got, which is the only place any of
-/// these steps is known: see `crate::web::status`.
+/// these steps is known: see `crate::report`.
 pub(crate) async fn run_bringup(
     peer: &str,
     transport: &str,
@@ -406,8 +405,8 @@ pub(crate) async fn run_bringup(
     ssid: Option<&str>,
     mut rx: mpsc::Receiver<BringupEvent>,
     changed: &mut broadcast::Receiver<()>,
-    panel: &ClSink,
-    status: &Status,
+    panel: &Arc<dyn Panel>,
+    status: &Report,
 ) -> Ended {
     loop {
         let event = tokio::select! {
@@ -488,12 +487,12 @@ pub(crate) async fn run_bringup(
                     if let Some(line) = said(&track) {
                         tracing::debug!("carplay.now_playing {line}");
                     }
-                    panel.playing(Playing::Track(track));
+                    panel.playing(NowPlaying::Track(track));
                     // Where in the song it is rides on the same message but
                     // goes to the car as a message of its own: see
-                    // `Playing::Position`.
+                    // `NowPlaying::Position`.
                     if let Some(position) = Position::from_iap2(&frame) {
-                        panel.playing(Playing::Position(position));
+                        panel.playing(NowPlaying::Position(position));
                     }
                 }
                 // A song this side cannot read is one the panel is never told
@@ -552,7 +551,11 @@ fn said(track: &Track) -> Option<String> {
 /// all. It is done here rather than on the CarLife side so that the decoding and
 /// the encoding happen off the task that writes the streams: tens of
 /// milliseconds is long enough to be felt in the video.
-pub(crate) async fn carry_artwork(mut artwork: ArtworkRx, panel: Arc<ClSink>) {
+pub(crate) async fn carry_artwork(
+    mut artwork: ArtworkRx,
+    panel: Arc<dyn Panel>,
+    budget: usize,
+) {
     // An app that re-announces the song it is playing sends its cover again, and
     // the same picture is not worth decoding twice. The picture is still handed
     // over — the CarLife side drops one it is already holding — but the work is
@@ -565,7 +568,6 @@ pub(crate) async fn carry_artwork(mut artwork: ArtworkRx, panel: Arc<ClSink>) {
             Some((before, fitted)) if *before == seen => fitted.clone(),
             _ => {
                 let started = Instant::now();
-                let budget = proto::MAX_ART;
                 // A join error means the task panicked, or the runtime is going
                 // away with the session. Either way there is no picture to hand
                 // over, and the next cover is still worth carrying.
@@ -583,7 +585,7 @@ pub(crate) async fn carry_artwork(mut artwork: ArtworkRx, panel: Arc<ClSink>) {
 
         match fitted {
             Fitted::AsIs(bytes) | Fitted::Shrunk { bytes, .. } => {
-                panel.playing(Playing::Artwork(bytes))
+                panel.playing(NowPlaying::Artwork(bytes))
             }
             // The panel is better left with the song it has than with a picture
             // the car would refuse the message over.
@@ -812,7 +814,17 @@ async fn av_interface() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sink::ClOutlet;
+
+    /// Where a carried cover ends up: a list of its own, standing in for the
+    /// panel on the other side of the bridge.
+    #[derive(Default)]
+    struct Collected(Mutex<Vec<NowPlaying>>);
+
+    impl Panel for Collected {
+        fn playing(&self, item: NowPlaying) {
+            self.0.lock().expect("a cover").push(item);
+        }
+    }
 
     /// The line says what the phone said, and only that: an update that
     /// mentions one field is one pair, not five with four of them empty. One
@@ -835,10 +847,9 @@ mod tests {
     /// reaches the CarLife side, and the ones either side of it still do.
     #[tokio::test]
     async fn a_cover_the_car_cannot_take_never_reaches_it() {
-        let outlet = Arc::new(ClOutlet::new());
-        let mut told = outlet.take_playing().expect("the queue");
+        let panel = Arc::new(Collected::default());
         let (tx, rx) = mpsc::unbounded_channel();
-        let carrying = tokio::spawn(carry_artwork(rx, outlet.sink()));
+        let carrying = tokio::spawn(carry_artwork(rx, panel.clone(), 10 * 1024));
 
         // Three bytes of a JPEG: small enough to go as it is.
         let fits = vec![0xff, 0xd8, 0xff];
@@ -847,13 +858,17 @@ mod tests {
         tx.send(vec![0x42; 40 * 1024]).expect("a cover");
         tx.send(fits.clone()).expect("a cover");
 
-        for _ in 0..2 {
-            let item = told.recv().await.expect("a cover");
-            assert_eq!(item, Playing::Artwork(fits.clone()));
-        }
-        assert!(told.try_recv().is_err(), "nothing else was carried");
-
         drop(tx);
         carrying.await.expect("the task ends with the link");
+
+        let carried = panel.0.lock().expect("a cover").clone();
+        assert_eq!(
+            carried,
+            vec![
+                NowPlaying::Artwork(fits.clone()),
+                NowPlaying::Artwork(fits)
+            ],
+            "the two that fit went through and the one that did not was dropped"
+        );
     }
 }

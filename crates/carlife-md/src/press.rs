@@ -1,22 +1,13 @@
-//! The vocabulary of input.
+//! The vocabulary of input, as the car produces it.
 //!
-//! Nothing here parses anything: whoever has an input event — the CarLife
-//! session, which is where touch and panel keys come from — turns it into one of
-//! these. `event.rs` is the only place that knows how each one reaches the phone.
-//!
-//! The CarLife protocol has no control that means `KeyFrame` or `Night` — a head
-//! unit sends panel keys and touch. `Night` is the operator's and `KeyFrame` is
-//! the session asking the phone for a whole picture when the car starts its
-//! encoder again; a knob's `selector` key is a `Wheel` tick. The allow below is
-//! for the variants nothing builds.
+//! The CarLife session turns touch reports and panel keys into these; what
+//! happens to one afterwards is the host's business. `KeyFrame` has no CarLife
+//! control behind it — it is the session asking for a whole picture. `Night` is
+//! the operator's. Both are kept so a command has one spelling on both sides.
 #![allow(dead_code)]
 
-/// One finger in a touch report, in the display's own pixel space.
-///
-/// The phone tracks a finger by the slot it is reported in, not by an id, so a
-/// contact that vanishes between two reports has to leave its slot empty rather
-/// than be dropped from the list — `down: false` is what says "this slot is
-/// free".
+/// One finger in a touch report, in the display's pixel space. A slot with
+/// `down: false` is empty rather than absent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TouchContact {
     pub down: bool,

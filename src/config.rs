@@ -28,13 +28,6 @@ use tracing::level_filters::LevelFilter;
 /// directory — see `buildroot/package/cp2cl`.
 pub const DATA_DIR: &str = "/etc/cp2cl";
 
-/// `DATA_DIR`, created if the first run has not made it yet.
-pub fn data_dir() -> std::io::Result<PathBuf> {
-    let dir = PathBuf::from(DATA_DIR);
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
-}
-
 /// One of the files that live in `DATA_DIR`, by its bare name.
 ///
 /// Not created, only named: what is read here is put there by the build or by an

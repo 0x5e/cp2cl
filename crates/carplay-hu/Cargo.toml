@@ -1,0 +1,65 @@
+[package]
+name = "carplay-hu"
+version = "0.14.0"
+edition = "2021"
+description = "The CarPlay head-unit end of cp2cl: an iAP2 accessory and the AirPlay receiver the phone mirrors to"
+license = "GPL-3.0-or-later"
+publish = false
+
+[dependencies]
+# The iAP2 side: the wired accessory, the wireless mux, and the two protocols
+# above both.
+iap2-link = { path = "../../vendor/LIVI/native/crates/iap2-link" }
+iap2-wired = { path = "../../vendor/LIVI/native/crates/iap2-wired" }
+iap2-usbmux = { path = "../../vendor/LIVI/native/crates/iap2-usbmux" }
+livi-runtime = { path = "../../vendor/LIVI/native/crates/livi-runtime" }
+# `CpConfig::channel` is a `livi_wifi::Channel`, and LIVI does not re-export it.
+livi-wifi = { path = "../../vendor/LIVI/native/crates/livi-wifi" }
+# Paging a paired phone is one BlueZ D-Bus call.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+# Needed directly to name `idevice::ReadWrite` in our own function signatures.
+idevice = "0.1"
+
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+
+# The phone's music arrives as AAC-LC and a prompt as Opus; the car's media and
+# TTS channels take PCM, so both are decoded on the way past.
+symphonia = { version = "0.5", default-features = false, features = ["aac"] }
+rusty-opus = "1"
+
+# A cover that will not fit the car's message is re-encoded before it is sent.
+zune-jpeg = "0.5"
+zune-png = "0.5"
+zune-core = "0.5"
+jpeg-encoder = "0.7"
+kamadak-exif = "0.6"
+
+# AirPlay's control and media are sealed with ChaCha20-Poly1305 over keys from
+# an X25519 + Ed25519 handshake.
+x25519-dalek = { version = "2", features = ["static_secrets", "getrandom"] }
+ed25519-dalek = "2"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+
+# pair-setup is SRP-6a over the RFC 5054 3072-bit group with SHA-512.
+num-bigint = "0.4"
+
+# /auth-setup (MFiSAP) seals the coprocessor's signature with AES-128-CTR, and
+# 2.0-class accessories digest the two public keys with SHA-1.
+aes = "0.8"
+ctr = "0.9"
+sha1 = "0.10"
+
+# `/info` is a binary property list, and the event channel is too.
+plist = "1"
+
+iap2-csm = { path = "../../vendor/LIVI/native/crates/iap2-csm" }
+
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+serde_json = "1"
+hex = "0.4"

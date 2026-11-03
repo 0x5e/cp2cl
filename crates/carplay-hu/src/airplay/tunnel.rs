@@ -40,10 +40,10 @@ use tokio::task::JoinHandle;
 
 use super::crypto::{hkdf32, open_frames, SymKey};
 use super::event::EventSink;
-use crate::config::{bt_address, Config};
+use crate::link::Panel;
+use crate::options::Options;
+use crate::report::Report;
 use crate::session::{carry_artwork, run_bringup, Ended};
-use crate::sink::ClSink;
-use crate::web::Status;
 use crate::wireless::{session_params, short, Handover, SessionParams};
 
 /// The DataStream the phone names when it means the iAP2 channel. Type 130 is
@@ -71,8 +71,8 @@ const PEER_WAIT: Duration = Duration::from_secs(15);
 /// the stream rather than held from startup: hostapd's file is what that half
 /// read a moment ago, and the two have to agree or the phone is being offered a
 /// different accessory from the one it is already talking to.
-pub(crate) struct Setup {
-    pub cfg: Arc<Config>,
+pub struct Setup {
+    pub cfg: Arc<Options>,
     pub auth: SharedCoprocessor,
     /// The AirPlay identity's public key, hex, which the start session names so
     /// the phone recognises the accessory on this stream as the one it paired
@@ -80,9 +80,9 @@ pub(crate) struct Setup {
     /// using, so both halves of the session describe the same key.
     pub accessory_key: String,
     pub airplay_port: u32,
-    pub panel: Arc<ClSink>,
+    pub panel: Arc<dyn Panel>,
     pub vehicle: Arc<Vehicle>,
-    pub status: Arc<Status>,
+    pub status: Arc<Report>,
     pub events: Arc<EventSink>,
     pub handover: Arc<Handover>,
     /// Fires when what the phone renders changes. The AirPlay session ends on
@@ -144,7 +144,7 @@ impl Tunnel {
         let params = session_params(
             &setup.cfg,
             setup.airplay_port,
-            crate::wireless::parse_mac(&bt_address(&setup.cfg.bt_adapter)),
+            crate::wireless::parse_mac(&setup.cfg.bt_address),
             &setup.accessory_key,
         )
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
@@ -227,7 +227,7 @@ impl Tunnel {
             ..LinkConfig::default()
         };
         let (channel, artwork) = spawn_link_stream(link_side, link_config, true);
-        let carrying = tokio::spawn(carry_artwork(artwork, setup.panel.clone()));
+        let carrying = tokio::spawn(carry_artwork(artwork, setup.panel.clone(), setup.cfg.cover_limit));
 
         let (tx, rx) = mpsc::channel(64);
         let auth = setup.auth.clone();

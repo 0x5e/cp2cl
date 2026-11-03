@@ -30,7 +30,7 @@ use super::crypto::{open_frames, seal_frames, SymKey};
 use super::info::{KNOB_HID_UID, MAIN_UUID, MEDIA_HID_UID, TELEPHONY_HID_UID, TOUCH_HID_UID};
 use super::server::ended;
 use super::rtsp;
-use crate::commands::{self, Command, TouchContact};
+use crate::press::{Command, TouchContact};
 
 /// How far the absolute X/Y axes deflect: a full throw in one direction. The
 /// phone reads an absolute axis as a position, so a full throw scrolls many
@@ -288,7 +288,7 @@ impl<W: AsyncWrite + Unpin> EventChannel<W> {
 
     /// Runs one parsed key press, including the release the phone expects.
     pub async fn key(&mut self, cmd: Command) -> std::io::Result<()> {
-        use commands::*;
+        use crate::press::*;
 
         // A command that works otherwise leaves no trace: the phone's `200` is
         // filtered out by `pump_events` as chatter, so only failures reach the

@@ -40,4 +40,4 @@ pub(crate) mod tunnel;
 
 pub use self::event::EventSink;
 pub use self::mic::MicSink;
-pub use self::server::{serve, AudioClock, ScreenParams, Shared, SharedChannel, SharedScreen};
+pub use self::server::{AudioClock, Hu, ScreenParams, SharedChannel, SharedScreen};

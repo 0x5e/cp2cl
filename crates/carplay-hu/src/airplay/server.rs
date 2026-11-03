@@ -29,10 +29,12 @@ use super::pairing::{PairSetup, PairVerify, Pairings, VerifyKeys};
 use super::rtsp::{self, Request, Response, OCTET_CONTENT_TYPE, PAIRING_CONTENT_TYPE};
 use super::screen::{self, VideoReceiver};
 use super::tunnel;
-use crate::config::{bt_address, dt_vendor, hostname, Config};
-use crate::led::{Carplay, Signals};
+use crate::link::{Delegate, Link, Panel};
+use crate::wireless::Handover;
+use livi_runtime::vehicle::Vehicle;
+use crate::options::Options;
 use crate::sink::{AudioCodec, MediaSink, StreamEvent, StreamId};
-use crate::web::{Audio, Mic, Screen, Status};
+use crate::report::{Audio, Mic, Report, Screen};
 
 /// What a coding is called on the page. `AudioCodec`'s own `Debug` is a struct
 /// dump, which is not a thing to put in front of someone.
@@ -298,9 +300,13 @@ pub type SharedScreen = Arc<std::sync::Mutex<Option<ScreenParams>>>;
 /// one, and the default icon stands.
 pub type SharedChannel = Arc<std::sync::Mutex<Option<String>>>;
 
-/// Everything the airplay side needs, owned once and shared per connection.
-pub struct Shared {
-    pub cfg: Arc<Config>,
+/// Everything the half needs, owned once and shared by every part of it.
+///
+/// Built by the program and handed over whole: there is one of these per run, and
+/// every other module takes a borrow of it rather than a list of the pieces it
+/// happens to want.
+pub struct Hu {
+    pub options: Arc<Options>,
     pub pairings: Arc<Mutex<Pairings>>,
     pub video_sink: Arc<dyn MediaSink>,
     pub audio_sink: Arc<dyn MediaSink>,
@@ -339,16 +345,33 @@ pub struct Shared {
     /// bidirectional audio, and where audio captured at this end goes.
     pub mic: Arc<MicSink>,
     /// Where the status page reads this half from. Reported to and never read
-    /// back: see `crate::web::status`.
-    pub status: Arc<Status>,
-    /// What the board's status light shows. How far a phone got is the one fact
-    /// in it that this side of the bridge is the only source of, and it is
-    /// reported rather than acted on: the light reads the whole answer.
-    pub led: Arc<Signals>,
+    /// back: see `crate::report`.
+    pub status: Arc<Report>,
+    /// What the program is told as a phone arrives and gets further. How far it
+    /// got is the one fact in it that this side of the bridge is the only source
+    /// of, and it is reported rather than acted on.
+    pub delegate: Arc<dyn Delegate>,
+    /// Where what the phone is playing goes, which is the car's panel.
+    pub panel: Arc<dyn Panel>,
+    /// Where the car's position goes, for the phone to read.
+    pub vehicle: Arc<Vehicle>,
+    /// The AirPlay identity's public key, hex, which the start session names so
+    /// the phone recognises the accessory on the cable — or on the tunnel — as
+    /// the one it paired with.
+    pub accessory_key: String,
+    /// The port the receiver listens on. Fixed for the life of a run.
+    pub airplay_port: u32,
+    /// The gate that stops Bluetooth being paged once a wireless phone has
+    /// moved its control channel onto the tunnel.
+    pub handover: Arc<Handover>,
     /// What a type 130 stream needs to become an iAP2 session. `None` on a wired
     /// run: there is no second transport to move the control channel to, so the
     /// stream is answered with a port nobody listens on, exactly as before.
     pub tunnel: Option<Arc<tunnel::Setup>>,
+    /// The socket the receiver accepts on, taken out once by `serve`.
+    pub listener: std::sync::Mutex<Option<TcpListener>>,
+    /// Whether the half is open for business at all, as the car's session says.
+    pub gate: watch::Receiver<bool>,
 }
 
 /// Accepts connections and runs each one to completion.
@@ -360,7 +383,12 @@ pub struct Shared {
 /// what is already running is dropped as well — that is what makes the phone's
 /// CarPlay session end when the car's CarLife session does, which is the
 /// behaviour the bridge is supposed to have.
-pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Receiver<bool>) {
+impl Hu {
+pub async fn serve(self: &Arc<Self>) {
+    let Some(listener) = self.listener.lock().ok().and_then(|mut held| held.take()) else {
+        return;
+    };
+    let mut gate = self.gate.clone();
     // Which connection is the current one, as a number that only goes up. A
     // phone that drops off the network and comes straight back leaves its old
     // connection behind — half open and silent — and that session must not go on
@@ -384,32 +412,32 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                         return;
                     }
                 };
-                let status = shared.status.clone();
+                let status = self.status.clone();
                 tracing::info!("carplay.airplay.connected peer={peer}");
                 status.with(|s| s.carplay.airplay.peer = Some(peer.to_string()));
-                shared.led.carplay(Carplay::Connecting);
+                self.delegate.carplay(Link::Connecting);
                 let serial = newest.fetch_add(1, Ordering::SeqCst) + 1;
                 let current = newest.clone();
-                *shared.timing.lock().await = SyncedClock::new();
-                shared.audio_clock.lock().await.forget_streams();
-                let cfg = shared.cfg.clone();
-                let screen = shared.screen.clone();
-                let channel = shared.channel.clone();
-                let desktop = shared.desktop.clone();
-                let restart = shared.restart.subscribe();
-                let restart_tx = shared.restart.clone();
-                let shutdown = shared.shutdown.subscribe();
-                let pairings = shared.pairings.clone();
-                let video_sink = shared.video_sink.clone();
-                let audio_sink = shared.audio_sink.clone();
-                let codec = shared.audio_codec.clone();
-                let event_sink = shared.event_sink.clone();
-                let mic = shared.mic.clone();
-                let mfi = shared.mfi.clone();
-                let audio_clock = shared.audio_clock.clone();
-                let timing = shared.timing.clone();
-                let tunnel_setup = shared.tunnel.clone();
-                let led = shared.led.clone();
+                *self.timing.lock().await = SyncedClock::new();
+                self.audio_clock.lock().await.forget_streams();
+                let cfg = self.options.clone();
+                let screen = self.screen.clone();
+                let channel = self.channel.clone();
+                let desktop = self.desktop.clone();
+                let restart = self.restart.subscribe();
+                let restart_tx = self.restart.clone();
+                let shutdown = self.shutdown.subscribe();
+                let pairings = self.pairings.clone();
+                let video_sink = self.video_sink.clone();
+                let audio_sink = self.audio_sink.clone();
+                let codec = self.audio_codec.clone();
+                let event_sink = self.event_sink.clone();
+                let mic = self.mic.clone();
+                let mfi = self.mfi.clone();
+                let audio_clock = self.audio_clock.clone();
+                let timing = self.timing.clone();
+                let tunnel_setup = self.tunnel.clone();
+                let delegate = self.delegate.clone();
 
                 tokio::spawn(async move {
                     let mut session = Session {
@@ -452,7 +480,7 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                         serial,
                         newest: current,
                         status,
-                        led,
+                        delegate,
                     };
                     if let Err(e) = session.run(socket).await {
                         tracing::info!("carplay.airplay.ended peer={peer} err={e}");
@@ -465,8 +493,8 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                     // The phone has gone. If the car went first, the light is
                     // already down to waiting and has to stay there; otherwise
                     // it is back to the car on its own.
-                    if matches!(session.led.phone(), Carplay::Connecting | Carplay::Linked) {
-                        session.led.carplay(Carplay::Idle);
+                    if matches!(session.delegate.link(), Link::Connecting | Link::Linked) {
+                        session.delegate.carplay(Link::Idle);
                     }
                 });
             }
@@ -476,11 +504,12 @@ pub async fn serve(listener: TcpListener, shared: Shared, mut gate: watch::Recei
                 }
                 if !*gate.borrow() {
                     tracing::info!("carplay.airplay.closed reason=car_session_ended");
-                    let _ = shared.shutdown.send(());
+                    let _ = self.shutdown.send(());
                 }
             }
         }
     }
+}
 }
 
 /// What is told to the phone for a stream we do not actually open.
@@ -588,7 +617,7 @@ struct Pump {
 }
 
 struct Session {
-    cfg: Arc<Config>,
+    cfg: Arc<Options>,
     /// What the car asked for, if it has asked. Read when answering `/info`.
     screen: SharedScreen,
     /// Which channel the car's head unit is, if it has said. Read when
@@ -668,11 +697,11 @@ struct Session {
     serial: u64,
     newest: Arc<AtomicU64>,
     /// Where the status page reads this connection from. Reported to and never
-    /// read back: see `crate::web::status`.
-    status: Arc<Status>,
+    /// read back: see `crate::report`.
+    status: Arc<Report>,
     /// What the board's status light is told, so that the connection this
     /// session is can be seen from across a room.
-    led: Arc<Signals>,
+    delegate: Arc<dyn Delegate>,
 }
 
 /// Why a session stopped waiting for the phone to say something.
@@ -1014,9 +1043,9 @@ impl Session {
             });
         });
         let plist = info::build(&info::Static {
-            bt_mac: bt_address(&self.cfg.bt_adapter),
-            name: hostname(),
-            manufacturer: dt_vendor(),
+            bt_mac: self.cfg.bt_address.clone(),
+            name: self.cfg.name.clone(),
+            manufacturer: self.cfg.vendor.clone(),
             width,
             height,
             fps,
@@ -1495,7 +1524,7 @@ impl Session {
                     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
                     let sink = self.video_sink.clone();
                     let status = self.status.clone();
-                    let led = self.led.clone();
+                    let delegate = self.delegate.clone();
                     let task = tokio::spawn(async move {
                         let Ok((socket, _)) = listener.accept().await else {
                             return;
@@ -1507,7 +1536,7 @@ impl Session {
                         // goes steady here rather than at pair-verify, because
                         // a handshake that stalls would leave a phone that is
                         // not being mirrored looking connected.
-                        led.carplay(Carplay::Linked);
+                        delegate.carplay(Link::Linked);
                         Self::pump_video(socket, key, sink, status).await;
                     });
                     self.open_pump(
@@ -1831,7 +1860,7 @@ impl Session {
         socket: TcpStream,
         key: SymKey,
         sink: Arc<dyn MediaSink>,
-        status: Arc<Status>,
+        status: Arc<Report>,
     ) {
         let mut rx = VideoReceiver::new(key, sink.clone());
         sink.push(StreamEvent::ScreenActive(true));
@@ -1894,7 +1923,7 @@ impl Session {
         sink: Arc<dyn MediaSink>,
         clock: Arc<Mutex<AudioClock>>,
         id: u64,
-        status: Arc<Status>,
+        status: Arc<Report>,
     ) {
         let stream_type = stream.stream_type;
         let mut rx = AudioReceiver::new(key, stream, codec, name, sink.clone());

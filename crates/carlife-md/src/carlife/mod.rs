@@ -16,16 +16,15 @@
 //! in-memory pipe. `usb`, `gadget` and `aio` are the ones that need the board.
 
 pub mod auth;
-pub mod desc;
-pub mod frame;
-pub mod gps;
 pub mod guide;
-pub mod names;
-pub mod proto;
 pub mod session;
 
 mod aio;
 pub mod gadget;
 pub mod usb;
+
+// The protocol layers and the device descriptor sit at the crate root; named
+// here so `carlife::proto` and friends keep their meaning.
+pub use crate::{desc, frame, gps, names, proto};
 
 pub use gadget::run as serve;

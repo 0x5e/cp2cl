@@ -3,30 +3,30 @@
 //!
 //! Nothing here draws anything itself. Three pieces run concurrently:
 //!
-//! * a session watcher that carries iAP2 over Bluetooth — or over USB, when
-//!   `wireless` is off in `/etc/cp2cl/config.json` — and starts CarPlay,
-//! * an airplay receiver that accepts the phone's return call and decrypts its
-//!   media,
-//! * the CarLife session, which presents this device to a head unit as a phone
-//!   and feeds it those streams.
+//! * the CarPlay half (`carplay_hu`), which plays the head unit an iPhone
+//!   expects to be plugged into and accepts the phone's streams,
+//! * the CarLife half (`carlife_md`), which presents this device to a head unit
+//!   as a phone and feeds it those streams,
+//! * this program, which owns the board — its settings, its lights, its page —
+//!   and is what the two halves know of each other.
 
-mod aac;
-mod airplay;
-mod artwork;
 mod assets;
 mod button;
-mod carlife;
-mod commands;
 mod config;
+mod hooks;
 mod led;
 mod logging;
-mod playing;
-mod session;
 mod settings;
 mod sink;
 mod web;
-mod wireless;
 
+// The input vocabulary and the playing record belong to the CarLife half and
+// live in that crate. Re-exported under their old names so the paths inside the
+// program still read the same.
+pub use carlife_md::playing;
+pub use carlife_md::press as commands;
+
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -34,14 +34,17 @@ use iap2_mfi::{AuthCoprocessor, FileCoprocessor, NoCoprocessor};
 use livi_runtime::mfi_async::SharedCoprocessor;
 use livi_runtime::vehicle::Vehicle;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, watch, Mutex};
 use tracing_subscriber::prelude::*;
 
-use crate::airplay::clock::SyncedClock;
-use crate::airplay::pairing::Pairings;
-use crate::airplay::{AudioClock, EventSink, MicSink, ScreenParams, SharedChannel, SharedScreen};
+use carlife_md::outlet::Outlet;
+use carplay_hu::airplay::pairing::Pairings;
+use carplay_hu::airplay::{EventSink, SharedChannel, SharedScreen};
+use carplay_hu::report::Report;
+use carplay_hu::sink::MediaSink;
+
 use crate::config::hostname;
-use crate::sink::{AudioCodec, ClOutlet, ClSink, MediaSink};
+use crate::sink::ClSink;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -157,13 +160,15 @@ async fn main() -> Result<()> {
     // Everything the page shows is reported from wherever it is learned, and
     // nothing reads it back: see `web::status`. Started before anything else so
     // that the first thing a page says is never "nothing yet" for want of a
-    // place to put it.
-    let status = Arc::new(web::Status::new());
-    status.with(|s| {
+    // place to put it. The phone's half writes its own report, which is why the
+    // page is built around it rather than the other way round.
+    let report = Arc::new(Report::new());
+    report.with(|s| {
         s.carplay.wireless = cfg.wireless;
         s.carplay.name = hostname();
         s.carplay.bt_mac = config::bt_address(&cfg.bt_adapter);
     });
+    let status = Arc::new(web::Status::new(report.clone()));
 
     // Bound before the streams are: a page that cannot be reached is worth
     // saying so about at startup rather than when someone goes looking for it.
@@ -187,9 +192,7 @@ async fn main() -> Result<()> {
         .await
         .context("bind airplay listener")?;
     let airplay_port = listener.local_addr()?.port() as u32;
-    status.with(|s| s.carplay.airplay_port = Some(airplay_port));
-
-    let codec = AudioCodec::default();
+    report.with(|s| s.carplay.airplay_port = Some(airplay_port));
 
     // What the phone is asked to render: the CarLife session writes it once a
     // head unit has said what its screen is, and `GET /info` is answered from it.
@@ -204,7 +207,7 @@ async fn main() -> Result<()> {
     // Fired when the phone's icon for us is tapped. A broadcast rather than a
     // queue: the car can be plugged out and back in, and whoever is listening
     // at the time is the one that matters.
-    let (desktop, _) = tokio::sync::broadcast::channel(1);
+    let (desktop, _) = broadcast::channel(1);
 
     // Input goes out through here whatever produced it. Built now and filled in
     // later: the keys only exist once pair-verify has run.
@@ -215,14 +218,7 @@ async fn main() -> Result<()> {
     // on the next one: the session is dropped and built again. One slot, because
     // only the newest signal is worth anything — a session acting on a change
     // that has already been superseded is worse than not acting at all.
-    let (restart, _) = tokio::sync::broadcast::channel(1);
-
-    // And what a running session is told when the CarLife session it feeds has
-    // ended, which is the one thing a restart cannot say: there is nothing to
-    // restart for. See `airplay::serve`.
-    let (shutdown, _) = tokio::sync::broadcast::channel(1);
-
-    let mic = MicSink::new();
+    let (restart, _) = broadcast::channel(1);
 
     // The car's position goes to the phone through this, and only through this:
     // the CarLife session is where a fix arrives and the iAP2 session is what
@@ -232,7 +228,7 @@ async fn main() -> Result<()> {
     // The car is the consumer, and this is the queue between the two halves:
     // access units and the phone's sound arrive from CarPlay and wait here for a
     // CarLife session to take them out, on the video channel and the media one.
-    let outlet = Arc::new(ClOutlet::new());
+    let outlet = Arc::new(Outlet::new());
 
     // One object per stream, not two: a video event and an audio event differ
     // only in which channel the consumer converts them to. There are two of them
@@ -240,11 +236,10 @@ async fn main() -> Result<()> {
     // screen and the sound — and the CarLife sink is one object because both of
     // them are the same car on the same connection. What the phone is playing,
     // and where it is going, go through the same object, which is why it is kept
-    // whole rather than erased into the two traits above.
-    let (video_sink, audio_sink, panel): (Arc<dyn MediaSink>, Arc<dyn MediaSink>, Arc<ClSink>) = {
-        let sink = outlet.sink();
-        (sink.clone(), sink.clone(), sink)
-    };
+    // whole rather than erased into the two traits below.
+    let sink = Arc::new(ClSink::new(outlet.sink()));
+    let (video_sink, audio_sink): (Arc<dyn MediaSink>, Arc<dyn MediaSink>) =
+        (sink.clone(), sink.clone());
 
     // Worth saying out loud: nothing here draws a picture, and what the phone is
     // asked to render is the car's own screen — so nothing is rendered until a
@@ -255,7 +250,8 @@ async fn main() -> Result<()> {
         if cfg.screen.is_empty() { "car" } else { "config" }
     );
 
-    let pairings = Arc::new(Mutex::new(Pairings::load_or_create()?));
+    let data_dir = PathBuf::from(config::DATA_DIR);
+    let pairings = Arc::new(Mutex::new(Pairings::load_or_create(&data_dir)?));
     // The half of the pairing identity the phone is told: the key it was given
     // at pair-setup and checks the pair-verify signature against. Every session
     // names it in the answer that starts CarPlay — the cable, the Bluetooth link
@@ -267,147 +263,118 @@ async fn main() -> Result<()> {
     // answer the phone's challenge, and airplay to answer /auth-setup.
     let auth = SharedCoprocessor::new(mfi_signer()?);
 
-    // A wireless phone moves its iAP2 control channel onto the AirPlay session
-    // once CarPlay is running, and these are the two pieces that takes: the gate
-    // that stops Bluetooth being paged while it has — see `wireless::Handover` —
-    // and where the session on the tunnel is described from. A wired run has
-    // neither: its control channel is on the cable and there is nothing to move
-    // it to, so a type 130 SETUP is answered as it always was.
-    let handover = wireless::Handover::new();
-    let tunnel = cfg.wireless.then(|| {
-        Arc::new(airplay::tunnel::Setup {
-            cfg: cfg.clone(),
-            auth: auth.clone(),
-            accessory_key: accessory_key.clone(),
-            airplay_port,
-            panel: panel.clone(),
-            vehicle: vehicle.clone(),
-            status: status.clone(),
-            events: event_sink.clone(),
-            handover: handover.clone(),
-            restart: restart.clone(),
-        })
+    // What the CarPlay half is told about the machine, and the two of these that
+    // are not properties of it: how much room the car's media message leaves for
+    // a cover, which is the consumer's number rather than the phone's.
+    let options = Arc::new(carplay_hu::options::Options {
+        wireless: cfg.wireless,
+        wifi_iface: cfg.wifi_iface.clone(),
+        bt_adapter: cfg.bt_adapter.clone(),
+        name: hostname(),
+        vendor: config::dt_vendor(),
+        bt_address: config::bt_address(&cfg.bt_adapter),
+        cover_limit: carlife_md::proto::MAX_ART,
     });
 
     // Whether the CarPlay half is open for the phone at all. It starts shut and
     // the car's session is the only thing that opens it: nothing is published
     // and nothing is accepted until there is a head unit on the other end.
-    let (carplay, gate) = tokio::sync::watch::channel(false);
+    let (gateway, gate) = watch::channel(false);
     tracing::debug!(
         "main.bridge.carplay_side state={}",
-        if *carplay.borrow() { "open" } else { "shut" }
+        if *gateway.borrow() { "open" } else { "shut" }
+    );
+
+    // The one object both halves are given: it answers as the host that is told
+    // what happened, as the asset table, and as where a key goes.
+    let hooks = hooks::Hooks::new(
+        gateway.clone(),
+        restart.clone(),
+        screen.clone(),
+        channel.clone(),
+        led.clone(),
+        event_sink.clone(),
     );
 
     // Bound either way, and bound now: this port is what the phone is told, so
-    // it has to be known before the car turns up and before the watcher below
-    // has anything to advertise. Whether anything is accepted on it is the
-    // gate's business.
+    // it has to be known before the car turns up and before the watcher has
+    // anything to advertise. Whether anything is accepted on it is the gate's
+    // business.
     tracing::info!(
         "carplay.airplay.receiver port={airplay_port} state={}",
-        if *carplay.borrow() {
+        if *gateway.borrow() {
             "listening"
         } else {
             "held"
         }
     );
-    tokio::spawn(airplay::serve(
+
+    let phone = carplay_hu::Hu::new(carplay_hu::Ports {
+        options,
+        assets: &assets::TABLE,
+        mfi: auth,
+        pairings,
+        accessory_key,
+        airplay_port,
         listener,
-        airplay::Shared {
-            cfg: cfg.clone(),
-            pairings,
-            video_sink,
-            audio_sink,
-            audio_codec: Arc::new(Mutex::new(codec)),
-            screen: screen.clone(),
-            channel: channel.clone(),
-            desktop: desktop.clone(),
-            restart: restart.clone(),
-            shutdown,
-            event_sink: event_sink.clone(),
-            mic,
-            mfi: auth.clone(),
-            audio_clock: Arc::new(Mutex::new(AudioClock::default())),
-            timing: Arc::new(Mutex::new(SyncedClock::new())),
-            status: status.clone(),
-            tunnel,
-            led: led.clone(),
-        },
-        gate.clone(),
-    ));
+        gate,
+        video_sink,
+        audio_sink,
+        panel: sink,
+        event_sink,
+        report: report.clone(),
+        vehicle: vehicle.clone(),
+        delegate: hooks.clone(),
+        screen,
+        channel,
+        desktop: desktop.clone(),
+        restart,
+    });
 
     // The car comes first and CarPlay follows it: nothing is published and
     // nothing is accepted until there is a head unit on the other end of the
-    // bridge, and both go away again when it does.
-    let opening = carplay.clone();
-    let nudge = restart.clone();
-    let signals = led.clone();
-    let mut report = move |up: bool| {
-        let _ = opening.send(up);
-        signals.carlife(up);
-        if up {
-            // The phone will not start CarPlay on its own — it has to be told
-            // again — and a fresh iAP2 session is how it is told.
-            let _ = nudge.send(());
-        }
-    };
-    // The phone's own frames are what the channel carries: there is no other
-    // source of pictures in the program.
-    let frames = carlife::session::Frames::Live(outlet);
+    // bridge, and both go away again when it does. Which of the two switched
+    // sides is open is the CarLife half's to say, and this is where it says it.
+    let frames = carlife_md::carlife::session::Frames::Live(outlet);
 
-    // The car names its screen over the CarLife session, and the name is what the
-    // phone is asked to render at, so this is where the two halves meet. A size
-    // that lands after the phone has already read `/info` is worth a session of
-    // its own — that is what `restart` is for — and a size that changes nothing
-    // is not worth saying twice.
-    let mut named = {
-        let slot = screen.clone();
-        let nudge = restart.clone();
-        move |width: u32, height: u32, fps: u32| {
-            let wanted = ScreenParams {
-                width,
-                height,
-                fps,
-                ..ScreenParams::default()
-            };
-            let Ok(mut slot) = slot.lock() else {
-                return;
-            };
-            if (*slot).unwrap_or_default() == wanted {
-                return;
-            }
-            tracing::info!("carplay.video.screen_named width={width} height={height} fps={fps}");
-            *slot = Some(wanted);
-            drop(slot);
-            let _ = nudge.send(());
-        }
+    // What the CarLife half is told about the machine. None of it is a choice:
+    // the hostname is the name the device goes by, the device tree is its maker,
+    // and the controller holds its own address. The screen is the one exception,
+    // and it is read out of the settings file — for each session, because the
+    // page can change it while the program runs.
+    let settings = carlife_md::settings::Settings {
+        screen: hooks.screen_chosen(),
+        name: hostname(),
+        vendor: config::dt_vendor(),
+        bt_address: config::bt_address(&cfg.bt_adapter),
+        data_dir,
     };
+
     tracing::info!("main.bridge.carlife_up carplay_side=waiting");
     // In the background, because the two sides are each other's condition: this
     // task is what opens the gate, and the watcher below is the only thing that
-    // acts on it. Waiting for `serve` to return here would leave nobody to
-    // answer the gate it opens.
-    let carried = cfg.clone();
-    let alone = carplay.clone();
+    // acts on it. Waiting for it to return here would leave nobody to answer the
+    // gate it opens.
+    let car = hooks.clone();
+    let alone = gateway.clone();
     // The car's own input goes the way everything else does, so the session gets
     // the same sink the CarPlay side fills in.
-    let input = event_sink;
-    let reported = status.clone();
+    let reported = status.carlife().clone();
     let handed = vehicle.clone();
     tokio::spawn(async move {
-        if let Err(e) = carlife::serve(
-            carried,
-            &frames,
-            &mut named,
-            channel,
-            input,
-            &mut report,
-            &desktop,
-            reported,
-            handed,
-            replug_requested,
-        )
-        .await
-        {
+        // Held in this task rather than in `main`: the ports are borrows of it,
+        // and both have to outlive the loop that runs one session after another.
+        let ports = carlife_md::carlife::session::Ports {
+            input: car.clone(),
+            delegate: &*car,
+            assets: &*car,
+            desktop,
+            page: reported,
+            vehicle: handed,
+        };
+        let outcome =
+            carlife_md::carlife::gadget::run(&settings, &frames, &ports, replug_requested).await;
+        if let Err(e) = outcome {
             // `{e:#}` and not `{e}`: the outer message says what we were doing
             // and the causes under it hold the errno, which is the part that
             // says why.
@@ -417,35 +384,10 @@ async fn main() -> Result<()> {
         }
     });
 
-    if cfg.wireless {
-        wireless::watch(
-            cfg,
-            auth,
-            airplay_port,
-            accessory_key,
-            restart,
-            gate,
-            panel,
-            status,
-            vehicle,
-            handover,
-            led,
-        )
-        .await;
-    } else {
-        session::watch(
-            cfg,
-            auth,
-            airplay_port,
-            accessory_key,
-            restart,
-            gate,
-            panel,
-            status,
-            vehicle,
-        )
-        .await;
-    }
+    // The phone's half runs last and does not return: it accepts on the socket
+    // above, and it is what carries iAP2 — over the cable or over Bluetooth,
+    // whichever this run was configured for.
+    phone.run().await;
     Ok(())
 }
 

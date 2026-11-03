@@ -13,17 +13,12 @@ use std::time::{Duration, Instant};
 use iap2_link::LinkConfig;
 use livi_runtime::bt::{IncomingConn, Wireless};
 use livi_runtime::driver::spawn_link;
-use livi_runtime::mfi_async::SharedCoprocessor;
-use livi_runtime::vehicle::Vehicle;
-use tokio::sync::broadcast;
 use tokio::time::sleep;
 
-use super::{page, parse_mac, power, radios_present, ready, run_session, short, Handover};
-use crate::config::{bt_address, hostname, Config};
-use crate::led::Signals;
+use super::{page, parse_mac, power, radios_present, ready, run_session, short};
+use crate::options::Options;
+use crate::Hu;
 use crate::session::{carry_artwork, Ended};
-use crate::sink::ClSink;
-use crate::web::Status;
 
 /// Keeps serving phones until the program stops, and publishes the service only
 /// while the car has a CarLife session of its own: a phone that finds it
@@ -31,19 +26,18 @@ use crate::web::Status;
 ///
 /// Nothing pushes "a phone just paired" from outside, so a session that ends
 /// puts us back to waiting for the same phone to come again.
-pub async fn watch(
-    cfg: Arc<Config>,
-    auth: SharedCoprocessor,
-    airplay_port: u32,
-    accessory_key: String,
-    restart: broadcast::Sender<()>,
-    mut gate: tokio::sync::watch::Receiver<bool>,
-    panel: Arc<ClSink>,
-    status: Arc<Status>,
-    vehicle: Arc<Vehicle>,
-    handover: Arc<Handover>,
-    led: Arc<Signals>,
-) {
+pub(crate) async fn watch(hu: &Arc<Hu>) {
+    let cfg = hu.options.clone();
+    let auth = hu.mfi.clone();
+    let airplay_port = hu.airplay_port;
+    let accessory_key = hu.accessory_key.clone();
+    let restart = hu.restart.clone();
+    let panel = hu.panel.clone();
+    let status = hu.status.clone();
+    let vehicle = hu.vehicle.clone();
+    let handover = hu.handover.clone();
+    let delegate = hu.delegate.clone();
+    let mut gate = hu.gate.clone();
     // The boot loads the two modules and goes on, so neither radio is here when
     // this starts: an interface appears once brcmfmac has taken its firmware, a
     // controller once btbcm has pushed its patch, and bluetoothd claims its name
@@ -56,7 +50,7 @@ pub async fn watch(
     // The page was handed an address before there was a controller to ask, so
     // it has the fallback one. What the phone is told is read per session and
     // needs no help; this is the copy a person reads off the page.
-    status.with(|s| s.carplay.bt_mac = bt_address(&cfg.bt_adapter));
+    status.with(|s| s.carplay.bt_mac = cfg.bt_address.clone());
 
     if let Err(e) = ready(&cfg) {
         tracing::error!("wifi.ap_unusable err={e}");
@@ -116,7 +110,7 @@ pub async fn watch(
             android_auto: false,
         };
         let (conn, mut incoming, held) =
-            match livi_runtime::bt::start(&cfg.bt_adapter, &hostname(), wireless).await {
+            match livi_runtime::bt::start(&cfg.bt_adapter, &cfg.name, wireless).await {
                 Ok(started) => started,
                 Err(e) => {
                     tracing::error!(
@@ -135,13 +129,13 @@ pub async fn watch(
         // phone nothing is listening for. A round that finds them again says so
         // again, which costs nothing: the same answer is one the lights already
         // show.
-        led.radios(radios && ap);
+        delegate.radios(radios && ap);
         // The D-Bus connection owns the registered profiles. Dropping it
         // unregisters them, so it has to be kept alive for as long as we are
         // listening — it is also what puts the controllers back at the end.
         tracing::info!(
             "bt.service_up adapter={} name={:?} action=pair_phone",
-            cfg.bt_adapter, hostname()
+            cfg.bt_adapter, cfg.name
         );
 
         // The controller has nothing to do once the phone has moved its session
@@ -205,7 +199,7 @@ pub async fn watch(
             // The cover art is a file transfer of its own on the same link, and
             // it goes to the car's panel the same way the song it belongs to
             // does.
-            let carrying = tokio::spawn(carry_artwork(artwork, panel.clone()));
+            let carrying = tokio::spawn(carry_artwork(artwork, panel.clone(), cfg.cover_limit));
             // Ending the session drops the descriptor, which is the only way a
             // BlueZ channel ever closes; paging the phone again is what brings
             // it back, and the loop above starts that over.
@@ -291,8 +285,8 @@ async fn wait_car_down(gate: &mut tokio::sync::watch::Receiver<bool>) {
 /// configuration at startup: a controller registers itself with the kernel
 /// whenever it is brought up, and a session that begins after that is a session
 /// that can have the real address.
-fn local_mac(cfg: &Config) -> [u8; 6] {
-    parse_mac(&bt_address(&cfg.bt_adapter))
+fn local_mac(cfg: &Options) -> [u8; 6] {
+    parse_mac(&cfg.bt_address)
 }
 
 /// How long a wireless run waits for the radios before it goes on without them.
@@ -323,7 +317,7 @@ const BLUEZ: &str = "org.bluez";
 ///
 /// Answers whether all three were found, because the caller has to tell a run
 /// that waited for them from one that went on without them.
-async fn wait_for_radios(cfg: &Config) -> bool {
+async fn wait_for_radios(cfg: &Options) -> bool {
     let started = Instant::now();
     // The bus is a handshake, so it is had once and kept: what is asked of it
     // afterwards is a question about a name, not about the bus itself.
@@ -363,7 +357,7 @@ async fn wait_for_radios(cfg: &Config) -> bool {
 }
 
 /// What is not up yet, named as the log and the loop both want it.
-fn missing(cfg: &Config, wifi: bool, bt: bool, bluez: bool) -> String {
+fn missing(cfg: &Options, wifi: bool, bt: bool, bluez: bool) -> String {
     let mut missing = Vec::new();
     if !wifi {
         missing.push(cfg.wifi_iface.as_str());

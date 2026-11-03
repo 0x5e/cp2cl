@@ -232,6 +232,63 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "carlife-md"
+version = "0.14.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "futures-util",
+ "iap2-csm",
+ "libc 0.2.189",
+ "livi-runtime",
+ "rand 0.8.8",
+ "rsa",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "carplay-hu"
+version = "0.14.0"
+dependencies = [
+ "aes",
+ "anyhow",
+ "chacha20poly1305",
+ "ctr",
+ "ed25519-dalek",
+ "futures-util",
+ "hex",
+ "hkdf",
+ "iap2-csm",
+ "iap2-link",
+ "iap2-usbmux",
+ "iap2-wired",
+ "idevice",
+ "jpeg-encoder",
+ "kamadak-exif",
+ "livi-runtime",
+ "livi-wifi",
+ "num-bigint",
+ "plist",
+ "rand 0.8.8",
+ "rusty-opus",
+ "serde_json",
+ "sha1",
+ "sha2 0.10.9",
+ "symphonia",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "x25519-dalek",
+ "zbus",
+ "zune-core",
+ "zune-jpeg",
+ "zune-png",
+]
+
+[[package]]
 name = "cc"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -366,6 +423,8 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
+ "carlife-md",
+ "carplay-hu",
  "chacha20poly1305",
  "chrono",
  "ctr",

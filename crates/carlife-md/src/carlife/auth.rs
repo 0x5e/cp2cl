@@ -31,13 +31,15 @@ use rsa::pkcs8::DecodePrivateKey;
 use rsa::traits::PublicKeyParts;
 use rsa::RsaPrivateKey;
 
+use crate::settings::Settings;
+
 /// The credential the phone's CarLife key is read from.
 ///
 /// Not a credential of ours: it is the CarLife app's own private key, extracted
 /// from the app, and the car accepts answers made with it because Baidu made the
 /// matching public half. Like the MFi pair, the name is fixed rather than
 /// configured: what it is called is not the operator's business, and it is a name
-/// inside `crate::config::DATA_DIR` rather than a path.
+/// inside the data directory rather than a path.
 pub(crate) const KEY_FILE: &str = "carlife_md_rsa_private.pem";
 
 /// The CarLife version this device answers challenges as.
@@ -60,14 +62,14 @@ pub struct Signer {
 }
 
 impl Signer {
-    /// The key `crate::config::DATA_DIR` was given, when it was given one.
+    /// The key the data directory was given, when it was given one.
     ///
     /// The firmware installs it there beside the identity the program writes, so
     /// a board without one is a board whose build had no key to install. `None`
     /// is said out loud and leaves the CarLife side unable to answer a challenge:
     /// a supported way to run, so the line is a warning and the session goes on.
-    pub fn load() -> Option<Self> {
-        let path = crate::config::data_file(KEY_FILE);
+    pub fn load(settings: &Settings) -> Option<Self> {
+        let path = settings.data_file(KEY_FILE);
         match std::fs::read_to_string(&path) {
             Ok(pem) => Self::from_pem(&pem),
             Err(e) => {

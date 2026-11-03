@@ -27,17 +27,17 @@ use livi_runtime::vehicle::{Fuels, Plugs, Vehicle};
 use livi_wifi::{Channel, OnAir, Security};
 use tokio::sync::{broadcast, mpsc};
 
-use crate::config::{hostname, Config};
+use crate::link::Panel;
+use crate::options::Options;
+use crate::report::Report;
 use crate::session::{run_bringup, Ended};
-use crate::sink::ClSink;
-use crate::web::Status;
 
 mod linux;
 mod page;
 mod power;
 
-pub use linux::watch;
-pub(crate) use page::unpair_all;
+pub(crate) use linux::watch;
+pub use page::unpair_all;
 
 /// Whether the two radios this board needs have come up: an interface for the
 /// access point, and a Bluetooth controller.
@@ -75,10 +75,10 @@ fn on_air() -> Option<OnAir> {
 /// `disableBluetooth`, and holding the page back for that would only leave it
 /// unreachable. Cleared when the AirPlay session the stream belongs to ends,
 /// which is also the moment paging should resume.
-pub(crate) struct Handover(AtomicBool);
+pub struct Handover(AtomicBool);
 
 impl Handover {
-    pub(crate) fn new() -> Arc<Self> {
+    pub fn new() -> Arc<Self> {
         Arc::new(Self(AtomicBool::new(false)))
     }
 
@@ -119,7 +119,7 @@ pub(crate) struct SessionParams {
 /// rather than read here: it belongs to the pairing the caller already holds
 /// open, and a second copy read off disk could disagree with it.
 pub(crate) fn session_params(
-    cfg: &Config,
+    cfg: &Options,
     airplay_port: u32,
     bt_mac: [u8; 6],
     accessory_key: &str,
@@ -129,7 +129,7 @@ pub(crate) fn session_params(
     let (path, ap) = access_point(&cfg.wifi_iface)?;
 
     let identity = Identity {
-        name: hostname(),
+        name: cfg.name.clone(),
         ssid: ap.ssid.clone(),
         bt_mac,
         // Nothing here knows what the car runs on, so no fuel type is claimed:
@@ -217,7 +217,7 @@ pub(crate) fn session_params(
 /// again on the first line.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_session(
-    cfg: &Config,
+    cfg: &Options,
     auth: SharedCoprocessor,
     channel: LinkChannel,
     airplay_port: u32,
@@ -225,8 +225,8 @@ pub(crate) async fn run_session(
     accessory_key: &str,
     peer: &str,
     restart: &broadcast::Sender<()>,
-    panel: &ClSink,
-    status: &Status,
+    panel: &Arc<dyn Panel>,
+    status: &Report,
     vehicle: &Arc<Vehicle>,
 ) -> Ended {
     // Subscribed before anything goes out, so a display change made while the
@@ -253,7 +253,7 @@ pub(crate) async fn run_session(
     // Spelled out rather than imported: this module has an `AccessPoint` of its
     // own, which is the parsed configuration rather than the reported one.
     status.with(|s| {
-        s.carplay.access_point = Some(crate::web::AccessPoint {
+        s.carplay.access_point = Some(crate::report::AccessPoint {
             ssid: params.ssid.clone(),
             channel: params.channel,
             iface: cfg.wifi_iface.clone(),
@@ -454,7 +454,7 @@ fn device_path(adapter: &str, mac: &str) -> String {
 /// Checked before the Bluetooth service is published, so a configuration
 /// mistake is one line at startup rather than a pairing prompt followed by
 /// nothing.
-pub(crate) fn ready(cfg: &Config) -> Result<(), String> {
+pub(crate) fn ready(cfg: &Options) -> Result<(), String> {
     access_point(&cfg.wifi_iface).map(|_| ())
 }
 
@@ -465,7 +465,7 @@ mod tests {
     /// The file the image installs. What it says is the operator's to change,
     /// so only that we can read it is asserted here.
     const SHIPPED: &str =
-        include_str!("../../buildroot/board/nanopi-duo2/rootfs-overlay/etc/hostapd/hostapd.conf");
+        include_str!("../../../../buildroot/board/nanopi-duo2/rootfs-overlay/etc/hostapd/hostapd.conf");
 
     /// A directory to put configurations in, removed when the test ends.
     struct TempDir(PathBuf);

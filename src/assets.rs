@@ -37,6 +37,26 @@ pub fn names() -> impl Iterator<Item = &'static str> {
     FILES.iter().map(|(name, _)| *name)
 }
 
+/// The same table as the CarPlay half asks for it.
+///
+/// That half is handed one table at startup rather than reading files, so the
+/// lookups above are behind a value it can hold: there is one binary and so one
+/// of these.
+pub struct Table;
+
+impl carplay_hu::assets::Assets for Table {
+    fn get(&self, name: &str) -> Option<&'static [u8]> {
+        get(name)
+    }
+
+    fn text(&self, name: &str) -> Option<&'static str> {
+        text(name)
+    }
+}
+
+/// The one instance of it, which is what the CarPlay half is handed.
+pub static TABLE: Table = Table;
+
 #[cfg(test)]
 mod tests {
     use super::*;

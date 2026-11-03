@@ -226,7 +226,7 @@ app: patched
 	install -m 0755 target/$(TARGET)/release/cp2cl $(APP)
 
 test: patched
-	$(RUN) cargo test
+	$(RUN) cargo test --workspace
 
 # Once per machine, and again only when `docker/Dockerfile` changes.
 image:
