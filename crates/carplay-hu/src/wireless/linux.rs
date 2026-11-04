@@ -119,7 +119,13 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
                         cfg.bt_adapter,
                         cfg.bt_adapter
                     );
-                    return;
+                    // Asked again rather than given up on: this is BlueZ
+                    // refusing one of the steps that publish the service, and
+                    // `main` awaits this watcher — returning here takes the
+                    // page and the car's session down with it, which is a far
+                    // larger failure than a phone that cannot find the board.
+                    sleep(START_RETRY).await;
+                    continue;
                 }
             };
         // A phone can only come back to a board that has both halves: the radios
@@ -299,6 +305,11 @@ const RADIOS_CEILING: Duration = Duration::from_secs(20);
 /// of being loaded, so this is fine enough not to be the reason a start takes
 /// longer than it has to.
 const RADIOS_POLL: Duration = Duration::from_millis(200);
+
+/// How long a run that could not publish the service waits before asking again.
+/// Long enough that a controller refusing a step is not asked in a loop, short
+/// enough that one that was only slow is published while the car is still there.
+const START_RETRY: Duration = Duration::from_secs(5);
 
 /// The name bluetoothd takes on the system bus.
 const BLUEZ: &str = "org.bluez";
