@@ -16,7 +16,9 @@ use livi_runtime::driver::spawn_link;
 use tokio::sync::watch;
 use tokio::time::sleep;
 
-use super::{page, parse_mac, power, radios_present, ready, run_session, short};
+use super::{
+    ap_channel, is_24ghz, page, parse_mac, power, radios_present, ready, run_session, short,
+};
 use crate::admission::Side;
 use crate::machine::Machine;
 use crate::Hu;
@@ -159,15 +161,37 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
             cfg.bt_adapter, cfg.name
         );
 
-        // The controller has nothing to do once the phone has moved its session
-        // onto Wi-Fi, and every page it answers is a slice of the antenna the
-        // stream needed — see `power`. A task of its own, because the loop below
-        // sits inside a session for as long as the controller has to stay off.
-        let guard = tokio::spawn(power::guard(
-            conn.clone(),
-            cfg.bt_adapter.clone(),
-            handover.clone(),
-        ));
+        // Powering the controller off is only worth doing when the access point
+        // shares the 2.4 GHz band with Bluetooth: on 5 GHz the two radios do
+        // not compete for airtime, and a controller left up is one a phone can
+        // still be paged on. Read each round, like the credentials the phone is
+        // handed, so an edit to hostapd's file is what this round acts on.
+        let shared_band = match ap_channel(&cfg) {
+            Ok(channel) => {
+                if is_24ghz(channel) {
+                    tracing::info!("bt.power_guard_started reason=wifi_24ghz channel={channel}");
+                    true
+                } else {
+                    tracing::info!("bt.power_kept_on reason=wifi_5ghz channel={channel}");
+                    false
+                }
+            }
+            Err(e) => {
+                // An unreadable configuration must not take the controller
+                // down: nothing here can say the band is shared.
+                tracing::warn!("wifi.ap_band_unknown err={e} consequence=bluetooth_kept_on");
+                false
+            }
+        };
+        // A task of its own, because the loop below sits inside a session for
+        // as long as the controller has to stay off. See `power`.
+        let guard = shared_band.then(|| {
+            tokio::spawn(power::guard(
+                conn.clone(),
+                cfg.bt_adapter.clone(),
+                handover.clone(),
+            ))
+        });
 
         // Set when this round ended because the cable owns the slot. Such a
         // round is owed another one once the slot is free; a round that ended
@@ -300,8 +324,10 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
         // the controllers go back to the name and discoverability they were
         // found with. The power state is not among them — leaving it off costs
         // nothing, because the next start powers the controller on as it always
-        // did.
-        guard.abort();
+        // did. A 5 GHz round never had a guard to stop.
+        if let Some(guard) = guard {
+            guard.abort();
+        }
         livi_runtime::bt::let_go(&conn, &cfg.bt_adapter, &held).await;
         // A signal ends the run. A round that ended for any other reason — the
         // car went away, or the cable took the slot — is owed the next one,

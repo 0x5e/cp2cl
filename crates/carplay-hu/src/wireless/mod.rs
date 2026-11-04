@@ -368,6 +368,25 @@ fn setting<'a>(text: &'a str, key: &str) -> Option<&'a str> {
 /// skipped; an `ssid`, `wpa_passphrase` or `channel` that is absent or unusable
 /// is an error, because the alternative is a phone told to join nothing. The
 /// error says which setting, and the caller says which file.
+/// The channel the access point is on, read from hostapd's own file.
+///
+/// Read per service round rather than once at startup, the way
+/// `session_params` reads the credentials: an edit to the file and a restart
+/// of the access point is enough for a change to take effect.
+pub(crate) fn ap_channel(cfg: &Machine) -> Result<u8, String> {
+    access_point(&cfg.wifi_iface).map(|(_, ap)| ap.channel)
+}
+
+/// Whether an access point on this channel shares the 2.4 GHz band with
+/// Bluetooth.
+///
+/// hostapd numbers 2.4 GHz channels 1..14 and starts 5 GHz at 36. The band is
+/// what decides whether a Bluetooth controller left powered takes airtime from
+/// the CarPlay stream — see `power`.
+pub(crate) fn is_24ghz(channel: u8) -> bool {
+    channel <= 14
+}
+
 fn parse_access_point(text: &str) -> Result<AccessPoint, String> {
     let ssid = setting(text, "ssid").filter(|s| !s.is_empty());
     let passphrase = setting(text, "wpa_passphrase").filter(|s| s.len() >= 8);
@@ -457,7 +476,7 @@ fn device_path(adapter: &str, mac: &str) -> String {
 /// mistake is one line at startup rather than a pairing prompt followed by
 /// nothing.
 pub(crate) fn ready(cfg: &Machine) -> Result<(), String> {
-    access_point(&cfg.wifi_iface).map(|_| ())
+    ap_channel(cfg).map(|_| ())
 }
 
 #[cfg(test)]
@@ -495,6 +514,21 @@ mod tests {
     fn the_access_point_we_ship_is_one_we_can_read() {
         assert_eq!(setting(SHIPPED, "interface"), Some("wlan0"));
         parse_access_point(SHIPPED).expect("the shipped hostapd.conf must be readable");
+    }
+
+    /// Only a 2.4 GHz access point takes the antenna Bluetooth needs. The
+    /// shipped Duo2 configuration is one; the Zero 2W's channel 149 is not.
+    #[test]
+    fn only_a_24ghz_channel_shares_the_band_with_bluetooth() {
+        assert!(is_24ghz(1));
+        assert!(is_24ghz(14));
+        assert!(!is_24ghz(36));
+        assert!(!is_24ghz(149));
+        assert!(is_24ghz(parse_access_point(SHIPPED).unwrap().channel));
+        const ZERO2W: &str = include_str!(
+            "../../../../buildroot/board/orangepi-zero2w/rootfs-overlay/etc/hostapd/hostapd.conf"
+        );
+        assert!(!is_24ghz(parse_access_point(ZERO2W).unwrap().channel));
     }
 
     #[test]

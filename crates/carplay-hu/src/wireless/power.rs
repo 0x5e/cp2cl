@@ -1,10 +1,12 @@
-//! Turning the controller off while the phone streams over Wi-Fi.
+//! Turning the controller off while the phone streams over 2.4 GHz Wi-Fi.
 //!
 //! This board's Wi-Fi and Bluetooth halves are one chip on one antenna, and an
 //! access point on 2.4 GHz leaves the Bluetooth side almost no room. A phone
 //! left sitting on its CarPlay page keeps paging the accessory it is bonded to,
 //! and every page answered costs the stream a slice of the air: the video
-//! stutters for as long as the phone stays on that page.
+//! stutters for as long as the phone stays on that page. On a 5 GHz access
+//! point there is no shared band and the controller stays powered; the guard
+//! below is started only for the 2.4 GHz case — see `watch`.
 //!
 //! Dropping `Discoverable` is not enough. A bonded phone does not look the
 //! machine up again — it pages the address it already has — and page scanning
