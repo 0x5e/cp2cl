@@ -2,7 +2,7 @@ target/
 Cargo.lock.orig
 
 # The guide's screenshots are what the coded streams were built from, not what
-# anyone needs: `scripts/guide.sh` takes them again from `guide/index.html`. The
+# anyone needs: `guide/build.sh` takes them again from `guide/index.html`. The
 # WebKit home it renders into goes beside them for the same reason.
 guide/shots/
 guide/.tmp/

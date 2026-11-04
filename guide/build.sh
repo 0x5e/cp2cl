@@ -5,6 +5,8 @@
 # Run by hand, and commit the results. The board takes `assets/guide/*.h264` as
 # they are: its build has neither a renderer nor an encoder, and the one moment
 # the guide matters is the one moment a missing file would be a black screen.
+# So a change to the page is followed by `./guide/build.sh` and the four files
+# it writes.
 #
 # `guide/index.html` is the source, and the only one: every size is a fraction of
 # the panel's width, so nothing is laid out per resolution.
@@ -15,7 +17,7 @@ cd "$(dirname "$0")/.."
 
 # WebKit, through the Swift that comes with the command line tools: the same
 # engine the page is written against, and nothing to install.
-SHOT=scripts/shot.swift
+SHOT=guide/shot.swift
 
 # WebKit keeps its cache and local storage under $HOME. Pointed at the project
 # so a run leaves the machine's own library alone.

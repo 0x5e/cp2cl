@@ -1,7 +1,7 @@
 // Renders the guide page to a PNG of an exact pixel size, using the WebKit that
-// ships with macOS. Called by `scripts/guide.sh` once per screen size.
+// ships with macOS. Called by `guide/build.sh` once per screen size.
 //
-//     swift scripts/shot.swift <page.html> <width> <height> <out.png>
+//     swift guide/shot.swift <page.html> <width> <height> <out.png>
 //
 // The page is laid out at the size asked for, so one pixel of CSS is one pixel
 // of the stream that gets encoded from it; the snapshot comes back at the
