@@ -1,8 +1,9 @@
 //! Everything the operator can tune, read once from `/etc/cp2cl/config.json`.
 //!
-//! Nothing here is required: the defaults build a working wireless session and
-//! hand it to whatever head unit turns up. See README for the full table, and
-//! `crate::settings` for the file this is read out of and written back to.
+//! Nothing here is required: the defaults are enough for both links — the cable
+//! and Bluetooth — to wait for a phone and hand what it sends to whatever head
+//! unit turns up. See README for the full table, and `crate::settings` for the
+//! file this is read out of and written back to.
 //!
 //! Three values are not settings at all, because they are properties of the
 //! machine rather than choices: the name it goes by is the hostname
@@ -105,19 +106,11 @@ fn vendor_from_compatible(raw: &[u8]) -> Option<String> {
 
 /// Everything the operator can tune, and nothing that is not a choice.
 ///
-/// The field names are the file's: a field is `log_level`, `wireless`,
-/// `wifi_iface` or `bt_adapter` in `/etc/cp2cl/config.json`, and absent from it
-/// is what `Default` says.
+/// The field names are the file's: a field is `log_level`, `wifi_iface` or
+/// `bt_adapter` in `/etc/cp2cl/config.json`, and absent from it is what
+/// `Default` says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    /// Take CarPlay over Bluetooth and Wi-Fi instead of the cable.
-    ///
-    /// The phone is paired in the OS first — this program does not pair — and
-    /// then finds us by the iAP service we publish. Everything after that is the
-    /// same iAP2 conversation, except that `CarPlayStartSession` has to name a
-    /// Wi-Fi network the phone can join: the configuration in `/etc/hostapd`
-    /// that names `wifi_iface` says which one, which is read in `crate::wireless`.
-    pub wireless: bool,
     /// The interface the access point runs on: whose link-local address the
     /// phone is told to connect back to, and which hostapd configuration in
     /// `/etc/hostapd` is the one being read.
@@ -133,10 +126,10 @@ pub struct Config {
 }
 
 impl Default for Config {
-    /// A wireless accessory at `info`, on the interfaces this board has.
+    /// Both links wait for a phone, and the first one to see it is the one the
+    /// session runs on.
     fn default() -> Self {
         Self {
-            wireless: true,
             wifi_iface: "wlan0".to_string(),
             bt_adapter: "hci0".to_string(),
             log_level: LevelFilter::INFO,

@@ -296,7 +296,7 @@ const CARLIFE_ROWS = [
 
 const CARPLAY_ROWS = [
   ["状态", d => bool(CARPLAY_UP(d), "已连接", "未连接"), d => CARPLAY_UP(d) ? "ok" : null],
-  ["接入方式", d => bool(d.wireless, "WiFi", "USB")],
+  ["接入方式", d => d.transport === "wireless" ? "WiFi" : d.transport === "usb" ? "USB" : null],
   ["分辨率", d => d.screen ? size(d.screen) : null],
   ["视频编码", d => video(d.video)],
   ["音频编码", d => d.audio.map(audioStream)],

@@ -29,6 +29,7 @@ use super::pairing::{PairSetup, PairVerify, Pairings, VerifyKeys};
 use super::rtsp::{self, Request, Response, OCTET_CONTENT_TYPE, PAIRING_CONTENT_TYPE};
 use super::screen::{self, VideoReceiver};
 use super::tunnel;
+use crate::admission::{Admission, Side};
 use crate::channels;
 use crate::link::{Delegate, Link, Panel};
 use crate::wireless::Handover;
@@ -353,9 +354,16 @@ pub struct Hu {
     /// The gate that stops Bluetooth being paged once a wireless phone has
     /// moved its control channel onto the tunnel.
     pub handover: Arc<Handover>,
-    /// What a type 130 stream needs to become an iAP2 session. `None` on a wired
-    /// run: there is no second transport to move the control channel to, so the
-    /// stream is answered with a port nobody listens on, exactly as before.
+    /// The one slot a CarPlay session may occupy: both links wait for a phone,
+    /// and the first to see one takes it. See `crate::admission`.
+    pub admission: Arc<Admission>,
+    /// Set when the process is asked to stop, so the two link watchers end
+    /// together. Only the wireless watcher asks for the signal; this is how the
+    /// wired one is told of it.
+    pub stopping: watch::Sender<bool>,
+    /// What a type 130 stream needs to become an iAP2 session. Built for every
+    /// run because a wireless phone may ask for one at any time; whether it is
+    /// allowed is `open_tunnel`'s decision.
     pub tunnel: Option<Arc<tunnel::Setup>>,
     /// The socket the receiver accepts on, taken out once by `serve`.
     pub listener: std::sync::Mutex<Option<TcpListener>>,
@@ -425,6 +433,7 @@ pub async fn serve(self: &Arc<Self>) {
                 let audio_clock = self.audio_clock.clone();
                 let timing = self.timing.clone();
                 let tunnel_setup = self.tunnel.clone();
+                let admission = self.admission.clone();
                 let delegate = self.delegate.clone();
 
                 tokio::spawn(async move {
@@ -445,6 +454,7 @@ pub async fn serve(self: &Arc<Self>) {
                         audio_clock,
                         timing,
                         tunnel_setup,
+                        admission,
                         tunnel: None,
                         tunnel_start_pending: false,
                         peer,
@@ -635,6 +645,9 @@ struct Session {
     /// What a type 130 stream is built from, when this run has anywhere to move
     /// iAP2 to.
     tunnel_setup: Option<Arc<tunnel::Setup>>,
+    /// Which link owns the current session: only a wireless one may move iAP2
+    /// onto the data stream.
+    admission: Arc<Admission>,
     /// The phone's iAP2 session, once it asked to move it here. Owned by the
     /// session because the phone ends it by ending this: see `tunnel`.
     tunnel: Option<tunnel::Tunnel>,
@@ -1751,8 +1764,13 @@ impl Session {
         shared: [u8; 32],
     ) -> Result<u16, String> {
         let Some(setup) = self.tunnel_setup.clone() else {
-            return Err("not a wireless session".into());
+            return Err("no tunnel is configured".into());
         };
+        // A wired session keeps iAP2 on the cable. Answering a type 130 SETUP
+        // there would start a second iAP2 session described as a wireless one.
+        if self.admission.owner() != Some(Side::Wireless) {
+            return Err("not a wireless session".into());
+        }
         if named != tunnel::IAP_DATASTREAM_UUID {
             return Err(format!("client {named:?} is not the iAP channel"));
         }

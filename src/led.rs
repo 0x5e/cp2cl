@@ -166,10 +166,14 @@ impl Facts {
     /// lights to the state it still satisfies without anyone working out which
     /// one that is. A car unplugged while a phone is mirrored answers
     /// `Waiting` because that is what is left, not because anybody said so.
+    ///
+    /// A phone that is connected or on its way is not held to `radios`: a wired
+    /// session needs neither radio, and with both links waiting the wireless
+    /// one may not have published its service by the time the cable wins.
     fn phase(self) -> Phase {
         match (self.radios, self.carlife, self.carplay) {
-            (true, true, Link::Linked) => Phase::Linked,
-            (true, true, Link::Connecting) => Phase::Connecting,
+            (_, true, Link::Linked) => Phase::Linked,
+            (_, true, Link::Connecting) => Phase::Connecting,
             (true, true, Link::Idle) => Phase::Standby,
             (true, false, _) => Phase::Waiting,
             (false, _, _) => Phase::Init,
@@ -346,27 +350,19 @@ impl Drop for Lights {
 }
 
 /// Puts the power light back when a signal stops the program, which is the way
-/// out that skips `Drop`. The four signals a shell, an init script or a terminal
-/// sends: what a process does when one of them arrives without a handler is end,
-/// and the light would stay out.
+/// out that skips `Drop`. What a process does when one arrives without a handler
+/// is end, and the light would stay out.
 ///
-/// `catch_term` names whether nothing else already catches SIGTERM: the
-/// wireless watcher does, to put the Bluetooth controllers back, and that path
-/// ends by returning through `main` — where the light goes back on anyway.
-/// Handling the signal here as well would cut that short, so a wireless run
-/// leaves SIGTERM to it and takes the other three, which have no handler.
-pub async fn stopper(lights: Arc<Lights>, catch_term: bool) {
-    let mut term = if catch_term {
-        arm(SignalKind::terminate(), "term")
-    } else {
-        None
-    };
+/// The wireless watcher catches SIGTERM to put the Bluetooth controllers back,
+/// and that path ends by returning through `main` — where the light goes back on
+/// anyway. Handling the signal here as well would cut that short, so the three
+/// signals that have no other handler are taken.
+pub async fn stopper(lights: Arc<Lights>) {
     let mut int = arm(SignalKind::interrupt(), "int");
     let mut hup = arm(SignalKind::hangup(), "hup");
     let mut quit = arm(SignalKind::quit(), "quit");
 
     tokio::select! {
-        () = raised(&mut term) => tracing::info!("main.stopped signal=term"),
         () = raised(&mut int) => tracing::info!("main.stopped signal=int"),
         () = raised(&mut hup) => tracing::info!("main.stopped signal=hup"),
         () = raised(&mut quit) => tracing::info!("main.stopped signal=quit"),
@@ -471,7 +467,15 @@ mod tests {
         for carplay in [Link::Idle, Link::Linked] {
             assert_eq!(facts(false, false, carplay).phase(), Phase::Init);
         }
-        assert_eq!(facts(false, true, Link::Linked).phase(), Phase::Init);
+        // A wired session does not need the radios: once a phone is on its way
+        // or linked, the light says so even before the wireless watcher has
+        // published anything.
+        assert_eq!(facts(false, true, Link::Linked).phase(), Phase::Linked);
+        assert_eq!(
+            facts(false, true, Link::Connecting).phase(),
+            Phase::Connecting
+        );
+        assert_eq!(facts(false, true, Link::Idle).phase(), Phase::Init);
     }
 
     /// The rates are the requirement, and they are the one thing here that a

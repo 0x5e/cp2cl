@@ -43,7 +43,7 @@ use super::event::Events;
 use crate::link::Panel;
 use crate::machine::Machine;
 use crate::report::Report;
-use crate::session::{carry_artwork, run_bringup, Ended};
+use crate::bringup::{carry_artwork, run_bringup, Ended};
 use crate::wireless::{session_params, short, Handover, SessionParams};
 
 /// The DataStream the phone names when it means the iAP2 channel. Type 130 is
@@ -88,6 +88,8 @@ pub struct Setup {
     /// Fires when what the phone renders changes. The AirPlay session ends on
     /// it, so the session on the tunnel is told the same thing.
     pub restart: watch::Sender<u64>,
+    /// Fires when the car's session ends, which ends this one too.
+    pub shutdown: tokio::sync::broadcast::Sender<()>,
 }
 
 /// One open stream of type 130, from the SETUP that named it to the end of the
@@ -248,6 +250,7 @@ impl Tunnel {
         ));
 
         let mut changed = setup.restart.subscribe();
+        let mut shutdown = setup.shutdown.subscribe();
         let (panel, status, ssid, airplay_port) = (
             setup.panel.clone(),
             setup.status.clone(),
@@ -266,6 +269,7 @@ impl Tunnel {
                 Some(ssid.as_str()),
                 rx,
                 &mut changed,
+                &mut shutdown,
                 &panel,
                 &status,
             )

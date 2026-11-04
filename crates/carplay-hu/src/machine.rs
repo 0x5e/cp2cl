@@ -1,16 +1,13 @@
 //! What the CarPlay half is told about the machine it runs on.
 //!
 //! Nothing here is read from `/etc` or from the device tree: the program that
-//! owns the board reads those and hands the values over. The three radio fields
+//! owns the board reads those and hands the values over. The two radio names
 //! are the settings file's; the rest are properties of the machine.
 
 use std::path::PathBuf;
 
 /// Everything the CarPlay half is told about the machine.
 pub struct Machine {
-    /// Whether the phone is to be found over Bluetooth and Wi-Fi instead of the
-    /// cable. Decides whether a wireless phone's tunnel is set up at all.
-    pub wireless: bool,
     /// The interface the access point runs on, which decides whose link-local
     /// address the phone is told to come back to.
     pub wifi_iface: String,
@@ -30,7 +27,6 @@ impl Default for Machine {
     /// What a machine that cannot say anything about itself reports.
     fn default() -> Self {
         Self {
-            wireless: true,
             wifi_iface: "wlan0".to_string(),
             bt_adapter: "hci0".to_string(),
             name: "cp2cl".to_string(),

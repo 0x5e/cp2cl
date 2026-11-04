@@ -61,6 +61,26 @@ impl Report {
         snapshot.carplay.phone.clone()
     }
 
+    /// Whether a phone currently has the receiver open. Set when one connects
+    /// and cleared when the session that connection belongs to ends.
+    pub fn airplay_up(&self) -> bool {
+        let snapshot = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        snapshot.carplay.airplay.peer.is_some()
+    }
+
+    /// Everything on the page that belongs to the phone on the link. An iAP2
+    /// session that ended is not a phone that is still talking to us.
+    pub fn phone_gone(&self) {
+        self.with(|s| {
+            s.carplay.phone = None;
+            s.carplay.identified = false;
+            s.carplay.authenticated = false;
+            s.carplay.subscribed = false;
+            s.carplay.advertised = None;
+            s.carplay.av_iface = None;
+        });
+    }
+
     /// The coding of the video stream: the two fields the other half needs and
     /// nothing else.
     ///
@@ -134,9 +154,9 @@ pub struct VideoFormat {
 /// What the CarPlay side knows, which is everything the phone told us.
 #[derive(Debug, Clone, Default)]
 pub struct Carplay {
-    /// Wireless rather than wired. A setting, not an observation, but it decides
-    /// which of the fields below mean anything.
-    pub wireless: bool,
+    /// The link the running session arrived on: `usb` or `wireless`. `None`
+    /// while both links are waiting for a phone.
+    pub transport: Option<&'static str>,
     /// The phone's own serial, once one has been found on the cable. Over
     /// Bluetooth there is no equivalent: the peer is an address and nothing more.
     pub phone: Option<String>,
@@ -318,7 +338,7 @@ pub struct Mic {
 impl Carplay {
     fn json(&self, video: &VideoFormat) -> Value {
         json!({
-            "wireless": self.wireless,
+            "transport": self.transport,
             "phone": self.phone,
             "name": self.name,
             "bt_mac": self.bt_mac,

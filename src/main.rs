@@ -101,14 +101,11 @@ async fn main() -> Result<()> {
     tracing::info!("main.version software={:?}", web::device::SOFTWARE);
     tracing::info!("main.screen {}", cfg.screen);
 
-    // The settings this run was handed, because "why is nothing happening" is
-    // nearly always one of them. The two halves of the program log different
-    // things — a wired run never says `bt.*`, and a wireless run waits for
-    // the car before it says anything at all — so a log that does not name its
-    // own mode is one that cannot be read.
+    // The settings this run was handed. Which link a phone arrives on is not
+    // one of them: both wait at the same time, and `carplay_hu::admission` says
+    // which of them won.
     tracing::info!(
-        "main.config wireless={} wifi_iface={} bt_adapter={} log_level={}",
-        cfg.wireless,
+        "main.config wifi_iface={} bt_adapter={} log_level={}",
         cfg.wifi_iface,
         cfg.bt_adapter,
         settings::level_name(cfg.log_level)
@@ -137,25 +134,19 @@ async fn main() -> Result<()> {
     }
     let (led, facts) = led::Signals::new();
     tokio::spawn(led::run(facts, lights.clone()));
-    // A wired run needs neither radio, so there is nothing to wait for: the
-    // first state it can be in is the one after both of them are up.
-    if !cfg.wireless {
-        led.radios(true);
-    }
     tokio::spawn(button::watch(cfg.bt_adapter.clone(), replug.clone()));
     if let Some(lights) = &lights {
-        // A wireless run already catches SIGTERM to put the Bluetooth
+        // The wireless watcher catches SIGTERM to put the Bluetooth
         // controllers back, and that path ends by returning through here, where
         // the lights go back anyway. Taking the same signal here as well would
-        // cut it short, so only a wired run takes it — neither run has a
-        // handler for SIGINT, SIGHUP or SIGQUIT.
+        // cut it short, so only the other three are taken — neither watcher has
+        // a handler for SIGINT, SIGHUP or SIGQUIT.
         //
         // Cloned rather than handed over: this `lights` stays in `main` to the
         // end, so the drop that puts them back is the one on the way out of
         // `main` and not whatever the runtime does with a task it is shutting
         // down.
-        let catch_term = !cfg.wireless;
-        tokio::spawn(led::stopper(lights.clone(), catch_term));
+        tokio::spawn(led::stopper(lights.clone()));
     }
 
     // Everything the page shows is reported from wherever it is learned, and
@@ -165,7 +156,6 @@ async fn main() -> Result<()> {
     // page is built around it rather than the other way round.
     let report = Arc::new(Report::new());
     report.with(|s| {
-        s.carplay.wireless = cfg.wireless;
         s.carplay.name = hostname();
         s.carplay.bt_mac = config::bt_address(&cfg.bt_adapter);
     });
@@ -267,7 +257,6 @@ async fn main() -> Result<()> {
     // What the CarPlay half is told about the machine: nothing here is a choice,
     // it is what the board says about itself.
     let machine = Arc::new(carplay_hu::machine::Machine {
-        wireless: cfg.wireless,
         wifi_iface: cfg.wifi_iface.clone(),
         bt_adapter: cfg.bt_adapter.clone(),
         name: hostname(),
@@ -400,8 +389,8 @@ async fn main() -> Result<()> {
     });
 
     // The phone's half runs last and does not return: it accepts on the socket
-    // above, and it is what carries iAP2 — over the cable or over Bluetooth,
-    // whichever this run was configured for.
+    // above, and both links wait for a phone — over the cable or over Bluetooth
+    // — until one of them has one.
     phone.run().await;
     Ok(())
 }

@@ -19,7 +19,7 @@ to half screen.
 ## Features
 
 - No video transcoding.
-- Support both wired and wireless CarPlay.
+- Support both wired and wireless CarPlay, waiting at the same time; the first phone to connect takes the session.
 - Website with status/log/setting page.
 
 ## Requirements
@@ -51,7 +51,6 @@ Config file at `/etc/cp2cl/config.json`.
 | Keys | Default | Comment |
 |---|---|---|
 | `log_level` | `info` | log level: `error`, `warn`, `info`, `debug` |
-| `wireless` | `true` | wireless or wired CarPlay (will be removed in the future) |
 | `wifi_iface` | `wlan0` | wifi interface name |
 | `bt_adapter` | `hci0` | bluetooth adapter name |
 | `screen` | — | force resolution and framerate (example: ``) |
@@ -60,7 +59,6 @@ Example
 ```json
 {
   "log_level": "debug",
-  "wireless": true,
   "wifi_iface": "wlan0",
   "bt_adapter": "hci0",
   "screen": { "width": 1920, "height": 720, "fps": 60 }

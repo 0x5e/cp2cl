@@ -1,7 +1,7 @@
 //! Wireless CarPlay: the phone pairs in the OS, opens an RFCOMM channel to us,
 //! and iAP2 runs on that instead of on a USB carkit stream.
 //!
-//! The protocol afterwards is the one `crate::session` already runs — same
+//! The protocol afterwards is the one `crate::bringup` runs for every link — same
 //! identification, same MFi challenge, same `run_accessory`. What changes is
 //! only:
 //!
@@ -25,12 +25,12 @@ use livi_runtime::ident::{Identity, Transport};
 use livi_runtime::mfi_async::SharedCoprocessor;
 use livi_runtime::vehicle::{Fuels, Plugs, Vehicle};
 use livi_wifi::{Channel, OnAir, Security};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::link::Panel;
 use crate::machine::Machine;
 use crate::report::Report;
-use crate::session::{run_bringup, Ended};
+use crate::bringup::{run_bringup, Ended};
 
 mod linux;
 mod page;
@@ -178,8 +178,8 @@ pub(crate) fn session_params(
         // The network the phone joins, as hostapd runs it — see `ON_AIR`.
         ap_on_air: Some(on_air),
         // Nothing here watches the cable: a phone seen over Bluetooth is taken
-        // as a wireless one, and if it is plugged in as well the wired watcher
-        // is the one that will pick it up.
+        // as a wireless one. Whether the cable gets a session at all is decided
+        // once, by whichever link saw a phone first — see `crate::admission`.
         on_cable: Some(OnCable(Arc::new(|_bt_mac: &str| false))),
         // A display change drops the AirPlay session, and the phone then has to
         // be given something to start CarPlay from. That cannot be done on this
@@ -225,6 +225,7 @@ pub(crate) async fn run_session(
     accessory_key: &str,
     peer: &str,
     restart: &watch::Sender<u64>,
+    shutdown: &mut broadcast::Receiver<()>,
     panel: &Arc<dyn Panel>,
     status: &Report,
     vehicle: &Arc<Vehicle>,
@@ -286,6 +287,7 @@ pub(crate) async fn run_session(
         Some(ssid.as_str()),
         rx,
         &mut changed,
+        shutdown,
         panel,
         status,
     )

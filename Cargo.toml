@@ -29,7 +29,7 @@ iap2-link = { path = "vendor/LIVI/native/crates/iap2-link" }
 iap2-wired = { path = "vendor/LIVI/native/crates/iap2-wired" }
 # Linux has no usbmuxd to ask — Alpine does not even package one — so the phone's
 # CarPlay USB configuration and its mux are claimed in-process instead. See
-# `src/session.rs`.
+# `crates/carplay-hu/src/wired.rs`.
 iap2-usbmux = { path = "vendor/LIVI/native/crates/iap2-usbmux" }
 # `files` is what signs a challenge with an identity kept on disk: there is no
 # MFi coprocessor on this board. See `main::mfi_signer`.

@@ -3,14 +3,16 @@
 //!
 //! Two protocols on two connections: iAP2 over the cable, Bluetooth or the
 //! tunnel says what to do, and the AirPlay session it names is where the picture
-//! and the sound arrive. See `airplay` for the receiver, `session` for the wired
-//! iAP2 link and `wireless` for the one that starts over Bluetooth.
+//! and the sound arrive. See `airplay` for the receiver, `wired` and `wireless`
+//! for the two links that wait for a phone, `bringup` for the iAP2 conversation
+//! they share, and `admission` for the rule that only one of them may have it.
 //!
 //! Nothing here knows what a CarLife message looks like. What the phone produces
 //! leaves through `sink` as events, what it says about the song through `link`'s
 //! `Panel`, and how far it got through `link`'s `Delegate`; the program turns all
 //! three into whatever the other end understands.
 
+pub mod admission;
 pub mod assets;
 pub mod channels;
 pub mod link;
@@ -22,7 +24,8 @@ pub mod sink;
 
 mod aac;
 mod airplay;
-mod session;
+mod bringup;
+mod wired;
 mod wireless;
 
 use std::sync::Arc;
@@ -33,6 +36,7 @@ use livi_runtime::vehicle::Vehicle;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch, Mutex};
 
+use crate::admission::Admission;
 use crate::airplay::clock::SyncedClock;
 use crate::airplay::pairing::Pairings;
 use crate::airplay::{AudioClock, MicSink};
@@ -113,20 +117,28 @@ impl Hu {
         // Fired when a wireless phone moves its iAP2 control channel onto the
         // tunnel: nothing may page Bluetooth from then on.
         let handover = wireless::Handover::new();
-        let tunnel = ports.machine.wireless.then(|| {
-            Arc::new(airplay::tunnel::Setup {
-                cfg: ports.machine.clone(),
-                auth: ports.mfi.clone(),
-                accessory_key: accessory_key.clone(),
-                airplay_port,
-                panel: ports.panel.clone(),
-                vehicle: ports.vehicle.clone(),
-                status: ports.report.clone(),
-                events: ports.events.clone(),
-                handover: handover.clone(),
-                restart: ports.restart.clone(),
-            })
-        });
+        // Both links wait for a phone and the first one to see it takes the one
+        // slot for the whole session. See `admission`.
+        let admission = Arc::new(Admission::new(ports.report.clone()));
+        // Set when the program is asked to stop, so the two watchers below end
+        // together rather than one of them holding `run` open.
+        let (stopping, _) = watch::channel(false);
+        // A wired phone never asks for an iAP data stream, but a wireless one
+        // may do so at any point in a run, so the setup is always available and
+        // `server::open_tunnel` decides whether the active link may use it.
+        let tunnel = Some(Arc::new(airplay::tunnel::Setup {
+            cfg: ports.machine.clone(),
+            auth: ports.mfi.clone(),
+            accessory_key: accessory_key.clone(),
+            airplay_port,
+            panel: ports.panel.clone(),
+            vehicle: ports.vehicle.clone(),
+            status: ports.report.clone(),
+            events: ports.events.clone(),
+            handover: handover.clone(),
+            restart: ports.restart.clone(),
+            shutdown: shutdown.clone(),
+        }));
         Ok(Arc::new(Self {
             machine: ports.machine,
             pairings,
@@ -150,6 +162,8 @@ impl Hu {
             status: ports.report,
             delegate: ports.delegate,
             tunnel,
+            admission,
+            stopping,
             listener: std::sync::Mutex::new(Some(ports.listener)),
             gate: ports.gate,
         }))
@@ -157,18 +171,16 @@ impl Hu {
 
     /// Runs the half until the program stops.
     ///
-    /// The receiver accepts in a task of its own, because the link below is what
-    /// the car's session waits on and neither is the other's servant: a wired
-    /// run has a phone to find, a wireless one has two radios to bring up, and
-    /// the phone that arrives on either comes back over the receiver.
+    /// The receiver accepts in a task of its own, because the two links below
+    /// are what the car's session waits on and neither is the other's servant.
+    /// Both links wait for a phone at the same time: a wired one has a phone to
+    /// find, a wireless one has two radios to bring up, and the phone that
+    /// arrives on either comes back over the receiver. Which of them may offer
+    /// itself is `admission`'s business.
     pub async fn run(self: Arc<Self>) {
         let receiver = self.clone();
         tokio::spawn(async move { receiver.serve().await });
-        if self.machine.wireless {
-            wireless::watch(&self).await;
-        } else {
-            session::watch(&self).await;
-        }
+        tokio::join!(wireless::watch(&self), wired::watch(&self));
     }
 
     /// The screen the car named, as `/info` reads it.
