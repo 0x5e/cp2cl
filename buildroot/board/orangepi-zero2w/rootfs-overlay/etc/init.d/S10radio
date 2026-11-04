@@ -1,38 +1,24 @@
 #!/bin/sh
-#
-# The radio, loaded from here rather than compiled in.
-#
-# Three modules out of the out-of-tree UWE5622 tree, in the order their symbols
-# need: the WCN core first, because the Wi-Fi and Bluetooth halves are clients of
-# it and not siblings; then Wi-Fi, which requests wcnmodem.bin as it probes and
-# would fail at initcall time — before the root is mounted — if it were built in;
-# then Bluetooth, which is a tty over the same SDIO function.
-#
-# A built-in driver is the failure this order exists to avoid: the WCN core asks
-# for /lib/firmware/uwe5622/wcnmodem.bin from probe, a built-in one probes before
-# there is a filesystem to read it from, and the request is not retried.
-#
-# The Bluetooth half is not a UART. sprdbt_tty publishes /dev/ttyBT0 and this
-# script puts the HCI line discipline on it with the vendor attach tool, which
-# speaks a `sprd` type that BlueZ's own hciattach does not have. 1.5 Mbaud: at
-# the default 115200 the controller's initialisation alone outruns the attach
-# tool's timeout.
 
 MODDIR=/lib/modules/$(uname -r)
 LOG=/var/log
 
-# ecc and ecdh_generic are what bluetooth.ko's pairing code links against;
-# hci_uart is the line discipline hciattach uses, not a transport for this chip.
-MODULES="ecc ecdh_generic bluetooth hci_uart uwe5622_bsp_sdio sprdwl_ng sprdbt_tty"
+# Order matters: the WCN core first, its two clients after.
+MODULES="ecc ecdh_generic bluetooth hci_uart sunxi_addr uwe5622_bsp_sdio sprdwl_ng sprdbt_tty"
 
 log() {
 	echo "$*"
 	[ -w "$LOG" ] && echo "$*" >> "$LOG/radio.log"
 }
 
-# Puts the HCI line discipline on the tty the Bluetooth module publishes, and
-# waits for the controller to answer: bluetoothd starts two scripts later and
-# would come up with no adapter if it did not.
+# sprdbt_tty registers blocked, and only an unblock powers the BT core.
+unblock() {
+	for r in /sys/class/rfkill/rfkill*; do
+		[ "$(cat "$r/type" 2>/dev/null)" = "bluetooth" ] || continue
+		echo 0 > "$r/soft" 2>>"$ERR" && log "unblocked $r"
+	done
+}
+
 attach() {
 	i=0
 	while [ "$i" -lt 25 ]; do
@@ -48,8 +34,6 @@ attach() {
 		return 1
 	fi
 
-	# -n keeps it in the foreground, so it is put in the background here; what
-	# it prints is the only record of a controller that refused to answer.
 	hciattach_opi -n -s 1500000 /dev/ttyBT0 sprd >>"$ERR" 2>&1 &
 
 	i=0
@@ -69,8 +53,6 @@ attach() {
 start() {
 	printf 'Loading radios: '
 
-	# /var/log is a tmpfs and starts empty on every boot, so the file needs no
-	# truncation.
 	ERR=/dev/null
 	[ -w "$LOG" ] && ERR=$LOG/radio.log
 
@@ -95,11 +77,12 @@ start() {
 		return 1
 	fi
 
-	# A driver that registers an rfkill switch starts it soft-blocked on some
-	# trees, and a blocked controller is one BlueZ reports as absent.
-	command -v rfkill >/dev/null 2>&1 && rfkill unblock all 2>>"$ERR"
+	unblock
+	sleep 1
 
 	attach || true
+	# hci0 has an rfkill of its own, registered blocked by what came before it.
+	unblock
 	echo "ok"
 }
 

@@ -1,60 +1,26 @@
-# H618 + UWE5622, on top of board/common/kernel.fragment.
-#
-# The SD card is mmc0 and the radio's SDIO bus is mmc1, both behind the same
-# controller driver; the radio's power sequence (WL_REG_ON on PG18, the 32 kHz
-# fanout on PG10) is a mmc-pwrseq-simple in the board's device tree, applied by
-# a patch in patch/linux/ — mainline 6.18 does not describe the chip at all.
-
 CONFIG_MMC_SUNXI=y
 
-# The pins the radio is wired to: PG0-PG5 for SDIO, PG10 for the clock, PG18 for
-# the chip enable. Without the pinctrl driver the pwrseq node has nothing to mux
-# the 32 kHz output onto, and the chip comes up without a clock.
 CONFIG_PINCTRL_SUNXI=y
 CONFIG_PINCTRL_SUN50I_H616=y
 
-# The port the head unit enumerates on, USB0/PHY0. The device tree fixes it to
-# peripheral, so there is no `mode` file to write and no ID pin in the way —
-# unlike the NanoPi, where cp2cl has to settle the controller itself.
-#
-# The four lines below are one chain, and the last three are `depends on` in
-# USB_MUSB_SUNXI's entry rather than `select`: remove any one of them and the
-# glue disappears, and the gadget goes with it. The only notice is Buildroot's
-# `Value requested for CONFIG_… not in final .config` during the fragment merge
-# — one line in a build log, and the board boots without a device port.
-# PHY_SUN4I_USB is the sunxi combo PHY covering both the OTG port and the two
-# host ports. There is no PHY_SUN50I_USB; PHY_SUN50I_USB3 is the H6 USB3 PHY,
-# and this board has no USB3.
+# USB_MUSB_SUNXI depends on these three; it does not select them.
 CONFIG_USB_MUSB_HDRC=y
 CONFIG_NOP_USB_XCEIV=y
 CONFIG_PHY_SUN4I_USB=y
 CONFIG_USB_MUSB_SUNXI=y
 
-# The port the phone plugs into, USB1/PHY1, behind EHCI with OHCI beside it for
-# anything that enumerates at low or full speed in the same socket.
 CONFIG_USB_EHCI_HCD=y
 CONFIG_USB_OHCI_HCD=y
 
-# One green light, `green:status` on PC13. The red one beside it sits on the
-# supply rail; no GPIO reaches it, so nothing can drive it.
 CONFIG_LEDS_GPIO=y
 CONFIG_LEDS_TRIGGER_TIMER=y
 
-# hci_uart carries the line discipline hciattach puts on /dev/ttyBT0 — the
-# Bluetooth half of this chip is a tty over SDIO, not a serdev on a UART, and
-# the vendor attach tool speaks H4 through this module. Its own protocol
-# handlers are not needed: `sprd` is not one of them.
 CONFIG_BT_HCIUART=m
+# CONFIG_BT_HCIUART_BCM is not set
+# CONFIG_BT_HCIUART_QCA is not set
+CONFIG_BT_HCIUART_H4=y
+CONFIG_SUNXI_ADDR_MGT=m
 
-# What arm64's defconfig leaves on and this board has no use for. The NanoPi
-# builds from sunxi_defconfig, which is already trimmed; there is no sunxi
-# config for arm64, so the trimming is here. It is not cosmetic: left on, these
-# are 1059 modules and 45 MB, and the 64 MB root filesystem the NanoPi's numbers
-# give does not hold them — mkfs stops halfway through the tree.
-#
-# Each of these is a whole subtree of drivers for hardware the board does not
-# have: no camera, no wired port, no other Wi-Fi vendor, no cellular modem, no
-# InfiniBand, no CAN bus, no amateur radio, no NAND, no firewall rules.
 # CONFIG_MEDIA_SUPPORT is not set
 # CONFIG_MTD is not set
 # CONFIG_ETHERNET is not set
@@ -75,8 +41,6 @@ CONFIG_BT_HCIUART=m
 # CONFIG_IIO is not set
 # CONFIG_SCSI_LOWLEVEL is not set
 
-# The filesystems the card is not. ext4 for the root, vfat for the boot
-# partition, and tmpfs — all built in by the common fragment.
 # CONFIG_BTRFS_FS is not set
 # CONFIG_XFS_FS is not set
 # CONFIG_F2FS_FS is not set

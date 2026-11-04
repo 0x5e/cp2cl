@@ -1,0 +1,28 @@
+The vendor hciattach reads the Bluetooth address from
+/sys/class/addr_mgt/addr_bt, a class the vendor kernel fills from the SID. The
+driver that provides it (previous patch) needs a device tree node, and needs
+the chip id to derive an address on a board whose SID carries none: that is
+the first 16 bytes of the SID's 0x200 area, which is where this nvmem device
+starts.
+
+--- a/arch/arm64/boot/dts/allwinner/sun50i-h618-orangepi-zero2w.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-h618-orangepi-zero2w.dts
+@@ -232,3 +232,18 @@
+ 	mmc-ddr-1_8v;
+ 	status = "okay";
+ };
++
++&sid {
++	sid_chipid: chipid@0 {
++		reg = <0x0 0x10>;
++	};
++};
++
++/ {
++	addr_mgt: addr-mgt {
++		compatible = "allwinner,sunxi-addr_mgt";
++		nvmem-cells = <&sid_chipid>;
++		nvmem-cell-names = "chipid";
++		status = "okay";
++	};
++};

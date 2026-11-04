@@ -5,9 +5,9 @@
 #
 # Two things happen here: the root filesystem is grown to the partition it was
 # written to, and the name the board goes by is written into /etc/hostname and
-# into the access point's configuration. Writing the name ends in one restart,
-# so that the kernel and hostapd come up with it. Everything else about the boot
-# is the same on a fresh card as on one a year old.
+# into the access point's configuration. The name is also handed to the running
+# kernel, so this boot goes by it as well. Everything else about the boot is the
+# same on a fresh card as on one a year old.
 #
 # Neither step is counted. The filesystem carries /var/lib/rootfs-resized once
 # the growth has been settled and the name is the prefix in /etc/hostname, so a
@@ -187,15 +187,11 @@ name_board() {
 	sed -i "s/^127\.0\.1\.1.*/127.0.1.1	$name/" /etc/hosts
 	sed -i "s/^ssid=.*/ssid=$name/" "$HOSTAPD_FILE"
 
-	echo "Naming the board: $name, restarting"
-	say "$name"
-	# `sync` first: this is the applet's own restart, with no rcK and no unmount
-	# behind it.
+	echo "$name" > /proc/sys/kernel/hostname 2>/dev/null
 	sync
-	reboot
-	# Only reached when the restart did not happen. The card has the answer, so
-	# the next boot is the one that applies it.
-	say "$name restart_failed=true"
+
+	echo "Naming the board: $name"
+	say "$name"
 	return 0
 }
 

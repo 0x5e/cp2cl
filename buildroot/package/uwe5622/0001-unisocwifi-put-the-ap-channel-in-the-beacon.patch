@@ -1,0 +1,48 @@
+A 5 GHz access point started through this driver never beacons. It reports
+success -- start_ap waits for the firmware answer and the answer arrives -- but
+nothing goes out on the air, so the SSID never appears in a scan.
+
+The channel is only ever in the beacon. WIFI_CMD_START_AP carries a length and
+the beacon bytes and nothing else, and hostapd does not put a DS Parameter Set
+in a 5 GHz beacon at all (src/ap/beacon.c writes one for B and G modes only).
+The one thing the firmware is told about 149 is the HT Operation element in the
+tail, and that is evidently not where it looks.
+
+So when the head carries no DS Parameter Set and the tail has an HT Operation,
+append one with that element primary channel. The head is allocated with 32
+bytes to spare, so three more fit.
+
+The same fix as openwrt-uwe5622-sunxi 0539b491 ("Fix 5GHz AP"), which closed
+the known issue "5 GHz AP mode not working" on this chip.
+
+--- a/unisocwifi/cfg80211.c
++++ b/unisocwifi/cfg80211.c
+@@ -1004,6 +1004,28 @@
+ 		memcpy(tail, beacon->tail, beacon->tail_len);
+ 		head_len = beacon->head_len;
+ 		tail_len = beacon->tail_len;
++	}
++
++	/*
++	 * A 5 GHz beacon carries no DS Parameter Set: hostapd writes one only
++	 * for B and G modes. The firmware takes the AP channel from the IEs in
++	 * this beacon and from nowhere else, so without this the beacon goes
++	 * out on whatever channel the radio was last on, or not at all.
++	 */
++	if (!cfg80211_find_ie(WLAN_EID_DS_PARAMS,
++			      ((struct ieee80211_mgmt *)head)->u.beacon.variable,
++			      head_len)) {
++		const u8 *ie = cfg80211_find_ie(WLAN_EID_HT_OPERATION,
++						tail, tail_len);
++
++		if (ie) {
++			wl_ndev_log(L_ERR, ndev,
++				    "no DS params, channel %d from HT operation\n",
++				    *(ie + 2));
++			head[head_len++] = WLAN_EID_DS_PARAMS;
++			head[head_len++] = 1;
++			head[head_len++] = *(ie + 2);
++		}
+ 	}
+ 
+ 	sprdwl_change_beacon(vif, beacon);

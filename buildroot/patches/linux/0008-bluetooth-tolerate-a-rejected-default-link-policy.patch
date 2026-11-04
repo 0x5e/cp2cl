@@ -1,0 +1,70 @@
+The Bluetooth half of the UWE5622 never reaches BlueZ on a 6.18 kernel, and the
+only trace it leaves is one line:
+
+	Bluetooth: hci0: Opcode 0x080f failed: -22
+
+0x080f is WRITE_DEF_LINK_POLICY, sent once by init stage 3. -22 is -EINVAL,
+which is what bt_to_errno() makes of HCI error 0x12: the controller answers
+"Invalid HCI Command Parameters", whatever the policy derived from its own LMP
+features is. The vendor's 4.9 tree never cared -- a request built with
+hci_req_add() carried on after a command it did not like -- but hci_sync does:
+
+	err = stage[i].func(hdev);
+	if (err)
+		return err;          /* hci_init_stage_sync() */
+
+so the sequence stops there, hci_init() fails, hci_dev_open_sync() fails, and
+hci_power_on_sync() returns before the two things it does at the end:
+
+	if (hci_dev_test_and_clear_flag(hdev, HCI_SETUP)) {
+		...
+		mgmt_index_added(hdev);
+	}
+
+HCI_SETUP stays set, and read_index_list() skips such a device, so the
+management interface reports no controllers at all. bluetoothd is then left with
+an empty list, registers nothing under /org/bluez/hci0, and has nothing to
+complain about: `btmgmt info` says "Index list with 0 items" while
+/sys/class/bluetooth/hci0 is right there, and every D-Bus lookup of the adapter
+path answers UnknownObject.
+
+A default link policy is a BR/EDR convention about role switch and sniff. It is
+not worth a controller that is invisible to every program on the board, so a
+rejected one is now noted and stepped over, as the older kernels did.
+
+--- a/net/bluetooth/hci_sync.c
++++ b/net/bluetooth/hci_sync.c
+@@ -4335,6 +4335,7 @@
+ {
+ 	struct hci_cp_write_def_link_policy cp;
+ 	u16 link_policy = 0;
++	int err;
+ 
+ 	if (!(hdev->commands[5] & 0x10))
+ 		return 0;
+@@ -4352,8 +4353,23 @@
+ 
+ 	cp.policy = cpu_to_le16(link_policy);
+ 
+-	return __hci_cmd_sync_status(hdev, HCI_OP_WRITE_DEF_LINK_POLICY,
+-				     sizeof(cp), &cp, HCI_CMD_TIMEOUT);
++	err = __hci_cmd_sync_status(hdev, HCI_OP_WRITE_DEF_LINK_POLICY,
++				    sizeof(cp), &cp, HCI_CMD_TIMEOUT);
++
++	/*
++	 * The UWE5622 answers this with "Invalid HCI Command Parameters"
++	 * whatever policy is asked for. That used to cost nothing: a request
++	 * built with hci_req_add() went on to its next command after a failed
++	 * one. It now ends the init sequence, and with it the open, so the
++	 * controller never leaves HCI_SETUP -- a flag the management layer
++	 * hides, which is why no controller is ever reported to BlueZ.
++	 */
++	if (err == -EINVAL) {
++		bt_dev_warn(hdev, "default link policy rejected, continuing");
++		return 0;
++	}
++
++	return err;
+ }
+ 
+ static int hci_read_page_scan_activity_sync(struct hci_dev *hdev)

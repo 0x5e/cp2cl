@@ -1,0 +1,57 @@
+mmc-pwrseq-simple is the only thing that powers the Zero 2W's radio: one
+`reset-gpios` entry on PG18 holding WL_REG_ON in reset, and the RTC's 32 kHz
+fanout as its sleep clock. On 6.18 that node no longer probes.
+
+A single `reset-gpios` is taken as a reset controller reference first:
+devm_reset_control_get_optional_shared() is asked for it, and only when that
+finds nothing does the driver fall back to the GPIO array at the bottom of the
+same probe. Finding nothing is exactly the case here — the node has no `resets`
+— but the reset core's GPIO fallback declines with -ENOENT before it ever looks
+for a controller:
+
+	/* Currently only #gpio-cells=2 is supported with the meaning of:
+	 * args[0]: GPIO number
+	 * args[1]: GPIO flags
+	 */
+	if (args->args_count != 2)
+		return -ENOENT;
+
+sunxi's pio is #gpio-cells = <3> (bank, pin, flags), so the fallback refuses,
+the refusal is returned as if it were a real error rather than as "no reset",
+and the probe ends there:
+
+	pwrseq_simple wifi-pwrseq: error -ENOENT: reset control not ready
+	pwrseq_simple wifi-pwrseq: probe with driver pwrseq_simple failed with error -2
+
+What follows is mmc1 never probing — it is waiting on a pwrseq device that
+failed — so the SDIO bus is empty, the UWE5622 is never powered, and the board
+comes up with no wlan0 and therefore no access point.
+
+Treat -ENOENT as what it is: no reset controller for this node, so use the GPIO
+array the driver already has. Every board whose radio reset is a plain GPIO and
+whose GPIO controller uses three cells is in the same position, which is why
+this is a patch here and not a device tree change.
+
+--- a/drivers/mmc/core/pwrseq_simple.c
++++ b/drivers/mmc/core/pwrseq_simple.c
+@@ -137,9 +137,17 @@
+ 	ngpio = of_count_phandle_with_args(dev->of_node, "reset-gpios", "#gpio-cells");
+ 	if (ngpio == 1) {
+ 		pwrseq->reset_ctrl = devm_reset_control_get_optional_shared(dev, NULL);
+-		if (IS_ERR(pwrseq->reset_ctrl))
+-			return dev_err_probe(dev, PTR_ERR(pwrseq->reset_ctrl),
+-					     "reset control not ready\n");
++		if (IS_ERR(pwrseq->reset_ctrl)) {
++			/*
++			 * -ENOENT is the node having no `resets` and no reset
++			 * provider the GPIO fallback can build one from. The
++			 * GPIO array below is the sequence then.
++			 */
++			if (PTR_ERR(pwrseq->reset_ctrl) != -ENOENT)
++				return dev_err_probe(dev, PTR_ERR(pwrseq->reset_ctrl),
++						     "reset control not ready\n");
++			pwrseq->reset_ctrl = NULL;
++		}
+ 	}
+ 
+ 	/*

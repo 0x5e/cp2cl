@@ -39,6 +39,10 @@ start() {
 
 	i=0
 	up=no
+
+	# cfg80211 asks for regdb before the root is mounted; ask again now.
+	iw reg reload 2>>"$ERR"
+
 	while [ "$i" -lt 5 ]; do
 		i=$((i + 1))
 

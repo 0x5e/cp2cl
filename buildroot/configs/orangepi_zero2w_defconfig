@@ -1,129 +1,52 @@
-# Orange Pi Zero 2W — Allwinner H618 (quad Cortex-A53), 1–4 GB LPDDR4, microSD,
-# UWE5622 (802.11a/b/g/n/ac 1x1 + BT 5.0).
-#
-# Mainline U-Boot and mainline Linux, with one out-of-tree exception: the Wi-Fi
-# and Bluetooth halves of the radio have no driver in mainline and are not likely
-# to get one, so the vendor tree is built as a package — see package/uwe5622.
-#
-# The two USB-C sockets are the two halves of the bridge. Port 0 is PHY0 behind
-# musb, wired to the socket that also powers the board, and the device tree fixes
-# it to `peripheral`: the head unit enumerates us there. Port 1 is PHY1 behind
-# EHCI/OHCI and is a host, which is where a wired phone would go.
-#
-# The target is a writable ext4, like the NanoPi's: the price of a journal is
-# worth being able to replace a binary on a board with no console.
-
 BR2_aarch64=y
 BR2_cortex_a53=y
-# glibc rather than the musl the other two boards use. The only tool that speaks
-# the `sprd` transport this chip's Bluetooth needs is a vendor binary linked
-# against glibc: BlueZ's hciattach has no such transport, and there is no source
-# in this tree to build one from. A musl rootfs would have to carry a second libc
-# beside that one file; a glibc rootfs carries nothing extra, and cp2cl is
-# statically linked either way.
 BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
-# Pinned rather than "same as the kernel": with a custom kernel version the
-# headers version is not known early enough for the feature symbols that
-# packages depend on, and bluez5-utils silently disappears from the menu. 6.12
-# is the newest series this Buildroot offers, and older than the kernel on
-# purpose: what the headers have to carry is musl's and BlueZ's needs.
 BR2_KERNEL_HEADERS_6_12=y
 
 BR2_TARGET_GENERIC_HOSTNAME="CarPlayBox"
 BR2_TARGET_GENERIC_ISSUE="cp2cl"
 BR2_TARGET_GENERIC_GETTY_PORT=""
 BR2_SYSTEM_DHCP=""
-# Root has no password. It is Buildroot's default — an empty field in the
-# skeleton's /etc/shadow — so there is no BR2_TARGET_GENERIC_ROOT_PASSWD line
-# here, and the way in is the key in root/.ssh/authorized_keys.
 
 BR2_INIT_BUSYBOX=y
 BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_DEVTMPFS=y
 BR2_TARGET_ROOTFS_EXT2=y
 BR2_TARGET_ROOTFS_EXT2_4=y
-# 64 MB, the NanoPi's number: the tree comes to 51 MB, of which 24 MB is the
-# kernel's modules — 836 of them, after the list at the end of the kernel
-# fragment cuts down what the generic defconfig leaves on. The rest is room for a
-# binary to replace, a key to add, and the identity the program writes. With the
-# 32 MB boot partition in genimage.cfg the two come to 96 MB of card in all.
 BR2_TARGET_ROOTFS_EXT2_SIZE="64M"
 BR2_TARGET_ROOTFS_EXT2_RESBLKS=1
 BR2_TARGET_ROOTFS_EXT2_LABEL="rootfs"
 
-# The device tree is patched in this tree, not in mainline: 6.18 has the board,
-# but not its radio. The patch adds mmc1 and the power sequence the chip needs.
 BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_CP2CL_PATH)/patches"
 
 BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_CUSTOM_VERSION=y
 BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.18.58"
-# arm64's own `make defconfig`, which is what this symbol asks for. There is no
-# board defconfig upstream for this device either; a fragment on top of the
-# generic one is what pmOS and Armbian do too.
 BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y
 BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_CP2CL_PATH)/board/common/kernel.fragment $(BR2_EXTERNAL_CP2CL_PATH)/board/orangepi-zero2w/kernel.fragment"
 BR2_LINUX_KERNEL_DTS_SUPPORT=y
-# The vendor directory in the path: the H616/H618 device trees live under
-# arch/arm64/boot/dts/allwinner/, and the name Buildroot installs keeps only the
-# basename, so boot.cmd still loads sun50i-h618-orangepi-zero2w.dtb.
 BR2_LINUX_KERNEL_INTREE_DTS_NAME="allwinner/sun50i-h618-orangepi-zero2w"
-# Image.gz, because U-Boot decompresses it and the plain Image is 28 MB: the
-# boot partition would have to be 32 MB for a kernel that boots the same either
-# way.
 BR2_LINUX_KERNEL_IMAGEGZ=y
-# arm64's defconfig keeps CONFIG_SYSTEM_TRUSTED_KEYRING, and certs/ then builds
-# extract-cert, which includes <openssl/bio.h>. Without host-openssl the kernel
-# build stops there — after ten minutes of compiling, on a host program, with
-# the error in a parallel job's output. U-Boot wants the same package for its
-# own tools, so this adds no download.
 BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
-# Not installed into /boot: the kernel and the device tree are on the boot
-# partition, where boot.cmd loads them from, and a second copy in the rootfs is
-# 12 MB of a 64 MB partition that nothing reads. Modules are installed whatever
-# this says, and the radio does not come up without them.
 # BR2_LINUX_KERNEL_INSTALL_TARGET is not set
 
-# TF-A, because on arm64 the H616 has no secure firmware of its own: PSCI comes
-# from BL31 (`SUNXI_PSCI_USE_NATIVE := 1` in the platform), and the kernel's
-# device tree names psci as the way to start CPUs 1-3. U-Boot's binman wraps
-# bl31.bin into u-boot-sunxi-with-spl.bin, so what TF-A has to produce is the
-# bare bl31.bin and nothing else — no FIP, and no BL33 to embed.
 BR2_TARGET_ARM_TRUSTED_FIRMWARE=y
 BR2_TARGET_ARM_TRUSTED_FIRMWARE_LATEST_VERSION=y
 BR2_TARGET_ARM_TRUSTED_FIRMWARE_PLATFORM="sun50i_h616"
 
-# U-Boot's own `orangepi_zero2w_defconfig`, which already carries the DRAM
-# timings this board's LPDDR4 needs and CONFIG_USB_MUSB_GADGET.
 BR2_TARGET_UBOOT=y
 BR2_TARGET_UBOOT_BUILD_SYSTEM_KCONFIG=y
 BR2_TARGET_UBOOT_LATEST_VERSION=y
 BR2_TARGET_UBOOT_BOARD_DEFCONFIG="orangepi_zero2w"
-# No countdown and no `usb start` before it: see the fragment, which is the one
-# the NanoPi reads too.
 BR2_TARGET_UBOOT_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_CP2CL_PATH)/board/common/uboot.fragment"
 BR2_TARGET_UBOOT_NEEDS_DTC=y
 BR2_TARGET_UBOOT_NEEDS_PYTHON3=y
 BR2_TARGET_UBOOT_NEEDS_PYLIBFDT=y
-# U-Boot's own tools include openssl/evp.h unconditionally, so the build needs
-# host-openssl even though nothing here signs a FIT image.
 BR2_TARGET_UBOOT_NEEDS_OPENSSL=y
-# Without this the binman step stops with `Image 'u-boot-sunxi-with-spl' is
-# missing external blobs and is non-functional: atf-bl31`, after the whole of
-# U-Boot has compiled. It is also what makes arm-trusted-firmware a dependency
-# and copies its bl31.bin in, rather than U-Boot guessing where it is.
 BR2_TARGET_UBOOT_NEEDS_ATF_BL31=y
-# The binman description built into sunxi's U-Boot names an SCP blob for the
-# AR100, which nothing here runs and which no upstream source provides. An empty
-# value is how its section is left out.
 BR2_TARGET_UBOOT_CUSTOM_MAKEOPTS="SCP=/dev/null"
 BR2_TARGET_UBOOT_FORMAT_CUSTOM=y
 BR2_TARGET_UBOOT_FORMAT_CUSTOM_NAME="u-boot-sunxi-with-spl.bin"
 
-# The boot script is mkimage's job, not U-Boot's: the old
-# BR2_TARGET_UBOOT_BOOT_SCRIPT symbol survives only as a legacy stub that stops
-# the build outright. From host-uboot-tools only the tool is wanted; its
-# boot.scr step runs once at install and would freeze whatever boot.cmd existed
-# then, so post-image.sh builds the script on every build.
 BR2_PACKAGE_HOST_UBOOT_TOOLS=y
 
 BR2_PACKAGE_BUSYBOX=y
@@ -134,29 +57,12 @@ BR2_PACKAGE_HOSTAPD=y
 BR2_PACKAGE_HOSTAPD_DRIVER_NL80211=y
 BR2_PACKAGE_DNSMASQ=y
 BR2_PACKAGE_IW=y
-# The regulatory database, and on this board it is load bearing: the access point
-# beacons on 149 in the 5 GHz band, and a world domain that does not know CN is
-# one hostapd refuses that channel in.
 BR2_PACKAGE_WIRELESS_REGDB=y
-# No kmod. The modules this image has — the three from the out-of-tree radio tree
-# and four from the kernel's Bluetooth and crypto corner — are loaded by name and
-# path from /etc/init.d/S10radio, which lists them in the order they have to be
-# loaded, so busybox's insmod is enough and there is no depmod to run.
 
-# The radio. Out of tree, because mainline has no driver for the chip: see
-# package/uwe5622 for what is built and how the device tree reaches it.
 BR2_PACKAGE_UWE5622=y
 
-# dropbear rather than openssh: openssh is 7 MB of binaries and 4.7 MB of
-# libcrypto and libssl, and it is the only thing here that selects OpenSSL at
-# all. sftp does not come along, and nothing here uses it.
-#
-# The client stays: dropbear's scp is always built but shells out to dbclient for
-# the connection, so turning the client off would leave a broken scp.
 BR2_PACKAGE_DROPBEAR=y
 BR2_PACKAGE_DROPBEAR_CLIENT=y
-# The board is the access point and there is no resolver behind it. A reverse
-# lookup on connect would stall until it timed out, on every connection.
 BR2_PACKAGE_DROPBEAR_DISABLE_REVERSEDNS=y
 BR2_PACKAGE_DROPBEAR_SMALL=y
 BR2_PACKAGE_CP2CL=y
