@@ -68,22 +68,22 @@ async fn main() -> Result<()> {
     // The terminal is held to `log_level`, the copy is not: a run cannot be
     // dialled up to `debug` after the fact, so what is left on disk is what a
     // question about that run is answered from, and it is asked once the run is
-    // over. `trace` is below both of them — nothing writes it, and what did
-    // would be the internals of other people's crates.
+    // over. `trace` is below both of them, and a dependency that writes one
+    // DEBUG line per USB packet is held to its warnings — see `logging::filter`.
     let journal = logging::Journal::open();
     let unnoticed = journal.reason().map(str::to_owned);
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
                 .event_format(logging::Line)
-                .with_filter(settings::log_filter()),
+                .with_filter(logging::filter(settings::log_filter())),
         )
         .with(
             tracing_subscriber::fmt::layer()
                 .event_format(logging::Line)
                 .with_ansi(false)
                 .with_writer(journal)
-                .with_filter(tracing::level_filters::LevelFilter::DEBUG),
+                .with_filter(logging::filter(tracing::level_filters::LevelFilter::DEBUG)),
         )
         .init();
     if let Some(reason) = unnoticed {

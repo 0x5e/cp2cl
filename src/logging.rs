@@ -23,11 +23,32 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use tracing::field::{Field, Visit};
+use tracing::level_filters::LevelFilter;
 use tracing::{Event, Level, Subscriber};
+use tracing_subscriber::filter::Targets;
 use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
 use tracing_subscriber::fmt::time::FormatTime;
 use tracing_subscriber::fmt::{FmtContext, MakeWriter};
 use tracing_subscriber::registry::LookupSpan;
+
+/// Which events one of the two layers keeps.
+///
+/// The USB libraries under the wired link write DEBUG records that are neither
+/// about CarPlay nor in this program's event format: `nusb` writes one per URB
+/// — hundreds a second while a phone is streaming — and `idevice` writes the
+/// whole pairing plist, keys and certificates included, on every round trip.
+/// Left alone they fill the four-megabyte copy in minutes and bury the lines
+/// that copy is kept for. Their warnings and errors still say something about
+/// the cable, so only the detail is dropped.
+///
+/// The default is the level the layer is held to: `log_level` for the terminal,
+/// `DEBUG` for the copy.
+pub fn filter(ceiling: LevelFilter) -> Targets {
+    Targets::new()
+        .with_default(ceiling)
+        .with_target("nusb", LevelFilter::WARN)
+        .with_target("idevice", LevelFilter::WARN)
+}
 
 /// Writes the seconds since boot, to the millisecond (`123.456`). The space
 /// after it is the line's, not this one's.
@@ -419,14 +440,14 @@ mod tests {
                 tracing_subscriber::fmt::layer()
                     .event_format(Line)
                     .with_writer(move || Sink(sink.clone()))
-                    .with_filter(LevelFilter::INFO),
+                    .with_filter(super::filter(LevelFilter::INFO)),
             )
             .with(
                 tracing_subscriber::fmt::layer()
                     .event_format(Line)
                     .with_ansi(false)
                     .with_writer(journal)
-                    .with_filter(LevelFilter::DEBUG),
+                    .with_filter(super::filter(LevelFilter::DEBUG)),
             );
         tracing::subscriber::with_default(subscriber, || {
             tracing::trace!("carlife.below_the_copy");
@@ -442,6 +463,56 @@ mod tests {
         assert!(copy.contains("at_the_terminal"), "{copy:?}");
         assert!(copy.contains("below_the_terminal"), "{copy:?}");
         assert!(!copy.contains("below_the_copy"), "{copy:?}");
+
+        fs::remove_file(&path).ok();
+        fs::remove_file(&previous).ok();
+    }
+
+    /// Dependencies that write DEBUG detail about the cable must not reach
+    /// either layer: the copy is kept for a run's own events, not for a
+    /// transcript of the USB stack. Their warnings still do.
+    #[test]
+    fn dependency_debug_detail_is_not_kept() {
+        let (path, previous) = (scratch("nusb.log"), scratch("nusb.log.1"));
+        let journal = Journal::at(&path, &previous);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let subscriber = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(Line)
+                    .with_writer(move || Sink(sink.clone()))
+                    .with_filter(super::filter(LevelFilter::INFO)),
+            )
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(Line)
+                    .with_ansi(false)
+                    .with_writer(journal)
+                    .with_filter(super::filter(LevelFilter::DEBUG)),
+            );
+        tracing::subscriber::with_default(subscriber, || {
+            // One line per USB packet, and the whole pairing plist on every
+            // lockdown round trip. Both arrive through `tracing-log` with the
+            // library's own target, which is what the filter reads.
+            tracing::debug!(target: "nusb::platform::linux_usbfs::device", "URB completed");
+            tracing::debug!(target: "idevice", "Sending plist: {{\n  Label: \"livi-helperd\"\n}}");
+            tracing::warn!(target: "nusb::platform::linux_usbfs::device", "device_lost");
+            tracing::warn!(target: "idevice", "pairing_failed");
+            tracing::info!("carlife.encoder state=started");
+        });
+
+        let terminal = String::from_utf8(seen.lock().unwrap().clone()).unwrap();
+        let copy = fs::read_to_string(&path).unwrap();
+        assert!(!terminal.contains("URB completed"), "{terminal:?}");
+        assert!(!copy.contains("URB completed"), "{copy:?}");
+        assert!(!terminal.contains("Sending plist"), "{terminal:?}");
+        assert!(!copy.contains("Sending plist"), "{copy:?}");
+        assert!(terminal.contains("device_lost"), "{terminal:?}");
+        assert!(copy.contains("device_lost"), "{copy:?}");
+        assert!(terminal.contains("pairing_failed"), "{terminal:?}");
+        assert!(copy.contains("pairing_failed"), "{copy:?}");
+        assert!(copy.contains("encoder state=started"), "{copy:?}");
 
         fs::remove_file(&path).ok();
         fs::remove_file(&previous).ok();
