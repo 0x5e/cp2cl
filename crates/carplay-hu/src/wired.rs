@@ -40,6 +40,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::admission::Side;
 use crate::bringup::{carry_artwork, run_bringup, Ended};
+use crate::frames::Trace;
 use crate::link::Panel;
 use crate::machine::Machine;
 use crate::report::Report;
@@ -412,44 +413,6 @@ impl<S> Latched<S> {
         };
         (latch, shut)
     }
-}
-
-/// The first chunks of a cable session in both directions, as the log shows them.
-///
-/// LIVI's link driver used to print these; the driver no longer does, and this is
-/// where the same first look at a cable that never identifies is kept. Only the
-/// first few are printed, and only at debug level: enough to see whether the
-/// phone answered at all, not enough to drown a working session.
-#[derive(Default)]
-struct Trace {
-    chunks_in: usize,
-    chunks_out: usize,
-}
-
-const TRACE_CHUNKS: usize = 20;
-const TRACE_BYTES: usize = 32;
-
-impl Trace {
-    fn inbound(&mut self, data: &[u8]) {
-        self.chunks_in += 1;
-        if self.chunks_in <= TRACE_CHUNKS {
-            tracing::debug!("carplay.iap2.frame_in bytes={} data={}", data.len(), hex(data));
-        }
-    }
-
-    fn outbound(&mut self, data: &[u8]) {
-        self.chunks_out += 1;
-        if self.chunks_out <= TRACE_CHUNKS {
-            tracing::debug!("carplay.iap2.frame_out bytes={} data={}", data.len(), hex(data));
-        }
-    }
-}
-
-/// At most the first `TRACE_BYTES`, so one chunk cannot fill the log.
-fn hex(data: &[u8]) -> String {
-    let shown: Vec<String> = data.iter().take(TRACE_BYTES).map(|b| format!("{b:02x}")).collect();
-    let more = if data.len() > TRACE_BYTES { " …" } else { "" };
-    format!("{}{more}", shown.join(" "))
 }
 
 /// The switch end of a `Latched`: hand it to whoever needs to end the session.

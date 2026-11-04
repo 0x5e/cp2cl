@@ -25,6 +25,8 @@ pub mod sink;
 mod aac;
 mod airplay;
 mod bringup;
+mod frames;
+mod names;
 mod wired;
 mod wireless;
 
