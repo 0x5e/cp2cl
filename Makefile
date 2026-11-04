@@ -117,12 +117,12 @@ endif
 # a kernel nothing here runs.
 #
 # So the tree is emptied when what decides it changes, and kept otherwise. The
-# Buildroot release, the generated `.config` and everything under `board/` —
-# the overlays, the post-build script, the blobs it installs — are the whole of
-# it, and that is what the tree is fingerprinted by. A build after a change to
-# the crate then installs one package instead of thirty. Timestamps would empty
-# the tree on every checkout: a checkout rewrites every mtime in the working
-# tree and changes nothing else.
+# Buildroot release, the generated `.config`, everything under `board/` — the
+# overlays, the post-build script, the blobs it installs — and the package
+# patches under `package/` are the whole of it, and that is what the tree is
+# fingerprinted by. A build after a change to the crate then installs one
+# package instead of thirty. Timestamps would empty the tree on every checkout:
+# a checkout rewrites every mtime in the working tree and changes nothing else.
 #
 # Upstream has nothing that empties the tree and keeps the cache that produced
 # it: `make clean` takes dl/ and every build directory with it, and the
@@ -137,9 +137,24 @@ endif
 # `make firmware FRESH=1` empties the tree whether the fingerprint says so or
 # not: the answer when the tree was edited in place while debugging.
 BR_FINGERPRINT := { echo $(BR_VERSION); cat /build/.config; \
-	find /src/buildroot/board -type f | LC_ALL=C sort | xargs -r cat; } \
+	find /src/buildroot/board /src/buildroot/package -type f \
+	| LC_ALL=C sort | xargs -r cat; } \
 	| md5sum | cut -c1-32 > /build/.target-fingerprint.now
-BR_EMPTY := rm -rf /build/target && rm -f /build/build/*/.stamp_target_installed
+
+# The radio's driver is compiled against the kernel tree, and nothing in
+# Buildroot makes that tree's headers a dependency of the package's stamp: a
+# module built before the kernel was configured differently keeps its objects
+# and is only installed again. `struct net_device` then means one thing to the
+# module and another to the kernel it loads into, and the first field it reads
+# at the old offset lands on a neighbour — which is an Oops at insmod, in
+# whichever field the shift happens to be. A module that read `addr_len` eight
+# bytes late wrote over `dev_addr` and took the kernel's address bookkeeping
+# with it. So the module is built again wherever the kernel is: with its
+# sources, when a patch changes, and with its configuration, when `.config` or
+# `board/` does.
+BR_MODULES := /build/build/uwe5622-*
+
+BR_EMPTY := rm -rf /build/target $(BR_MODULES) && rm -f /build/build/*/.stamp_target_installed
 ifeq ($(FRESH),1)
 BR_FRESH := $(BR_EMPTY)
 else
@@ -167,7 +182,7 @@ BR_REFRESH := rm -f /build/build/cp2cl-*/.stamp_rsynced /build/build/cp2cl-*/.st
 BR_REPATCH := { find /src/buildroot/patches -type f | LC_ALL=C sort | xargs -r cat; } \
 	| md5sum | cut -c1-32 > /build/.patch-fingerprint.now && { \
 	cmp -s /build/.patch-fingerprint.now /build/.patch-fingerprint \
-	|| { rm -rf /build/build/linux-[0-9]* && mv /build/.patch-fingerprint.now /build/.patch-fingerprint; }; }
+	|| { rm -rf /build/build/linux-[0-9]* $(BR_MODULES) && mv /build/.patch-fingerprint.now /build/.patch-fingerprint; }; }
 
 # A change of Buildroot release is not a change of configuration: host/ and
 # build/ belong to the release that made them, and their stamps make the new one
