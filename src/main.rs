@@ -10,6 +10,7 @@
 //! * this program, which owns the board — its settings, its lights, its page —
 //!   and is what the two halves know of each other.
 
+mod artwork;
 mod assets;
 mod button;
 mod config;
@@ -34,7 +35,7 @@ use iap2_mfi::{AuthCoprocessor, FileCoprocessor, NoCoprocessor};
 use livi_runtime::mfi_async::SharedCoprocessor;
 use livi_runtime::vehicle::Vehicle;
 use tokio::net::TcpListener;
-use tokio::sync::{watch, Notify};
+use tokio::sync::{mpsc, watch, Notify};
 use tracing_subscriber::prelude::*;
 
 use carlife_md::outlet::Outlet;
@@ -228,6 +229,14 @@ async fn main() -> Result<()> {
     // CarLife session to take them out, on the video channel and the media one.
     let outlet = Arc::new(Outlet::new());
 
+    // The cover takes a detour: it is the one thing the phone sends that the
+    // car's message may not have room for, and making it fit is tens of
+    // milliseconds of decoding and encoding. The task that does it is here
+    // rather than in either half, because the size it aims at is one end's and
+    // the picture is the other's.
+    let (covers, arriving) = mpsc::unbounded_channel();
+    tokio::spawn(artwork::carry(arriving, outlet.sink()));
+
     // One object per stream, not two: a video event and an audio event differ
     // only in which channel the consumer converts them to. There are two of them
     // because there are two streams that can be told apart this early — the
@@ -235,7 +244,7 @@ async fn main() -> Result<()> {
     // them are the same car on the same connection. What the phone is playing,
     // and where it is going, go through the same object, which is why it is kept
     // whole rather than erased into the two traits below.
-    let sink = Arc::new(ClSink::new(outlet.sink()));
+    let sink = Arc::new(ClSink::new(outlet.sink(), covers));
     let (video_sink, audio_sink): (Arc<dyn StreamSink>, Arc<dyn StreamSink>) =
         (sink.clone(), sink.clone());
 
@@ -254,9 +263,8 @@ async fn main() -> Result<()> {
     // answer the phone's challenge, and airplay to answer /auth-setup.
     let auth = SharedCoprocessor::new(mfi_signer()?);
 
-    // What the CarPlay half is told about the machine, and the two of these that
-    // are not properties of it: how much room the car's media message leaves for
-    // a cover, which is the consumer's number rather than the phone's.
+    // What the CarPlay half is told about the machine: nothing here is a choice,
+    // it is what the board says about itself.
     let machine = Arc::new(carplay_hu::machine::Machine {
         wireless: cfg.wireless,
         wifi_iface: cfg.wifi_iface.clone(),
@@ -265,7 +273,6 @@ async fn main() -> Result<()> {
         vendor: config::dt_vendor(),
         bt_address: config::bt_address(&cfg.bt_adapter),
         data_dir: data_dir.clone(),
-        artwork_limit: carlife_md::MAX_ARTWORK,
     });
 
     // Whether the CarPlay half is open for the phone at all. It starts shut and
@@ -358,6 +365,12 @@ async fn main() -> Result<()> {
             input: car.clone(),
             delegate: &*car,
             assets: &*car,
+            // The car's media message carries a cover whether or not the phone
+            // sent one, and a blank is not what a phone sends: this is what the
+            // panel is shown instead — two beamed notes on a dark field, cut out
+            // of the phone's own screen where it draws the same thing.
+            placeholder: assets::get("icons/iv_music_pic.png")
+                .expect("the placeholder is built in"),
             home: home.clone(),
             outlet,
             report: reported,

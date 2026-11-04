@@ -227,7 +227,7 @@ impl Tunnel {
             ..LinkConfig::default()
         };
         let (channel, artwork) = spawn_link_stream(link_side, link_config, true);
-        let carrying = tokio::spawn(carry_artwork(artwork, setup.panel.clone(), setup.cfg.artwork_limit));
+        let carrying = tokio::spawn(carry_artwork(artwork, setup.panel.clone()));
 
         let (tx, rx) = mpsc::channel(64);
         let auth = setup.auth.clone();

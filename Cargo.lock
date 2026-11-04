@@ -264,8 +264,6 @@ dependencies = [
  "iap2-usbmux",
  "iap2-wired",
  "idevice",
- "jpeg-encoder",
- "kamadak-exif",
  "livi-runtime",
  "livi-wifi",
  "num-bigint",
@@ -281,9 +279,6 @@ dependencies = [
  "tracing",
  "x25519-dalek",
  "zbus",
- "zune-core",
- "zune-jpeg",
- "zune-png",
 ]
 
 [[package]]

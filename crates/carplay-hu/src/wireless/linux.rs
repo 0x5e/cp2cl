@@ -199,7 +199,7 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
             // The cover art is a file transfer of its own on the same link, and
             // it goes to the car's panel the same way the song it belongs to
             // does.
-            let carrying = tokio::spawn(carry_artwork(artwork, panel.clone(), cfg.artwork_limit));
+            let carrying = tokio::spawn(carry_artwork(artwork, panel.clone()));
             // Ending the session drops the descriptor, which is the only way a
             // BlueZ channel ever closes; paging the phone again is what brings
             // it back, and the loop above starts that over.

@@ -22,7 +22,6 @@ pub mod sink;
 
 mod aac;
 mod airplay;
-mod artwork;
 mod session;
 mod wireless;
 

@@ -89,12 +89,6 @@ const MEDIA_PAUSE: u32 = 0x0003_0003;
 const MEDIA_RESUME_PLAY: u32 = 0x0003_0004;
 const MEDIA_DATA: u32 = 0x0003_0006;
 
-/// The picture the panel is given for a song whose app sent no cover: two
-/// beamed notes on a dark field, cut out of the phone's own screen where it
-/// draws the same thing. An app with no cover is not a song with no picture, so
-/// this goes out instead of a cover field with nothing in it.
-const PLACEHOLDER_ART: &str = "icons/iv_music_pic.png";
-
 // The navigation prompt has a channel of its own, with the same three messages
 // in the same order. See the guide's §10.4 and CarLifeVehicleLib's
 // `CommonParams.java`.
@@ -2030,11 +2024,10 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             NowPlaying::Artwork(image) => {
                 // The car reads the song and its cover from one command-channel
                 // message, and the reference keeps a cover under 30 KB for it.
-                // A cover too large for that has already been re-encoded on the
-                // CarPlay side — see `crate::artwork` — so what arrives here is
-                // either small enough or not going to be. This is the backstop:
-                // the song still goes, the cover does not, and the message stays
-                // one the car can take.
+                // A cover too large for that has already been re-encoded by the
+                // program, so what arrives here is either small enough or not
+                // going to be. This is the backstop: the song still goes, the
+                // cover does not, and the message stays one the car can take.
                 if image.len() > proto::MAX_ARTWORK {
                     tracing::warn!(
                         "carlife.media_cover_dropped bytes={} cap_bytes={}",
@@ -2118,13 +2111,13 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     /// phone sent none.
     ///
     /// A song whose app has no cover is not a song without a picture on the
-    /// panel — a field with nothing in it is not a cover, so the placeholder
-    /// goes out instead. `crate::artwork` decides the size of a cover the phone
-    /// sent; the placeholder is small and fixed, and goes as it was built in.
+    /// panel: a field with nothing in it is not a cover, so the program's
+    /// placeholder goes out instead. A cover the phone sent has already been
+    /// made to fit by the program; the placeholder is small and fixed.
     fn cover(&self) -> &[u8] {
         match self.art.as_deref() {
             Some(art) if !art.is_empty() => art,
-            _ => self.ports.assets.get(PLACEHOLDER_ART).expect("assets are built in"),
+            _ => self.ports.placeholder,
         }
     }
 
@@ -2433,14 +2426,17 @@ mod tests {
         }
     }
 
-    /// The pictures a session falls back on: the one cover the binary carries,
-    /// and the guide built for the size the tests hand a car.
+    /// The cover the panel is given for a song whose app sent none: the picture
+    /// the program hands over.
+    const PLACEHOLDER: &[u8] = include_bytes!("../../../../assets/icons/iv_music_pic.png");
+
+    /// The pictures a session falls back on: the guide built for the size the
+    /// tests hand a car.
     struct Pictures;
 
     impl Assets for Pictures {
         fn get(&self, name: &str) -> Option<&'static [u8]> {
             match name {
-                PLACEHOLDER_ART => Some(&include_bytes!("../../../../assets/icons/iv_music_pic.png")[..]),
                 "guide/1280x720.h264" => {
                     Some(&include_bytes!("../../../../assets/guide/1280x720.h264")[..])
                 }
@@ -2480,11 +2476,17 @@ mod tests {
             input: Arc::new(NoKeys),
             delegate: watched,
             assets: &PICTURES,
+            placeholder: PLACEHOLDER,
             home,
             outlet,
             report,
             location,
         }
+    }
+
+    /// The cover the panel is given for a song whose app sent none.
+    fn placeholder() -> &'static [u8] {
+        PLACEHOLDER
     }
 
     /// A bridge with nothing coming down it: heartbeats only, which is what a
@@ -2504,11 +2506,6 @@ mod tests {
     /// The car's control of a module, as the two fields it is.
     fn control(module: i32, state: i32) -> proto::ModuleControl {
         proto::ModuleControl { module, state }
-    }
-
-    /// The cover the panel is given for a song whose app sent none.
-    fn placeholder() -> &'static [u8] {
-        PICTURES.get(PLACEHOLDER_ART).expect("the placeholder is built in")
     }
 
     /// The message the panel should have been given for `track` and `cover`,

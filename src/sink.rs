@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use carplay_hu::now_playing::NowPlaying;
 use carplay_hu::sink::{StreamSink, StreamEvent, StreamId};
 use carplay_hu::sink::{is_media, is_navigation};
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::now_playing::{NowPlaying as Playing, Position, Track};
 
@@ -71,6 +72,9 @@ fn starve(slot: &Mutex<Option<StreamId>>, stream: StreamId) -> bool {
 /// phone's streams onto them.
 pub struct ClSink {
     queues: Arc<carlife_md::outlet::Sink>,
+    /// Where the phone's cover art goes, as it arrived. `artwork::carry` takes it
+    /// from here, makes it fit, and puts the result on the queue.
+    covers: UnboundedSender<Vec<u8>>,
     /// Parameter sets from the newest codec description, put in front of the
     /// next frame. Held outside the queue deliberately: the queue can be full,
     /// and a dropped SPS/PPS costs everything that follows it.
@@ -84,9 +88,10 @@ pub struct ClSink {
 }
 
 impl ClSink {
-    pub fn new(queues: Arc<carlife_md::outlet::Sink>) -> Self {
+    pub fn new(queues: Arc<carlife_md::outlet::Sink>, covers: UnboundedSender<Vec<u8>>) -> Self {
         Self {
             queues,
+            covers,
             pending: Mutex::new(Vec::new()),
             media_stream: Mutex::new(None),
             navi_stream: Mutex::new(None),
@@ -194,6 +199,11 @@ impl StreamSink for ClSink {
 impl carplay_hu::link::Panel for ClSink {
     /// What the phone is playing, said in the CarLife side's own terms: the two
     /// records carry the same fields, and the queues are the car's.
+    ///
+    /// The cover is the exception: it is handed to `artwork::carry` instead of
+    /// the queue. A picture the car's message cannot carry has to be re-encoded
+    /// first, which is tens of milliseconds of work, and the task that does it
+    /// is not this one.
     fn playing(&self, item: NowPlaying) {
         let playing = match item {
             NowPlaying::Track(track) => Playing::Track(Track {
@@ -207,7 +217,10 @@ impl carplay_hu::link::Panel for ClSink {
                 elapsed_ms: position.elapsed_ms,
                 playing: position.playing,
             }),
-            NowPlaying::Artwork(bytes) => Playing::Artwork(bytes),
+            NowPlaying::Artwork(bytes) => {
+                let _ = self.covers.send(bytes);
+                return;
+            }
         };
         self.queues.playing(playing);
     }
@@ -219,6 +232,13 @@ mod tests {
 
     use carlife_md::outlet::Outlet;
     use carplay_hu::sink::AudioCodec;
+
+    /// A sink whose covers go nowhere in particular, for the tests that are not
+    /// about one.
+    fn sink(outlet: &Outlet) -> Arc<ClSink> {
+        let (covers, _) = tokio::sync::mpsc::unbounded_channel();
+        Arc::new(ClSink::new(outlet.sink(), covers))
+    }
 
     /// One stream: a type the phone names it with, and the instance it opened.
     fn id(stream_type: u8, connection_id: i64) -> StreamId {
@@ -234,7 +254,7 @@ mod tests {
     #[test]
     fn only_the_music_finds_its_way_to_the_media_channel() {
         let outlet = Outlet::new();
-        let sink = ClSink::new(outlet.sink());
+        let sink = sink(&outlet);
         let mut media = outlet.take_media().expect("nothing has taken it");
         let mut navi = outlet.take_navi().expect("nothing has taken it");
 
@@ -281,7 +301,7 @@ mod tests {
     #[test]
     fn a_session_takes_its_queues_empty() {
         let outlet = Outlet::new();
-        let sink = ClSink::new(outlet.sink());
+        let sink = sink(&outlet);
         let rx = outlet.take_video().expect("nothing has taken it");
         sink.push(StreamEvent::VideoFrame {
             keyframe: true,
@@ -302,7 +322,7 @@ mod tests {
     #[test]
     fn a_prompt_goes_to_the_navigation_channel_and_the_music_carries_on() {
         let outlet = Outlet::new();
-        let sink = ClSink::new(outlet.sink());
+        let sink = sink(&outlet);
         let mut media = outlet.take_media().expect("nothing has taken it");
         let mut navi = outlet.take_navi().expect("nothing has taken it");
 
@@ -354,7 +374,7 @@ mod tests {
     #[test]
     fn an_instance_that_was_replaced_cannot_end_the_channel() {
         let outlet = Outlet::new();
-        let sink = ClSink::new(outlet.sink());
+        let sink = sink(&outlet);
         let mut media = outlet.take_media().expect("nothing has taken it");
 
         let opened = |connection| StreamEvent::AudioConfig {
@@ -398,7 +418,7 @@ mod tests {
     #[test]
     fn the_screen_stream_is_open_for_exactly_as_long_as_it_is() {
         let outlet = Outlet::new();
-        let sink = ClSink::new(outlet.sink());
+        let sink = sink(&outlet);
         let streaming = outlet.streaming();
         let open = || *streaming.borrow();
 
@@ -411,11 +431,13 @@ mod tests {
 
     /// What the phone says about the song is the same five fields on both sides
     /// of the bridge, and the panel is where the car's copy is written: the two
-    /// records differ in name only.
+    /// records differ in name only. The cover is the one thing that does not go
+    /// straight to the queue — it is the program's to size first.
     #[test]
     fn what_the_phone_is_playing_becomes_the_cars_own_record() {
         let outlet = Outlet::new();
-        let sink = Arc::new(ClSink::new(outlet.sink()));
+        let (covers, mut arriving) = tokio::sync::mpsc::unbounded_channel();
+        let sink = Arc::new(ClSink::new(outlet.sink(), covers));
         let mut queue = outlet.take_playing().expect("nothing has taken it");
 
         carplay_hu::link::Panel::playing(
@@ -452,6 +474,13 @@ mod tests {
         ));
 
         carplay_hu::link::Panel::playing(&*sink, NowPlaying::Artwork(vec![0xff, 0xd8]));
-        assert!(matches!(queue.try_recv(), Ok(Playing::Artwork(bytes)) if bytes == vec![0xff, 0xd8]));
+        assert_eq!(
+            arriving.try_recv().expect("the cover, as it arrived"),
+            vec![0xff, 0xd8]
+        );
+        assert!(
+            queue.try_recv().is_err(),
+            "the queue is given a cover that fits, not the phone's bytes"
+        );
     }
 }

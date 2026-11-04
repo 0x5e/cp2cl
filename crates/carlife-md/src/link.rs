@@ -40,8 +40,7 @@ pub trait Delegate: Send + Sync {
     fn channel_entry(&self, channel: Option<&str>) -> ChannelEntry;
 }
 
-/// What the binary carries besides code: the guide's pictures and the cover a
-/// song without artwork gets.
+/// What the binary carries besides code: the guide's pictures.
 pub trait Assets: Send + Sync {
     fn get(&self, name: &str) -> Option<&'static [u8]>;
 

@@ -1,5 +1,11 @@
 //! Fitting the phone's cover art into the car's media message.
 //!
+//! This is the program's work rather than either half's, because the number it
+//! is all about is a property of one end measured against the other: the phone
+//! sends what its app has, and the ceiling is the car's. The CarPlay half hands
+//! the bytes over as they arrived; the CarLife half is given a cover that
+//! already fits.
+//!
 //! The car reads the song and its cover from one command-channel message, and
 //! the body of that message has a ceiling: 40 KB on the channel, with the
 //! reference implementation keeping the cover under 30 KB so the rest of it
@@ -32,22 +38,26 @@
 //! encoded at 200px, at the same four qualities, and the two smaller sizes are
 //! skipped because they would be the same picture again.
 //!
-//! None of this runs on the CarLife side. A cover is a few megapixels of
-//! decoding and up to six passes of encoding — tens of milliseconds on this
-//! board, long enough to be felt in the video if it happened where the streams
-//! are written. `crate::session` does the work in its own task and the CarLife
-//! session only ever sees the result.
+//! None of this runs where the streams are written. A cover is a few megapixels
+//! of decoding and up to six passes of encoding — tens of milliseconds on this
+//! board, long enough to be felt in the video. `carry` is its own task and the
+//! CarLife session only ever sees the result.
 
 use std::fmt;
 use std::io::Cursor;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use jpeg_encoder::{ColorType, Encoder, SamplingFactor};
+use tokio::sync::mpsc::UnboundedReceiver;
 use zune_core::bytestream::ZCursor;
 use zune_core::colorspace::ColorSpace;
 use zune_core::options::DecoderOptions;
 use zune_core::result::DecodingResult;
 use zune_jpeg::JpegDecoder;
 use zune_png::PngDecoder;
+
+use crate::now_playing::NowPlaying;
 
 /// The longest edges a cover is brought down to, in the order they are tried.
 const LONG_EDGES: [u32; 3] = [400, 350, 300];
@@ -262,6 +272,53 @@ pub fn fit(bytes: &[u8], budget: usize) -> Fitted {
     }
 }
 
+/// The phone's covers, as the CarPlay half hands them over, on their way to the
+/// car's panel.
+///
+/// The budget is the CarLife half's: see `carlife_md::MAX_ARTWORK`.
+///
+/// An app that re-announces the song it is playing sends its cover again, and
+/// the same picture is not worth decoding twice. The picture is still handed
+/// over — the CarLife side drops one it is already holding — but the work is
+/// not done again.
+pub async fn carry(
+    mut covers: UnboundedReceiver<Vec<u8>>,
+    queues: Arc<carlife_md::outlet::Sink>,
+) {
+    let mut last: Option<((usize, u64), Fitted)> = None;
+
+    while let Some(image) = covers.recv().await {
+        let seen = (image.len(), fingerprint(&image));
+        let fitted = match &last {
+            Some((before, fitted)) if *before == seen => fitted.clone(),
+            _ => {
+                let started = Instant::now();
+                // A join error means the task panicked, or the runtime is going
+                // away with the program. Either way there is no picture to hand
+                // over, and the next cover is still worth carrying.
+                let Ok(fitted) = tokio::task::spawn_blocking(move || {
+                    fit(&image, carlife_md::MAX_ARTWORK)
+                })
+                .await
+                else {
+                    tracing::warn!("carplay.cover_dropped reason=compression_aborted");
+                    continue;
+                };
+                report_cover(&fitted, seen.0, started.elapsed());
+                last = Some((seen, fitted.clone()));
+                fitted
+            }
+        };
+
+        // The panel is better left with the song it has than with a picture the
+        // car would refuse the message over, so one that will not fit goes
+        // nowhere.
+        if let Fitted::AsIs(bytes) | Fitted::Shrunk { bytes, .. } = fitted {
+            queues.playing(NowPlaying::Artwork(bytes));
+        }
+    }
+}
+
 /// A picture in the one layout the rest of this works in: three bytes per pixel,
 /// top row first.
 struct Picture {
@@ -472,6 +529,65 @@ fn encode(rgb: &[u8], width: u32, height: u32, quality: u8) -> Result<Vec<u8>, (
     Ok(out)
 }
 
+/// What became of a cover, said once and at the level it deserves.
+///
+/// A cover that fitted is the ordinary case and worth a line only when someone
+/// is looking for it, so it is `debug`. One that had to be re-encoded is worth
+/// `info`: it is the one place where how large the phone's artwork was, and how
+/// much of it survived, can be seen.
+fn report_cover(fitted: &Fitted, bytes: usize, took: Duration) {
+    let ms = took.as_millis();
+    match fitted {
+        Fitted::AsIs(_) => tracing::debug!("carplay.cover_fit bytes={bytes} action=passthrough"),
+        Fitted::Shrunk {
+            bytes: out,
+            kind,
+            src_size,
+            size,
+            quality,
+            tries,
+            orientation,
+        } => {
+            let turned = if *orientation == 1 {
+                String::new()
+            } else {
+                format!(" orientation={orientation}")
+            };
+            tracing::info!(
+                "carplay.cover_fitted src={kind} in_bytes={bytes} in_width={} in_height={} \
+                 out_bytes={} width={} height={} quality={quality} tries={tries}{turned} ms={ms}",
+                src_size.0,
+                src_size.1,
+                out.len(),
+                size.0,
+                size.1
+            );
+        }
+        Fitted::GaveUp { why, best, tries } => match best {
+            Some(best) => tracing::warn!(
+                "carplay.cover_dropped in_bytes={bytes} reason={why:?} best_bytes={} width={} \
+                 height={} quality={} tries={tries} ms={ms}",
+                best.bytes,
+                best.size.0,
+                best.size.1,
+                best.quality
+            ),
+            None => tracing::warn!("carplay.cover_dropped in_bytes={bytes} reason={why:?} ms={ms}"),
+        },
+    }
+}
+
+/// A cheap fingerprint of a file, so the same cover arriving twice is recognised
+/// as the one that was just dealt with.
+///
+/// FNV-1a, which is not a hash to trust an attacker with and does not need to be:
+/// it only ever compares two files the phone itself sent.
+fn fingerprint(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,6 +763,36 @@ mod tests {
         assert_eq!(best.size, (300, 300));
         assert_eq!(best.quality, 60);
         assert!(best.bytes > budget);
+    }
+
+    /// A cover that cannot be sent is not handed to the car at all, and the ones
+    /// either side of it still are.
+    #[tokio::test]
+    async fn a_cover_the_car_cannot_take_never_reaches_it() {
+        let outlet = carlife_md::outlet::Outlet::new();
+        let mut queue = outlet.take_playing().expect("nothing has taken it");
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let carrying = tokio::spawn(carry(rx, outlet.sink()));
+
+        // Three bytes of a JPEG: small enough to go as it is.
+        let fits = vec![0xff, 0xd8, 0xff];
+        tx.send(fits.clone()).expect("a cover");
+        // Neither a picture nor anything the encoder could make one of.
+        tx.send(vec![0x42; 40 * 1024]).expect("a cover");
+        tx.send(fits.clone()).expect("a cover");
+
+        drop(tx);
+        carrying.await.expect("the task ends with the queue");
+
+        let mut carried = Vec::new();
+        while let Ok(item) = queue.try_recv() {
+            carried.push(item);
+        }
+        assert_eq!(
+            carried,
+            vec![NowPlaying::Artwork(fits.clone()), NowPlaying::Artwork(fits)],
+            "the two that fit went through and the one that did not was dropped"
+        );
     }
 
     /// A picture stored on its side is turned before it is made smaller, so the

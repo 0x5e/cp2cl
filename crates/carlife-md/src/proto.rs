@@ -297,9 +297,9 @@ pub fn media_progress_bar(elapsed_ms: i32) -> Vec<u8> {
 /// The song and its cover travel in one command-channel message, whose body the
 /// car caps at 40 KB. The reference app keeps a cover under 30 KB, re-compressing
 /// it until it fits and falling back to a built-in placeholder when it will not.
-/// This layer does not re-compress: a cover is made to fit before it gets here
-/// (`crate::artwork`), and one that still does not is left out rather than sent
-/// as a message the car cannot take.
+/// This layer does not re-compress: the program makes a cover fit before it gets
+/// here, and one that still does not is left out rather than sent as a message
+/// the car cannot take.
 pub const MAX_ARTWORK: usize = 30 * 1024;
 
 /// `MSG_CMD_MEDIA_INFO` — what the car's panel is told about the song that is
@@ -323,10 +323,10 @@ pub const MAX_ARTWORK: usize = 30 * 1024;
 ///
 /// `duration` is in seconds, which is the unit the guide gives it, and
 /// `albumArt` is the cover as the phone transferred it — a file, not a bitmap
-/// this side drew. A song whose app sent none carries the reference app's own
-/// placeholder (`crate::assets`), so there is always a picture: a body that
-/// names no cover and a body that draws a blank one look the same on the panel,
-/// and neither is what a phone sends.
+/// this side drew. A song whose app sent none carries the picture the program
+/// named for it (`Ports::placeholder`), so there is always a picture: a body
+/// that names no cover and a body that draws a blank one look the same on the
+/// panel, and neither is what a phone sends.
 pub fn media_info(track: &Track, album_art: &[u8], source: &str) -> Vec<u8> {
     let mut out = Vec::new();
     put_required_str(&mut out, 1, source);

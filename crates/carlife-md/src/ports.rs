@@ -15,8 +15,14 @@ pub struct Ports<'a> {
     pub input: Arc<dyn Input>,
     /// What the host is told as the session runs.
     pub delegate: &'a dyn Delegate,
-    /// The guide's pictures and the cover a song without artwork gets.
+    /// The guide's pictures.
     pub assets: &'a dyn Assets,
+    /// The picture the panel is shown for a song whose app sent none.
+    ///
+    /// The car's media message carries a cover whether or not there is one to
+    /// carry, and a body that draws a blank is not what a phone sends — so the
+    /// program picks one and this is it.
+    pub placeholder: &'static [u8],
     /// Fires when the phone's icon for us is tapped: on the phone that icon
     /// stands for the car's own interface, so the car is asked to show it.
     pub home: Arc<Notify>,

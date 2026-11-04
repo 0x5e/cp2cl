@@ -24,9 +24,6 @@ pub struct Machine {
     pub bt_address: String,
     /// Where the firmware installs the credentials and the pairing record.
     pub data_dir: PathBuf,
-    /// The largest cover the car's message can carry, which is what decides when
-    /// one has to be shrunk before it is sent. The limit is the consumer's.
-    pub artwork_limit: usize,
 }
 
 impl Default for Machine {
@@ -40,7 +37,6 @@ impl Default for Machine {
             vendor: "Unknown".to_string(),
             bt_address: "00:11:22:33:44:55".to_string(),
             data_dir: PathBuf::new(),
-            artwork_limit: 0,
         }
     }
 }

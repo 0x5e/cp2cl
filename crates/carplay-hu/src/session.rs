@@ -24,7 +24,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use iap2_link::LinkConfig;
 use livi_runtime::bringup::{run_accessory, BringupEvent, CpConfig};
@@ -39,7 +39,6 @@ use livi_wifi::Channel;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{mpsc, watch};
 
-use crate::artwork::{self, Fitted};
 use crate::link::Panel;
 use crate::now_playing::{NowPlaying, Position, Track};
 use crate::machine::Machine;
@@ -294,7 +293,7 @@ async fn attach(
         // The cover art is a file transfer of its own on the same link, so it is
         // carried across as it lands rather than waited for: the update that
         // names the song says only that art is coming.
-        let carrying = tokio::spawn(carry_artwork(artwork, panel.clone(), cfg.artwork_limit));
+        let carrying = tokio::spawn(carry_artwork(artwork, panel.clone()));
 
         let cp = CpConfig {
             wifi_iface: String::new(),
@@ -545,111 +544,14 @@ fn said(track: &Track) -> Option<String> {
 /// CarLife side takes it as belonging to the newest one, and holds it until a
 /// song turns up to attach it to.
 ///
-/// A cover the car's message cannot carry is re-encoded first — see
-/// `crate::artwork` — because the alternative is a song shown with no picture at
-/// all. It is done here rather than on the CarLife side so that the decoding and
-/// the encoding happen off the task that writes the streams: tens of
-/// milliseconds is long enough to be felt in the video.
-pub(crate) async fn carry_artwork(
-    mut artwork: ArtworkRx,
-    panel: Arc<dyn Panel>,
-    budget: usize,
-) {
-    // An app that re-announces the song it is playing sends its cover again, and
-    // the same picture is not worth decoding twice. The picture is still handed
-    // over — the CarLife side drops one it is already holding — but the work is
-    // not done again.
-    let mut last: Option<((usize, u64), Fitted)> = None;
-
+/// The bytes are handed on as the phone sent them. What the car's message can
+/// carry, and what to show when the phone sent nothing, are the program's to
+/// decide: they are facts about the other end of the bridge, which this half
+/// does not have.
+pub(crate) async fn carry_artwork(mut artwork: ArtworkRx, panel: Arc<dyn Panel>) {
     while let Some(image) = artwork.recv().await {
-        let seen = (image.len(), fingerprint(&image));
-        let fitted = match &last {
-            Some((before, fitted)) if *before == seen => fitted.clone(),
-            _ => {
-                let started = Instant::now();
-                // A join error means the task panicked, or the runtime is going
-                // away with the session. Either way there is no picture to hand
-                // over, and the next cover is still worth carrying.
-                let Ok(fitted) =
-                    tokio::task::spawn_blocking(move || artwork::fit(&image, budget)).await
-                else {
-                    tracing::warn!("carplay.cover_dropped reason=compression_aborted");
-                    continue;
-                };
-                report_cover(&fitted, seen.0, started.elapsed());
-                last = Some((seen, fitted.clone()));
-                fitted
-            }
-        };
-
-        match fitted {
-            Fitted::AsIs(bytes) | Fitted::Shrunk { bytes, .. } => {
-                panel.playing(NowPlaying::Artwork(bytes))
-            }
-            // The panel is better left with the song it has than with a picture
-            // the car would refuse the message over.
-            Fitted::GaveUp { .. } => {}
-        }
+        panel.playing(NowPlaying::Artwork(image));
     }
-}
-
-/// What became of a cover, said once and at the level it deserves.
-///
-/// A cover that fitted is the ordinary case and worth a line only when someone
-/// is looking for it, so it is `debug`. One that had to be re-encoded is worth
-/// `info`: it is the one place where how large the phone's artwork was, and how
-/// much of it survived, can be seen.
-fn report_cover(fitted: &Fitted, bytes: usize, took: Duration) {
-    let ms = took.as_millis();
-    match fitted {
-        Fitted::AsIs(_) => tracing::debug!("carplay.cover_fit bytes={bytes} action=passthrough"),
-        Fitted::Shrunk {
-            bytes: out,
-            kind,
-            src_size,
-            size,
-            quality,
-            tries,
-            orientation,
-        } => {
-            let turned = if *orientation == 1 {
-                String::new()
-            } else {
-                format!(" orientation={orientation}")
-            };
-            tracing::info!(
-                "carplay.cover_fitted src={kind} in_bytes={bytes} in_width={} in_height={} \
-                 out_bytes={} width={} height={} quality={quality} tries={tries}{turned} ms={ms}",
-                src_size.0,
-                src_size.1,
-                out.len(),
-                size.0,
-                size.1
-            );
-        }
-        Fitted::GaveUp { why, best, tries } => match best {
-            Some(best) => tracing::warn!(
-                "carplay.cover_dropped in_bytes={bytes} reason={why:?} best_bytes={} width={} \
-                 height={} quality={} tries={tries} ms={ms}",
-                best.bytes,
-                best.size.0,
-                best.size.1,
-                best.quality
-            ),
-            None => tracing::warn!("carplay.cover_dropped in_bytes={bytes} reason={why:?} ms={ms}"),
-        },
-    }
-}
-
-/// A cheap fingerprint of a file, so the same cover arriving twice is recognised
-/// as the one that was just dealt with.
-///
-/// FNV-1a, which is not a hash to trust an attacker with and does not need to be:
-/// it only ever compares two files the phone itself sent.
-fn fingerprint(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
-    })
 }
 
 /// A byte stream that can be made to look like the far end went away.
@@ -842,20 +744,19 @@ mod tests {
         assert_eq!(said(&Track::default()), None);
     }
 
-    /// A cover is carried or it is not: one the car's message cannot take never
-    /// reaches the CarLife side, and the ones either side of it still do.
+    /// Every cover the phone sends is handed on as it arrived, whatever it is:
+    /// what the car's message can carry is decided past this half.
     #[tokio::test]
-    async fn a_cover_the_car_cannot_take_never_reaches_it() {
+    async fn a_cover_is_handed_on_as_it_arrived() {
         let panel = Arc::new(Collected::default());
         let (tx, rx) = mpsc::unbounded_channel();
-        let carrying = tokio::spawn(carry_artwork(rx, panel.clone(), 10 * 1024));
+        let carrying = tokio::spawn(carry_artwork(rx, panel.clone()));
 
-        // Three bytes of a JPEG: small enough to go as it is.
-        let fits = vec![0xff, 0xd8, 0xff];
-        tx.send(fits.clone()).expect("a cover");
-        // Neither a picture nor something the message could carry.
+        // Three bytes of a JPEG, and something that is no picture at all: both
+        // are the phone's to send and neither is this half's to judge.
+        let small = vec![0xff, 0xd8, 0xff];
+        tx.send(small.clone()).expect("a cover");
         tx.send(vec![0x42; 40 * 1024]).expect("a cover");
-        tx.send(fits.clone()).expect("a cover");
 
         drop(tx);
         carrying.await.expect("the task ends with the link");
@@ -864,10 +765,10 @@ mod tests {
         assert_eq!(
             carried,
             vec![
-                NowPlaying::Artwork(fits.clone()),
-                NowPlaying::Artwork(fits)
+                NowPlaying::Artwork(small),
+                NowPlaying::Artwork(vec![0x42; 40 * 1024])
             ],
-            "the two that fit went through and the one that did not was dropped"
+            "the bytes went on as they came"
         );
     }
 }
