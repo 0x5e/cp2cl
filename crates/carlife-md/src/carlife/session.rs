@@ -2426,9 +2426,10 @@ mod tests {
         }
     }
 
-    /// The cover the panel is given for a song whose app sent none: the picture
-    /// the program hands over.
-    const PLACEHOLDER: &[u8] = include_bytes!("../../../../assets/icons/iv_music_pic.png");
+    /// What a test hands over as the picture for a song whose app sent none.
+    /// Which picture it is belongs to the program, so this is one of its own
+    /// rather than a file out of the program's asset directory.
+    const PLACEHOLDER: &[u8] = b"\x89PNG a placeholder";
 
     /// The pictures a session falls back on: the guide built for the size the
     /// tests hand a car.
@@ -2522,13 +2523,6 @@ mod tests {
     /// bytes of it, so the length is one byte of its own.
     fn stamp_of(body: &[u8]) -> &str {
         std::str::from_utf8(&body[2..2 + usize::from(body[1])]).unwrap_or_default()
-    }
-
-    /// The placeholder goes out where a cover would, so it has to be a file the
-    /// car can draw — a PNG, as it was cut out of the phone's screen.
-    #[test]
-    fn the_placeholder_is_a_picture() {
-        assert_eq!(&placeholder()[..4], b"\x89PNG");
     }
 
     #[test]

@@ -61,8 +61,9 @@ pub static TABLE: Table = Table;
 mod tests {
     use super::*;
 
-    /// The four things that have to be in the binary: what `/info` puts on the
-    /// phone's screen, what decides the label above it, and the page.
+    /// What has to be in the binary: the icons `/info` puts on the phone's
+    /// screen, the picture the car's panel is given for a song whose app sent
+    /// none, and the page.
     #[test]
     fn what_the_program_cannot_run_without_is_built_in() {
         for name in [
@@ -70,6 +71,7 @@ mod tests {
             "icons/Default-512.png",
             "icons/Mercedes-256.png",
             "icons/Mercedes-512.png",
+            "icons/iv_music_pic.png",
         ] {
             let png = get(name).unwrap_or_else(|| panic!("{name} is built in"));
             assert_eq!(&png[..4], b"\x89PNG", "{name} is a PNG");
