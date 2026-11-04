@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use carlife_md::channels::ChannelEntry;
-use carlife_md::link::{Assets, Delegate, Input};
+use carlife_md::link::{Delegate, Input};
 use carlife_md::machine::{ScreenOverride, Size};
 use carlife_md::press::Command;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -29,7 +29,7 @@ use tokio::sync::{watch, Notify};
 use crate::led;
 
 /// The one object both halves are given: it answers for each of them as the
-/// host that is told what happened, as the asset table, and as where a key goes.
+/// host that is told what happened, and as where a key goes.
 pub struct Hooks {
     /// Whether the CarPlay half accepts anything at all. Shut until a head unit
     /// has been told who this device is, and shut again when it goes.
@@ -183,16 +183,6 @@ impl carlife_md::link::Location for Hooks {
     /// convention rather than CarLife's, so it is done here.
     fn fix(&self, nmea: &str) {
         let _ = self.vehicle.push_location(&BASE64.encode(nmea));
-    }
-}
-
-impl Assets for Hooks {
-    fn get(&self, name: &str) -> Option<&'static [u8]> {
-        crate::assets::get(name)
-    }
-
-    fn names(&self) -> Vec<&'static str> {
-        crate::assets::names().collect()
     }
 }
 

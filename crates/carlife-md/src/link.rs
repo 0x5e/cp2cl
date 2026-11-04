@@ -40,15 +40,6 @@ pub trait Delegate: Send + Sync {
     fn channel_entry(&self, channel: Option<&str>) -> ChannelEntry;
 }
 
-/// What the binary carries besides code: the guide's pictures.
-pub trait Assets: Send + Sync {
-    fn get(&self, name: &str) -> Option<&'static [u8]>;
-
-    /// Every name the binary carries. The guide ships one file per screen size,
-    /// and the set is whatever was built rather than a list kept beside them.
-    fn names(&self) -> Vec<&'static str>;
-}
-
 /// Where the car's position goes, as a block of NMEA sentences: either a fix or
 /// the sentences that withdraw one. The phone reads it as its own location.
 pub trait Location: Send + Sync {

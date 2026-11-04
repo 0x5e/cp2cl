@@ -11,12 +11,11 @@
 //! sentences the phone reads one from, and `desc` is the shape of the device as
 //! a host reads it.
 //!
-//! `auth`, `desc`, `frame`, `gps`, `guide`, `names`, `proto` and `session` are
+//! `auth`, `desc`, `frame`, `gps`, `names`, `proto` and `session` are
 //! plain code with no USB in them, which is what lets them be tested against an
 //! in-memory pipe. `usb`, `gadget` and `aio` are the ones that need the board.
 
 pub(crate) mod auth;
-pub(crate) mod guide;
 pub(crate) mod session;
 
 mod aio;

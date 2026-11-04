@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tokio::sync::Notify;
 
-use crate::link::{Assets, Delegate, Input, Location};
+use crate::link::{Delegate, Input, Location};
 use crate::outlet::Outlet;
 use crate::report::Report;
 
@@ -15,8 +15,6 @@ pub struct Ports<'a> {
     pub input: Arc<dyn Input>,
     /// What the host is told as the session runs.
     pub delegate: &'a dyn Delegate,
-    /// The guide's pictures.
-    pub assets: &'a dyn Assets,
     /// The picture the panel is shown for a song whose app sent none.
     ///
     /// The car's media message carries a cover whether or not there is one to

@@ -14,6 +14,7 @@ mod artwork;
 mod assets;
 mod button;
 mod config;
+mod guide;
 mod hooks;
 mod led;
 mod logging;
@@ -279,6 +280,16 @@ async fn main() -> Result<()> {
     // the car's session is the only thing that opens it: nothing is published
     // and nothing is accepted until there is a head unit on the other end.
     let (gateway, gate) = watch::channel(false);
+
+    // What the car is shown while the phone has nothing to show it: frames built
+    // into the binary, pushed onto the video queue for as long as there is a car
+    // and no stream. The video queue is the whole of the interface — the CarLife
+    // half writes what reaches it and knows nothing about a guide.
+    tokio::spawn(guide::run(
+        outlet.clone(),
+        gateway.subscribe(),
+        screen.subscribe(),
+    ));
     tracing::debug!(
         "main.bridge.carplay_side state={}",
         if *gateway.borrow() { "open" } else { "shut" }
@@ -364,7 +375,6 @@ async fn main() -> Result<()> {
         let ports = carlife_md::Ports {
             input: car.clone(),
             delegate: &*car,
-            assets: &*car,
             // The car's media message carries a cover whether or not the phone
             // sent one, and a blank is not what a phone sends: this is what the
             // panel is shown instead — two beamed notes on a dark field, cut out
