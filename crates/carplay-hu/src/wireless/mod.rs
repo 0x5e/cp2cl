@@ -322,7 +322,7 @@ const HOSTAPD_DIR: &str = "/etc/hostapd";
 /// The file is found by what it says rather than by what it is called. The
 /// directory holds whatever configurations the operator keeps, and the one that
 /// matters is the one that names this interface.
-fn access_point(iface: &str) -> Result<(PathBuf, AccessPoint), String> {
+pub(crate) fn access_point(iface: &str) -> Result<(PathBuf, AccessPoint), String> {
     find_access_point(Path::new(HOSTAPD_DIR), iface)
 }
 
@@ -350,10 +350,10 @@ fn find_access_point(dir: &Path, iface: &str) -> Result<(PathBuf, AccessPoint), 
 /// The network the access point is on air with, as its own configuration
 /// describes it.
 #[derive(Debug, PartialEq, Eq)]
-struct AccessPoint {
-    ssid: String,
-    passphrase: String,
-    channel: u8,
+pub(crate) struct AccessPoint {
+    pub(crate) ssid: String,
+    pub(crate) passphrase: String,
+    pub(crate) channel: u8,
     /// What the access point asks a phone to authenticate with.
     security: Security,
 }

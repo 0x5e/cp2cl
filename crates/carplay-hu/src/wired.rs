@@ -45,7 +45,7 @@ use crate::link::Panel;
 use crate::machine::Machine;
 use crate::report::Report;
 use crate::Hu;
-use crate::wireless::{parse_mac, short};
+use crate::wireless::{access_point, parse_mac, short};
 
 /// How often we ask who is attached. Cheap enough that a second is not rude, and
 /// fast enough that plugging in feels immediate.
@@ -348,6 +348,15 @@ async fn attach(
         let tunnel = carkit(&mux).await?;
         tracing::info!("carplay.carkit_up phone={} action=start_iap2", short(&phone.id));
 
+        // A phone on the cable can still ask which Wi-Fi it should find this
+        // accessory on (0x5702), and what it is told is what lets it join
+        // unattended once the cable is pulled. The answer is read from the same
+        // hostapd file the wireless sessions read, per session, so that a
+        // network run differently from the default cannot be described two
+        // ways by the same accessory.
+        let (_path, ap) = access_point(&cfg.wifi_iface)
+            .map_err(|e| anyhow::anyhow!("wifi config on {}: {e}", cfg.wifi_iface))?;
+
         let identity = Identity {
             name: cfg.name.clone(),
             ssid: cfg.name.clone(),
@@ -380,9 +389,12 @@ async fn attach(
 
         let cp = CpConfig {
             wifi_iface: String::new(),
-            ssid: cfg.name.clone(),
-            passphrase: "00000000".into(),
-            channel: Channel::of_number(36),
+            // Only the 0x5702 answer reads these over the cable — the wired
+            // start session names no Wi-Fi — but the phone that asked is the
+            // one that will look for this network later.
+            ssid: ap.ssid.clone(),
+            passphrase: ap.passphrase.clone(),
+            channel: Channel::of_number(ap.channel.into()),
             airplay_port,
             source_version: "320.17".into(),
             // The key the phone was given at pair-setup, so the cable and the
