@@ -50,6 +50,15 @@ impl AudioCodec {
         }
     }
 
+    /// Sample width in bits. Only PCM has a fixed one; a compressed stream is
+    /// described by the coding that decodes it, not by a sample width.
+    pub fn bits(&self) -> Option<u16> {
+        match self {
+            Self::Pcm { .. } => Some(16),
+            Self::AacLc { .. } | Self::Opus { .. } => None,
+        }
+    }
+
     /// Reads the single `audioFormat` bitfield the phone echoes back in the
     /// stream SETUP. Bits are LIVI's `kAirPlayAudioFormat_*` constants: OPUS and
     /// AAC-LC sit high up, the LPCM rates are one bit each below.
@@ -205,6 +214,15 @@ mod tests {
                 "0x{bits:x}"
             );
         }
+    }
+
+    /// The page shows a sample width only where the coding has one: PCM is
+    /// 16-bit, AAC-LC and Opus have no fixed width to name.
+    #[test]
+    fn only_pcm_has_a_fixed_sample_width() {
+        assert_eq!(AudioCodec::from_format(0x8000).bits(), Some(16));
+        assert_eq!(AudioCodec::from_format(0x80_0000).bits(), None);
+        assert_eq!(AudioCodec::from_format(0x7000_0000).bits(), None);
     }
 
     /// A call and an assistant are the car's own channels; everything else the

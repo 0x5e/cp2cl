@@ -307,6 +307,8 @@ pub struct Audio {
     pub name: String,
     /// The coding the phone named for it, which is not always the one offered.
     pub codec: String,
+    /// Sample width in bits, where the coding has a fixed one.
+    pub bits: Option<u16>,
     pub rate: u32,
     pub channels: u16,
     /// How many frames of the codec the phone packs into each packet.
@@ -394,6 +396,7 @@ impl Carplay {
                     "stream_type": a.stream_type,
                     "name": a.name,
                     "codec": a.codec,
+                    "bits": a.bits,
                     "rate": a.rate,
                     "channels": a.channels,
                     "frames_per_packet": a.frames_per_packet,

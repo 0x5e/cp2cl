@@ -719,6 +719,29 @@ mod tests {
         }
     }
 
+    /// A PCM stream is described the same way on both halves, so the answer
+    /// carries the sample width and the page reads it rather than naming one.
+    #[test]
+    fn the_page_reads_the_sample_width_from_the_answer() {
+        assert!(page_text().contains("bits(a.bits)"), "the phone's half reads the field");
+        assert!(page_text().contains("bits(d.media.bits)"), "the car's half reads the field");
+        assert!(!page_text().contains("16-bit"), "and names no width itself");
+
+        let report = Arc::new(carplay_hu::report::Report::new());
+        report.with(|s| {
+            s.carplay.audio.push(carplay_hu::report::Audio {
+                name: "media".into(),
+                codec: "PCM".into(),
+                bits: Some(16),
+                rate: 48_000,
+                channels: 2,
+                ..Default::default()
+            });
+        });
+        let body = Status::new(report).json();
+        assert_eq!(body["carplay"]["audio"][0]["bits"], 16);
+    }
+
     /// The panel is the car's, so the page shows its physical size on the car's
     /// side, next to the size the car named, and reads it from the answer.
     #[test]

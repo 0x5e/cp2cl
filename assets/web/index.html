@@ -202,6 +202,9 @@ function video(v) {
 function rate(hz) {
   return hz ? Math.round(hz / 10) / 100 + " kHz" : null;
 }
+function bits(n) {
+  return n ? n + "-bit" : null;
+}
 function channels(n) {
   if (!n) return null;
   if (n === 1) return "Mono";
@@ -209,7 +212,7 @@ function channels(n) {
   return n + " ch";
 }
 function audioStream(a) {
-  const body = detail(a.codec, rate(a.rate), channels(a.channels));
+  const body = detail(a.codec, bits(a.bits), rate(a.rate), channels(a.channels));
   return (a.name || a.stream_type) + ":" + (body ? " " + body : "");
 }
 
@@ -286,8 +289,7 @@ const CARLIFE_ROWS = [
   ["分辨率", d => size(d.agreed)],
   ["视频编码", d => video(d.video)],
   ["音频编码", d => d.media
-    ? detail(d.media.bits ? "PCM " + d.media.bits + "-bit" : "PCM",
-             rate(d.media.rate), channels(d.media.channels))
+    ? detail("PCM", bits(d.media.bits), rate(d.media.rate), channels(d.media.channels))
     : null],
   ["物理尺寸", d => d.physical
     ? d.physical.width_mm + " × " + d.physical.height_mm + " mm"

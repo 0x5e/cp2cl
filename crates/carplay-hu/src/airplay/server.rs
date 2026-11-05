@@ -1613,6 +1613,7 @@ impl Session {
                             stream_type: stream_type as u8,
                             name: audio_type.clone(),
                             codec: codec_name(codec).to_string(),
+                            bits: codec.bits(),
                             rate: codec.rate(),
                             channels: codec.channels(),
                             frames_per_packet,
