@@ -106,7 +106,7 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
         // network is there has nothing to come back to.
         let ap = wait_for_access_point().await;
 
-        // That wait can last fifteen seconds, and the car's session can end
+        // That wait can last five seconds, and the car's session can end
         // inside it, or the cable can take the slot. Publishing a service then
         // is a phone called back for a session that has already gone or that
         // the receiver will not accept, so both are asked again rather than
@@ -537,10 +537,14 @@ async fn bluetoothd_up(conn: &zbus::Connection) -> bool {
 /// thing on this system that says the access point is on air.
 const AP_PID: &str = "/run/hostapd.pid";
 
-/// How long the service waits for the access point. `S55ap` retries for ten
-/// seconds and hostapd needs 3.4 to beacon, so this covers a boot that ran it
-/// late; the usual case is that it is already up, because the car took longer.
-const AP_CEILING: Duration = Duration::from_secs(15);
+/// How long the service waits for the access point. `S55ap` runs after this
+/// program and starts hostapd itself, which needs 3.4 seconds to beacon once it
+/// does. Ten is twice that for a start that is slow for its own reasons — a
+/// driver that probes for a while, a card that is late on the bus. A boot that
+/// is slower than that is served by the next round: the service is published
+/// again every time the slot comes free, and a phone that could not join is
+/// paged again with it.
+const AP_CEILING: Duration = Duration::from_secs(10);
 
 /// How often the pid file is looked for. The daemon is either there or about to
 /// be: this only decides how much of the ceiling is spent noticing.
