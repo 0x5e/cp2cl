@@ -109,7 +109,7 @@ fn git(manifest: &Path, args: &[&str]) -> Option<String> {
 fn dirty(manifest: &Path) -> bool {
     match std::process::Command::new("git")
         .current_dir(manifest)
-        .args(["status", "--porcelain"])
+        .args(["status", "--porcelain", "--ignore-submodules=dirty"])
         .output()
     {
         Ok(said) => said.status.success() && !said.stdout.is_empty(),
