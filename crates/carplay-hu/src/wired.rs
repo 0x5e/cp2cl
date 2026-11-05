@@ -38,7 +38,7 @@ use livi_wifi::Channel;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{broadcast, mpsc, watch};
 
-use crate::admission::Side;
+use crate::admission::{Admission, Side};
 use crate::bringup::{carry_artwork, run_bringup, Ended};
 use crate::frames::Trace;
 use crate::link::Panel;
@@ -50,6 +50,11 @@ use crate::wireless::{parse_mac, short};
 /// How often we ask who is attached. Cheap enough that a second is not rude, and
 /// fast enough that plugging in feels immediate.
 const SCAN_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How long the wireless link is given to let the slot go once it has been
+/// asked to. It ends in a fraction of this — the wait is only here so a link
+/// that has wedged cannot hold the cable out of its own session for ever.
+const TAKE_OVER_WAIT: Duration = Duration::from_secs(10);
 
 /// How long the phone is left alone between the old iAP2 session ending and a
 /// new one being offered. It has to notice the first before it will act on the
@@ -145,27 +150,35 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
     let vehicle = hu.vehicle.clone();
     let mut gate = hu.gate.clone();
     let mut owner = hu.admission.subscribe();
+    let mut named = hu.admission.subscribe_serial();
     let mut stopping = hu.stopping.subscribe();
     // The phone reported last time, so its disappearance is said once. The
     // claim, not this, is what decides whether a session may be started.
     let mut seen: Option<String> = None;
     loop {
-        // Three conditions, and `borrow_and_update` on each so `changed()`
-        // waits for the next change rather than returning at once for one that
-        // has already been read.
+        // Four conditions, and `borrow_and_update` on each so `changed()` waits
+        // for the next change rather than returning at once for one that has
+        // already been read.
         loop {
             let car = *gate.borrow_and_update();
-            let mine = (*owner.borrow_and_update()).map_or(true, |side| side == Side::Usb);
+            let held = *owner.borrow_and_update();
+            let declared = named.borrow_and_update().is_some();
             let asked_to_stop = *stopping.borrow_and_update();
             if asked_to_stop {
                 return;
             }
-            if car && mine {
+            // The cable looks for a phone when the slot is free or its own, and
+            // also while the wireless link holds it with a phone that has named
+            // the cable it would be on: that phone is the one this link may take
+            // the session over from — see `take_over`.
+            let may_look = held != Some(Side::Wireless) || declared;
+            if car && may_look {
                 break;
             }
             tokio::select! {
                 _ = gate.changed() => {},
                 _ = owner.changed() => {},
+                _ = named.changed() => {},
                 _ = stopping.changed() => {},
             }
         }
@@ -176,6 +189,23 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
                 status.phone_gone();
                 seen = None;
             }
+        }
+        // The wireless link is serving a phone. This one is only looked at for
+        // that same phone arriving on the cable, which is what moves the session
+        // onto it.
+        if hu.admission.owner() == Some(Side::Wireless) {
+            let wanted = hu.admission.serial();
+            if let Some(phone) = wanted.as_deref().and_then(|name| on_cable(name, &phones)) {
+                tracing::info!(
+                    "carplay.takeover phone={} from=wireless to=usb",
+                    short(&phone.id)
+                );
+                if take_over(hu, &mut owner).await {
+                    continue;
+                }
+            }
+            tokio::time::sleep(SCAN_INTERVAL).await;
+            continue;
         }
         if let Some(phone) = phones.into_iter().next() {
             let claim = match hu.admission.claim(Side::Usb) {
@@ -206,6 +236,7 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
                 &accessory_key,
                 &restart,
                 &mut shutdown,
+                &hu.admission,
                 &panel,
                 &status,
                 &vehicle,
@@ -227,6 +258,45 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
     }
 }
 
+/// The phone on the cable that a session elsewhere is already serving.
+///
+/// The serial is the only thing the two links can agree on: what the cable
+/// enumerates is a serial, and what the phone names when it identifies itself is
+/// the serial its cable would carry.
+fn on_cable<'a>(serial: &str, phones: &'a [Phone]) -> Option<&'a Phone> {
+    phones
+        .iter()
+        .find(|phone| phone.id.eq_ignore_ascii_case(serial))
+}
+
+/// Ends the session the wireless link is serving, and waits for it to let the
+/// slot go.
+///
+/// The `shutdown` the car's going away sends is what ends it from here: the
+/// AirPlay session, the iAP2 session on the tunnel and the Bluetooth leg all
+/// listen for it, and none of them can be ended from outside any other way. What
+/// is waited for is the slot, not the link — the claim is dropped when that link
+/// is done, and only then may the cable claim it. `true` when it came free.
+async fn take_over(hu: &Arc<Hu>, owner: &mut watch::Receiver<Option<Side>>) -> bool {
+    let _ = hu.shutdown.send(());
+    let freed = tokio::time::timeout(TAKE_OVER_WAIT, async {
+        loop {
+            if *owner.borrow_and_update() != Some(Side::Wireless) {
+                return;
+            }
+            if owner.changed().await.is_err() {
+                return;
+            }
+        }
+    })
+    .await;
+    if freed.is_ok() {
+        return true;
+    }
+    tracing::warn!("carplay.takeover_stalled action=look_again");
+    false
+}
+
 /// One phone: open carkit, negotiate iAP2, run the session — and open another
 /// one whenever what we render changes.
 ///
@@ -246,6 +316,7 @@ async fn attach(
     accessory_key: &str,
     restart: &watch::Sender<u64>,
     shutdown: &mut broadcast::Receiver<()>,
+    slot: &Admission,
     panel: &Arc<dyn Panel>,
     status: &Report,
     vehicle: &Arc<Vehicle>,
@@ -360,6 +431,8 @@ async fn attach(
             rx,
             &mut changed,
             shutdown,
+            slot,
+            Side::Usb,
             panel,
             status,
         )

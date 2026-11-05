@@ -40,6 +40,7 @@ use tokio::task::JoinHandle;
 
 use super::crypto::{hkdf32, open_frames, SymKey};
 use super::event::Events;
+use crate::admission::{Admission, Side};
 use crate::link::Panel;
 use crate::machine::Machine;
 use crate::report::Report;
@@ -85,6 +86,10 @@ pub struct Setup {
     pub status: Arc<Report>,
     pub events: Arc<Events>,
     pub handover: Arc<Handover>,
+    /// The one session-wide slot, and the phone's name for its cable once it
+    /// gives one: this is the same phone as the Bluetooth leg, so what it says
+    /// here is recorded in the same place — see `crate::admission`.
+    pub admission: Arc<Admission>,
     /// Fires when what the phone renders changes. The AirPlay session ends on
     /// it, so the session on the tunnel is told the same thing.
     pub restart: watch::Sender<u64>,
@@ -251,6 +256,7 @@ impl Tunnel {
 
         let mut changed = setup.restart.subscribe();
         let mut shutdown = setup.shutdown.subscribe();
+        let slot = setup.admission.clone();
         let (panel, status, ssid, airplay_port) = (
             setup.panel.clone(),
             setup.status.clone(),
@@ -270,6 +276,8 @@ impl Tunnel {
                 rx,
                 &mut changed,
                 &mut shutdown,
+                &slot,
+                Side::Wireless,
                 &panel,
                 &status,
             )
@@ -277,6 +285,7 @@ impl Tunnel {
             match ended {
                 Ended::Restart => tracing::info!("carplay.iap2.ended reason=render_changed"),
                 Ended::Finished => tracing::info!("carplay.iap2.ended"),
+                Ended::Stopped => tracing::info!("carplay.iap2.ended reason=stopped"),
             }
         });
 

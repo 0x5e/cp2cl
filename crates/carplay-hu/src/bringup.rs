@@ -7,26 +7,39 @@
 
 use std::sync::Arc;
 
+use iap2_csm::messages::car_play::DeviceTransportIdentifierNotification;
+use iap2_csm::CsmMessage;
 use livi_runtime::bringup::BringupEvent;
 use livi_runtime::driver::ArtworkRx;
 use tokio::sync::{broadcast, mpsc, watch};
 
+use crate::admission::{Admission, Side};
 use crate::link::Panel;
 use crate::now_playing::{NowPlaying, Position, Track};
 use crate::report::Report;
+use crate::wireless::short;
 
 /// iAP2's `NowPlayingUpdate`, which is what the phone describes a song with. It
 /// is subscribed to with everything else at the start of a session — see LIVI's
 /// `bringup::subscriptions` — and arrives as one more incoming message.
 const NOW_PLAYING: u16 = 0x5001;
 
+/// iAP2's `DeviceTransportIdentifierNotification`: the names the phone has for
+/// its own other links, its Bluetooth address and the serial its cable carries.
+const TRANSPORT_IDENTIFIER: u16 = 0x4E0E;
+
 /// Why a bringup ended, which is what says whether to start another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Ended {
     /// The phone left, or the session failed. There is nothing to restart.
     Finished,
     /// What we render changed, and the phone can only be told by starting
     /// CarPlay over — it reads `/info` once per session and never asks again.
     Restart,
+    /// Something outside the session ended it: the car went away, or the cable
+    /// took the phone over. There is nothing to start again, and nothing to
+    /// wait for either.
+    Stopped,
 }
 
 /// Prints the progress of one iAP2 bringup, and says how it ended.
@@ -53,7 +66,12 @@ pub(crate) enum Ended {
 ///
 /// `shutdown` fires when the car's session ends. Ending the iAP2 session with
 /// it is what lets the link that owns the slot give it back: a phone left on the
-/// cable after the car has gone is not a CarPlay session to keep running.
+/// cable after the car has gone is not a CarPlay session to keep running. The
+/// cable taking the session over sends the same thing, for the same reason.
+///
+/// `slot` is the one session-wide slot, and `side` is the link this session
+/// arrived on: what the phone says its cable is called is recorded there, so the
+/// cable can recognise the same phone and take over. See `crate::admission`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_bringup(
     peer: &str,
@@ -63,6 +81,8 @@ pub(crate) async fn run_bringup(
     mut rx: mpsc::Receiver<BringupEvent>,
     changed: &mut watch::Receiver<u64>,
     shutdown: &mut broadcast::Receiver<()>,
+    slot: &Admission,
+    side: Side,
     panel: &Arc<dyn Panel>,
     status: &Report,
 ) -> Ended {
@@ -79,9 +99,10 @@ pub(crate) async fn run_bringup(
                     Err(_) => Ended::Finished,
                 };
             }
-            // The car went away. This is neither a restart nor a phone that
-            // left on its own: there is nothing to start over for.
-            _ = shutdown.recv() => return Ended::Finished,
+            // The car went away, or the cable took the phone over. Either way
+            // this is neither a restart nor a phone that left on its own, and
+            // there is nothing left to start over for.
+            _ = shutdown.recv() => return Ended::Stopped,
         };
         match event {
             Some(BringupEvent::Identified) => {
@@ -162,12 +183,40 @@ pub(crate) async fn run_bringup(
                     frame.len()
                 ),
             },
+            // The phone's own names for its other links. The cable is the one
+            // this side can act on: a phone on the cable with the same serial
+            // is the same phone, which is what lets the cable take this session
+            // over — see `crate::admission` and `crate::wired`.
+            Some(BringupEvent::Incoming {
+                msg_id: TRANSPORT_IDENTIFIER,
+                frame,
+            }) => {
+                if let Some(serial) = cable_serial(&frame) {
+                    tracing::info!(
+                        "carplay.iap2.cable_named peer={peer} transport={transport} \
+                         serial={}",
+                        short(&serial)
+                    );
+                    slot.learn_serial(side, &serial);
+                }
+            }
             Some(_) => {}
             // The bringup task ended without saying so, which only happens when
             // it was torn down; there is nothing left to watch.
             None => return Ended::Finished,
         }
     }
+}
+
+/// The serial the phone says its own cable carries.
+///
+/// `None` when the message names none: a phone that has never been plugged in
+/// has no serial to give, and one that has does not always send it. The
+/// Bluetooth address it carries alongside is of no use here — the cable
+/// enumerates by serial, and that is what has to match.
+fn cable_serial(frame: &[u8]) -> Option<String> {
+    let named = DeviceTransportIdentifierNotification::decode(frame).ok()?;
+    Some(named.usb_transport_id).filter(|serial| !serial.is_empty())
 }
 
 /// The fields one `NowPlayingUpdate` carried, as key=value pairs.
@@ -242,7 +291,8 @@ mod tests {
         let (_restart, mut changed) = watch::channel(0u64);
         let (stop, mut shutdown) = broadcast::channel(1);
         let panel: Arc<dyn Panel> = Arc::new(Collected::default());
-        let status = Report::new();
+        let status = Arc::new(Report::new());
+        let slot = Admission::new(status.clone());
 
         stop.send(()).expect("the bringup is listening");
         let ended = run_bringup(
@@ -253,11 +303,89 @@ mod tests {
             rx,
             &mut changed,
             &mut shutdown,
+            &slot,
+            Side::Usb,
             &panel,
             &status,
         )
         .await;
-        assert!(matches!(ended, Ended::Finished));
+        assert_eq!(ended, Ended::Stopped, "nothing to restart or wait for");
+    }
+
+    /// The phone naming its cable is what lets the cable recognise it: the
+    /// serial it gives goes to the slot, and the cable looks for exactly that.
+    #[tokio::test]
+    async fn the_phone_naming_its_cable_is_recorded_on_the_slot() {
+        let (events, rx) = mpsc::channel(8);
+        let (_restart, mut changed) = watch::channel(0u64);
+        let (_stop, mut shutdown) = broadcast::channel(1);
+        let panel: Arc<dyn Panel> = Arc::new(Collected::default());
+        let status = Arc::new(Report::new());
+        let slot = Arc::new(Admission::new(status.clone()));
+        let held = slot.claim(Side::Wireless).expect("a free slot");
+
+        let running = {
+            let (status, slot) = (status.clone(), slot.clone());
+            tokio::spawn(async move {
+                run_bringup(
+                    "peer",
+                    "bt",
+                    7000,
+                    None,
+                    rx,
+                    &mut changed,
+                    &mut shutdown,
+                    &slot,
+                    Side::Wireless,
+                    &panel,
+                    &status,
+                )
+                .await
+            })
+        };
+
+        events
+            .send(BringupEvent::Incoming {
+                msg_id: TRANSPORT_IDENTIFIER,
+                frame: DeviceTransportIdentifierNotification {
+                    bluetooth_transport_id: "0C:6A:C4:4E:F3:2A".into(),
+                    usb_transport_id: "CP2CL0001".into(),
+                }
+                .encode(),
+            })
+            .await
+            .expect("the bringup is listening");
+
+        // The message is handled in the bringup's own task, so the slot is
+        // asked until it answers rather than at a moment this test picks.
+        for _ in 0..200 {
+            if slot.serial().is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(slot.serial().as_deref(), Some("CP2CL0001"));
+
+        drop(events);
+        assert_eq!(running.await.expect("the task ends"), Ended::Finished);
+        drop(held);
+    }
+
+    /// Only the serial is worth matching on: the Bluetooth address in the same
+    /// message is not what the cable enumerates by.
+    #[test]
+    fn only_the_serial_counts_as_the_cable() {
+        let named = DeviceTransportIdentifierNotification {
+            bluetooth_transport_id: "0C:6A:C4:4E:F3:2A".into(),
+            usb_transport_id: "CP2CL0001".into(),
+        };
+        assert_eq!(cable_serial(&named.encode()).as_deref(), Some("CP2CL0001"));
+
+        let unnamed = DeviceTransportIdentifierNotification {
+            bluetooth_transport_id: "0C:6A:C4:4E:F3:2A".into(),
+            usb_transport_id: String::new(),
+        };
+        assert_eq!(cable_serial(&unnamed.encode()), None);
     }
 
     /// The line says what the phone said, and only that: an update that

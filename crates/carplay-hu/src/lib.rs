@@ -138,6 +138,7 @@ impl Hu {
             status: ports.report.clone(),
             events: ports.events.clone(),
             handover: handover.clone(),
+            admission: admission.clone(),
             restart: ports.restart.clone(),
             shutdown: shutdown.clone(),
         }));

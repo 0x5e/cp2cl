@@ -27,6 +27,7 @@ use livi_runtime::vehicle::{Fuels, Plugs, Vehicle};
 use livi_wifi::{Channel, OnAir, Security};
 use tokio::sync::{broadcast, mpsc, watch};
 
+use crate::admission::{Admission, Side};
 use crate::link::Panel;
 use crate::machine::Machine;
 use crate::report::Report;
@@ -226,6 +227,7 @@ pub(crate) async fn run_session(
     peer: &str,
     restart: &watch::Sender<u64>,
     shutdown: &mut broadcast::Receiver<()>,
+    slot: &Admission,
     panel: &Arc<dyn Panel>,
     status: &Report,
     vehicle: &Arc<Vehicle>,
@@ -288,6 +290,8 @@ pub(crate) async fn run_session(
         rx,
         &mut changed,
         shutdown,
+        slot,
+        Side::Wireless,
         panel,
         status,
     )

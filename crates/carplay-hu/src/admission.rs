@@ -4,6 +4,11 @@
 //! the one slot and keeps it for the whole session; the other stops offering
 //! itself until the slot is free again. Nothing here knows what a session is —
 //! the caller holds the [`Claim`] for as long as its session lasts.
+//!
+//! The slot also remembers what the phone on it calls its own cable: a phone
+//! served over Bluetooth names the serial its cable would carry, and that name
+//! is how the cable recognises it as the same phone and takes the session over
+//! rather than waiting for the slot to come free.
 
 use std::sync::{Arc, Mutex};
 
@@ -36,14 +41,18 @@ impl Side {
 /// same free slot at the same time must not both get it.
 pub struct Admission {
     state: Mutex<watch::Sender<Option<Side>>>,
+    /// What the phone on the slot calls its own cable. See `learn_serial`.
+    serial: Mutex<watch::Sender<Option<String>>>,
     status: Arc<Report>,
 }
 
 impl Admission {
     pub fn new(status: Arc<Report>) -> Self {
         let (state, _) = watch::channel(None);
+        let (serial, _) = watch::channel(None);
         Self {
             state: Mutex::new(state),
+            serial: Mutex::new(serial),
             status,
         }
     }
@@ -56,6 +65,40 @@ impl Admission {
     /// A receiver that is told whenever the slot changes hands.
     pub fn subscribe(&self) -> watch::Receiver<Option<Side>> {
         self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .subscribe()
+    }
+
+    /// Records the serial the phone on `side` gave for its own cable.
+    ///
+    /// A phone names its other links once it has identified itself — see
+    /// `crate::bringup` — and the name is worth exactly one thing here: a phone
+    /// on the cable with the same serial is the same phone, so the cable may
+    /// take the session over instead of waiting for the slot. Anything a link
+    /// that does not own the slot says is dropped, because it is not the phone
+    /// being served.
+    pub fn learn_serial(&self, side: Side, serial: &str) {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if *state.borrow() != Some(side) {
+            return;
+        }
+        let known = self.serial.lock().unwrap_or_else(|e| e.into_inner());
+        known.send_modify(|current| *current = Some(serial.to_string()));
+    }
+
+    /// The serial the phone on the slot gave for its cable, if it has said.
+    pub fn serial(&self) -> Option<String> {
+        self.serial
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .borrow()
+            .clone()
+    }
+
+    /// A receiver that is told when the serial above is learned or forgotten.
+    pub fn subscribe_serial(&self) -> watch::Receiver<Option<String>> {
+        self.serial
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .subscribe()
@@ -84,6 +127,12 @@ impl Admission {
             return;
         }
         state.send_modify(|owner| *owner = None);
+        // The name goes with the slot: the next phone to take it is not this
+        // one until it says so.
+        self.serial
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .send_modify(|serial| *serial = None);
         self.status.with(|s| s.carplay.transport = None);
     }
 }
@@ -140,5 +189,29 @@ mod tests {
         assert_eq!(slot.owner(), Some(Side::Usb));
         drop(held);
         assert_eq!(slot.owner(), None);
+    }
+
+    /// Only the link serving the phone may say what its cable is called, and
+    /// the name is dropped with the session it belongs to: a serial left behind
+    /// would match a phone that has nothing to do with the one now on the slot.
+    #[test]
+    fn the_phone_on_the_slot_names_its_cable_and_no_one_else_does() {
+        let slot = admission();
+        let mut seen = slot.subscribe_serial();
+
+        let held = slot.claim(Side::Wireless).expect("a free slot is taken");
+        slot.learn_serial(Side::Usb, "CP2CL0001");
+        assert_eq!(slot.serial(), None, "the cable does not own the slot");
+
+        slot.learn_serial(Side::Wireless, "CP2CL0001");
+        assert_eq!(slot.serial().as_deref(), Some("CP2CL0001"));
+        assert_eq!(
+            *seen.borrow_and_update(),
+            Some("CP2CL0001".to_string()),
+            "the cable is told what to look for"
+        );
+
+        drop(held);
+        assert_eq!(slot.serial(), None, "the name goes with the slot");
     }
 }

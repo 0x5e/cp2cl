@@ -289,6 +289,7 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
                 &peer,
                 &restart,
                 &mut shutdown,
+                &hu.admission,
                 &panel,
                 &status,
                 &vehicle,
@@ -304,8 +305,14 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
             // ends. The slot is held for that long, with a short grace for a
             // phone that has not opened the receiver yet, so the cable cannot
             // start a second session underneath it.
+            //
+            // A session ended from outside is the one exception: the car going
+            // away leaves nothing to serve, and the cable taking the phone over
+            // needs the slot back to serve it. Either way no Wi-Fi leg is
+            // coming, so the grace would only be waited out for nobody.
             let started = Instant::now();
-            while *gate.borrow()
+            while ended != Ended::Stopped
+                && *gate.borrow()
                 && !*stopping.borrow()
                 && (handover.live()
                     || status.airplay_up()
@@ -313,8 +320,11 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
             {
                 sleep(SESSION_POLL).await;
             }
-            drop(claim);
+            // Said before the slot goes: the link that takes it next starts by
+            // writing the phone it now serves, and a page cleared afterwards
+            // would be that write undone.
             status.phone_gone();
+            drop(claim);
             if !*gate.borrow() || *stopping.borrow() {
                 break;
             }
