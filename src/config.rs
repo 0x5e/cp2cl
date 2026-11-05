@@ -106,9 +106,9 @@ fn vendor_from_compatible(raw: &[u8]) -> Option<String> {
 
 /// Everything the operator can tune, and nothing that is not a choice.
 ///
-/// The field names are the file's: a field is `log_level`, `wifi_iface` or
-/// `bt_adapter` in `/etc/cp2cl/config.json`, and absent from it is what
-/// `Default` says.
+/// The field names are the file's: a field is `log_level`, `wifi_iface`,
+/// `bt_adapter` or `addr` in `/etc/cp2cl/config.json`, and absent from it is
+/// what `Default` says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// The interface the access point runs on: whose link-local address the
@@ -120,6 +120,10 @@ pub struct Config {
     /// How much goes to the terminal: `error`, `warn`, `info` or `debug`. The
     /// copy under `/var/log` is not held to it — see `crate::logging`.
     pub log_level: LevelFilter,
+    /// Where the status page listens, `ip:port` as `bind` takes it. Port 80 is
+    /// the one a browser assumes when none is given, and binding it takes root,
+    /// which is how the program runs on the board.
+    pub addr: String,
     /// The screen the settings page picked. `main` reads it at startup and
     /// `carlife::gadget` again for each session; empty is the car's own screen.
     pub screen: crate::settings::Screen,
@@ -133,6 +137,7 @@ impl Default for Config {
             wifi_iface: "wlan0".to_string(),
             bt_adapter: "hci0".to_string(),
             log_level: LevelFilter::INFO,
+            addr: "0.0.0.0:80".to_string(),
             screen: crate::settings::Screen::default(),
         }
     }

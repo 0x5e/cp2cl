@@ -164,13 +164,14 @@ async fn main() -> Result<()> {
     // Bound before the streams are: a page that cannot be reached is worth
     // saying so about at startup rather than when someone goes looking for it.
     // Not fatal, though — the page is the one part of this that is not the
-    // bridge, and 80 is a port a machine not running as root cannot have.
-    match TcpListener::bind(web::ADDR).await {
+    // bridge, so an address it cannot have is the page's loss and not the
+    // streams'.
+    match TcpListener::bind(cfg.addr.as_str()).await {
         Ok(listener) => {
-            tracing::info!("web.listening url=http://{}/", web::ADDR);
+            tracing::info!("web.listening url=http://{}/", cfg.addr);
             tokio::spawn(web::serve(listener, status.clone(), replug));
         }
-        Err(e) => tracing::warn!("web.listen_failed addr={} err={e:#}", web::ADDR),
+        Err(e) => tracing::warn!("web.listen_failed addr={} err={e:#}", cfg.addr),
     }
 
     // The board's own CPU and memory, which nothing in the bridge measures: the

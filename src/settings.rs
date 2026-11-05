@@ -171,6 +171,7 @@ fn from_value(value: &Value) -> Config {
         log_level: level(value, defaults.log_level),
         wifi_iface: text(value, "wifi_iface", &defaults.wifi_iface),
         bt_adapter: text(value, "bt_adapter", &defaults.bt_adapter),
+        addr: text(value, "addr", &defaults.addr),
     }
 }
 
@@ -241,6 +242,7 @@ fn json(config: &Config) -> Value {
         "log_level": level_name(config.log_level),
         "wifi_iface": config.wifi_iface,
         "bt_adapter": config.bt_adapter,
+        "addr": config.addr,
     })
 }
 
@@ -352,18 +354,20 @@ mod tests {
         assert_eq!(nothing.to_string(), "default@default");
     }
 
-    /// 三个字段按名字读，写什么是什么；没写的、写错的都是默认。
+    /// 四个字段按名字读，写什么是什么；没写的、写错的都是默认。
     #[test]
-    fn the_three_settings_are_read_by_their_names() {
+    fn the_four_settings_are_read_by_their_names() {
         let written = json!({
             "log_level": "debug",
             "wifi_iface": "wlan1",
             "bt_adapter": "hci1",
+            "addr": "127.0.0.1:8080",
         });
         let read = from_value(&written);
         assert_eq!(read.log_level, LevelFilter::DEBUG);
         assert_eq!(read.wifi_iface, "wlan1");
         assert_eq!(read.bt_adapter, "hci1");
+        assert_eq!(read.addr, "127.0.0.1:8080");
         assert_eq!(read.screen, Screen::default(), "没写的屏幕是默认");
 
         // 写错的字段留在默认上，其余照读。
@@ -371,6 +375,7 @@ mod tests {
         let read = from_value(&wrong);
         assert_eq!(read.log_level, LevelFilter::INFO);
         assert_eq!(read.wifi_iface, "wlan0");
+        assert_eq!(read.addr, "0.0.0.0:80", "没写的地址是默认");
 
         // 一个空文档就是整套默认，旧文件里多余的键不影响它。
         assert_eq!(from_value(&json!({})), Config::default());

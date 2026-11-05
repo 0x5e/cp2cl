@@ -91,19 +91,11 @@ const PLAIN: &str = "text/plain; charset=utf-8";
 /// long as that name is — which is until the car is given another picture.
 const COVER_CACHE: &str = "public, max-age=31536000, immutable";
 
-/// Where the page is served.
-///
-/// Not a setting. A page is read by opening the board's address in a browser,
-/// and a port to remember is one more thing to get wrong — so it is the port a
-/// browser assumes when none is given, on every interface, because which one
-/// the reader is on is not something this side can know.
-///
-/// 80 is below 1024, so binding it takes root, which is how the program runs on
-/// the board. Where it is refused the page is what is lost, and the caller says
-/// so rather than stopping over it — the streams are the bridge.
-pub const ADDR: &str = "0.0.0.0:80";
-
 /// Serves the page and its one endpoint, for as long as the program runs.
+///
+/// The listener is bound by the caller, from the `addr` setting: a page is read
+/// by opening the board's address in a browser, and that address is a choice
+/// rather than something this side can know.
 ///
 /// Never returns while the bridge is up: `axum::serve` runs until the listener
 /// fails, and a failure there is worth a line rather than the end of the
