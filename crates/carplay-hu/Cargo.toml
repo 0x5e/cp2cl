@@ -1,6 +1,6 @@
 [package]
 name = "carplay-hu"
-version = "0.14.0"
+version.workspace = true
 edition = "2021"
 description = "The CarPlay head-unit end of cp2cl: an iAP2 accessory and the AirPlay receiver the phone mirrors to"
 license = "GPL-3.0-or-later"

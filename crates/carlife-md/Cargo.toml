@@ -1,6 +1,6 @@
 [package]
 name = "carlife-md"
-version = "0.14.0"
+version.workspace = true
 edition = "2021"
 description = "The CarLife mobile-device end of cp2cl: an accessory a head unit can plug into"
 license = "GPL-3.0-or-later"
