@@ -37,7 +37,11 @@ BR2_TARGET_GENERIC_GETTY_PORT=""
 BR2_SYSTEM_DHCP=""
 
 BR2_INIT_BUSYBOX=y
-BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_DEVTMPFS=y
+BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y
+# The hardware database is 18 MB of what keyboards, cameras and sensors call
+# themselves. Nothing here has any: the daemon is installed for one device class
+# — a phone on USB — and what it is asked about is the cable's events, not names.
+# BR2_PACKAGE_EUDEV_ENABLE_HWDB is not set
 # ext2, not ext4, and the feature list is part of the contract: lk2nd reads the
 # kernel out of this filesystem before there is a kernel. Its ext2 driver maps
 # i_block[] directly -- no extents -- and rejects any ro_compat bit other than
@@ -58,10 +62,11 @@ BR2_TARGET_ROOTFS_EXT2_2=y
 # whose descriptor layout lk2nd cannot follow. Both are well past the 4 GB eMMC
 # this board has.
 BR2_TARGET_ROOTFS_EXT2_MKFS_OPTIONS="-O ^64bit,^dir_index -E resize=16G"
-# 128 MB: twice the NanoPi's, because this rootfs carries kmod and the module
-# tree of a kernel whose defconfig is not trimmed to two drivers, and because
-# the kernel itself is in there -- /boot is 15.6 MB of it. The rest of the
-# partition is room for a binary to replace and the identity the program writes.
+# 128 MB, the whole of it: this board has no separate boot partition, so the
+# kernel (/boot is 15.6 MB of it) and the module tree of a defconfig that is not
+# trimmed to two drivers are both inside this one. The same total as the other
+# two boards', which is what the three are handed out at. The rest is room for a
+# binary to replace and the identity the program writes.
 BR2_TARGET_ROOTFS_EXT2_SIZE="128M"
 BR2_TARGET_ROOTFS_EXT2_RESBLKS=1
 # The one thing the ramdisk knows about the root filesystem. Nothing in the

@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use iap2_link::LinkConfig;
 use livi_runtime::bringup::{run_accessory, CpConfig};
 use livi_runtime::driver::spawn_link_stream;
@@ -47,9 +48,21 @@ use crate::report::Report;
 use crate::Hu;
 use crate::wireless::{access_point, parse_mac, short};
 
-/// How often we ask who is attached. Cheap enough that a second is not rude, and
-/// fast enough that plugging in feels immediate.
-const SCAN_INTERVAL: Duration = Duration::from_secs(1);
+/// How long a phone that is still on the cable waits before it is asked again
+/// after a session ended. Only a restart and a link that would not come up get
+/// here, and neither is a reason to spin.
+const RETRY_PAUSE: Duration = Duration::from_secs(1);
+
+/// How long a phone that has dropped out of the cable's list is given to come
+/// back before it is taken as gone. Changing its USB configuration — which is
+/// what `claim` does at the start of every session — can hide it for a moment,
+/// and that is not an unplug.
+const UNPLUG_CONFIRM: Duration = Duration::from_millis(500);
+
+/// How long to wait before watching the cable again. The events are the only
+/// way anything here learns about a cable, so a watch that could not be made is
+/// retried rather than given up on.
+const HOTPLUG_RETRY: Duration = Duration::from_secs(1);
 
 /// How long the wireless link is given to let the slot go once it has been
 /// asked to. It ends in a fraction of this — the wait is only here so a link
@@ -63,6 +76,7 @@ const TAKE_OVER_WAIT: Duration = Duration::from_secs(10);
 const RESTART_PAUSE: Duration = Duration::from_millis(750);
 
 /// One phone on the cable.
+#[derive(Clone, PartialEq, Eq)]
 struct Phone {
     /// Names it in the log and in the "is it still plugged in" check.
     id: String,
@@ -78,6 +92,89 @@ async fn attached() -> Vec<Phone> {
         .into_iter()
         .map(|phone| Phone { id: phone.serial })
         .collect()
+}
+
+/// What is on the cable, kept current by the kernel's own hotplug events.
+///
+/// The events say a device came or went, not what it was, so each one is a
+/// reason to read the cable again rather than an answer: what goes out on the
+/// channel is the list, published only when it changed. Nothing here polls.
+///
+/// `nusb` listens on the socket `udevd` re-broadcasts on, so the daemon is what
+/// makes this work; the board runs it from `S10udev`.
+fn present() -> watch::Receiver<Vec<Phone>> {
+    let (tx, rx) = watch::channel(Vec::new());
+    tokio::spawn(async move {
+        loop {
+            let mut events = match nusb::watch_devices() {
+                Ok(events) => events,
+                Err(e) => {
+                    tracing::warn!("usb.hotplug_unavailable err={e} action=retry");
+                    tokio::time::sleep(HOTPLUG_RETRY).await;
+                    continue;
+                }
+            };
+            tracing::info!("usb.hotplug_ready action=listen");
+            // Read once the watch is in place, not before: a phone that arrived
+            // while it was being made is in this first list rather than in an
+            // event that has already been missed.
+            refresh(&tx).await;
+            while events.next().await.is_some() {
+                refresh(&tx).await;
+            }
+            // The stream only ends if the socket under it does, and watching is
+            // the only way this link hears about a cable.
+            tracing::warn!("usb.hotplug_ended action=rewatch");
+            tokio::time::sleep(HOTPLUG_RETRY).await;
+        }
+    });
+    rx
+}
+
+/// Reads the cable and says so when the answer changed.
+async fn refresh(tx: &watch::Sender<Vec<Phone>>) {
+    let now = attached().await;
+    tx.send_if_modified(|known| {
+        if *known == now {
+            false
+        } else {
+            *known = now;
+            true
+        }
+    });
+}
+
+/// Ends the session when the phone leaves the cable.
+///
+/// The cable is the one link that says nothing when it goes: what is noticed is
+/// the AirPlay stream falling silent five seconds later, then a carkit that
+/// takes five more to fail against a phone that is no longer there. The kernel
+/// says so at once, and the session is ended with the same signal the car's
+/// going away sends, which is what lets the slot go for the wireless link.
+fn watch_unplug(
+    mut present: watch::Receiver<Vec<Phone>>,
+    id: String,
+    shutdown: broadcast::Sender<()>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while present.changed().await.is_ok() {
+            if present.borrow().iter().any(|phone| phone.id == id) {
+                continue;
+            }
+            // Gone from the list is not yet gone from the cable: the phone is
+            // hidden for a moment while its USB configuration changes, which is
+            // what `claim` does to it as the session starts. Only a phone still
+            // missing on a fresh read has left.
+            tokio::time::sleep(UNPLUG_CONFIRM).await;
+            if attached().await.iter().any(|phone| phone.id == id) {
+                continue;
+            }
+            // A shutdown nobody is listening for is one this session has
+            // already ended on.
+            let _ = shutdown.send(());
+            return;
+        }
+    })
 }
 
 /// Claims the phone's CarPlay USB configuration and its mux, and keeps both.
@@ -123,13 +220,17 @@ async fn carkit(mux: &Arc<iap2_usbmux::MuxDevice>) -> anyhow::Result<Box<dyn ide
         .ok_or_else(|| anyhow::anyhow!("carkit stream unavailable after opening the service"))
 }
 
-/// Keeps asking who is plugged in until we stop being asked to stop.
+/// Keeps an eye on who is plugged in until we stop being asked to stop.
 ///
 /// `gate` is the CarLife session. While it is shut nothing is looked for at all:
 /// the phone has no CarPlay to start, and starting one would only produce an
 /// AirPlay connection the receiver is not accepting yet. The cable also waits
 /// while the wireless link owns the one slot: a phone found on USB then is not
 /// one a new iAP2 session may be started for.
+///
+/// Nothing here is on a clock: the cable is a [`present`] channel fed by the
+/// kernel's hotplug events, and the rest are the watches that decide whether
+/// there is anything to do with what is on it.
 ///
 /// `panel` is where what the phone has to say about itself goes — the song it is
 /// playing, the route it is guiding along. It is the CarLife side's own sink, so
@@ -152,18 +253,20 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
     let mut owner = hu.admission.subscribe();
     let mut named = hu.admission.subscribe_serial();
     let mut stopping = hu.stopping.subscribe();
+    let mut present = present();
     // The phone reported last time, so its disappearance is said once. The
     // claim, not this, is what decides whether a session may be started.
     let mut seen: Option<String> = None;
     loop {
-        // Four conditions, and `borrow_and_update` on each so `changed()` waits
-        // for the next change rather than returning at once for one that has
-        // already been read.
+        // Everything that has to be true before there is anything to do, and
+        // `borrow_and_update` on each so `changed()` waits for the next change
+        // rather than answering at once for one this loop has already read.
         loop {
             let car = *gate.borrow_and_update();
             let held = *owner.borrow_and_update();
             let declared = named.borrow_and_update().is_some();
             let asked_to_stop = *stopping.borrow_and_update();
+            let plugged = !present.borrow_and_update().is_empty();
             if asked_to_stop {
                 return;
             }
@@ -172,17 +275,18 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
             // the cable it would be on: that phone is the one this link may take
             // the session over from — see `take_over`.
             let may_look = held != Some(Side::Wireless) || declared;
-            if car && may_look {
+            if car && may_look && plugged {
                 break;
             }
             tokio::select! {
                 _ = gate.changed() => {},
                 _ = owner.changed() => {},
                 _ = named.changed() => {},
+                _ = present.changed() => {},
                 _ = stopping.changed() => {},
             }
         }
-        let phones = attached().await;
+        let phones = present.borrow_and_update().clone();
         if let Some(id) = &seen {
             if !phones.iter().any(|phone| &phone.id == id) {
                 tracing::info!("carplay.unplugged phone={}", short(id));
@@ -195,66 +299,95 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
         // onto it.
         if hu.admission.owner() == Some(Side::Wireless) {
             let wanted = hu.admission.serial();
-            if let Some(phone) = wanted.as_deref().and_then(|name| on_cable(name, &phones)) {
-                tracing::info!(
-                    "carplay.takeover phone={} from=wireless to=usb",
-                    short(&phone.id)
-                );
-                if take_over(hu, &mut owner).await {
-                    continue;
+            let arriving = wanted.as_deref().and_then(|name| on_cable(name, &phones));
+            let Some(phone) = arriving else {
+                // Nothing on the cable is the phone the wireless link is
+                // serving, which is the usual case: wait for one of the three
+                // things that could change that rather than ask again.
+                tokio::select! {
+                    _ = present.changed() => {},
+                    _ = owner.changed() => {},
+                    _ = named.changed() => {},
+                    _ = gate.changed() => {},
+                    _ = stopping.changed() => {},
+                }
+                continue;
+            };
+            tracing::info!(
+                "carplay.takeover phone={} from=wireless to=usb",
+                short(&phone.id)
+            );
+            let taken = take_over(hu, &mut owner).await;
+            if !taken {
+                // The wireless link did not let the slot go. Its session is
+                // still the one serving the phone; this link waits for the next
+                // thing that changes rather than asking again straight away.
+                tokio::select! {
+                    _ = owner.changed() => {},
+                    _ = present.changed() => {},
+                    _ = named.changed() => {},
+                    _ = stopping.changed() => {},
                 }
             }
-            tokio::time::sleep(SCAN_INTERVAL).await;
             continue;
         }
-        if let Some(phone) = phones.into_iter().next() {
-            let claim = match hu.admission.claim(Side::Usb) {
-                Some(claim) => claim,
-                // The wireless link got there first in this same tick.
-                None => {
-                    tokio::time::sleep(SCAN_INTERVAL).await;
-                    continue;
-                }
-            };
-            seen = Some(phone.id.clone());
-            tracing::info!("carplay.attached phone={} transport=usb", short(&phone.id));
-            status.with(|s| {
-                s.carplay.phone = Some(phone.id.clone());
-                s.carplay.identified = false;
-                s.carplay.authenticated = false;
-                s.carplay.subscribed = false;
-                s.carplay.failed = None;
-            });
-            // Subscribed for this session only: a shutdown sent while no
-            // session was running must not end the next one before it starts.
-            let mut shutdown = hu.shutdown.subscribe();
-            match attach(
-                &cfg,
-                auth.clone(),
-                &phone,
-                airplay_port,
-                &accessory_key,
-                &restart,
-                &mut shutdown,
-                &hu.admission,
-                &panel,
-                &status,
-                &vehicle,
-            )
-            .await
-            {
-                Ok(_) => {}
-                Err(e) => tracing::warn!(
-                    "carplay.attach_failed phone={} err={e}",
-                    short(&phone.id)
-                ),
-            }
-            // The session is over, whatever ended it: the claim goes back and
-            // both links are free to wait for the next phone.
-            drop(claim);
-            status.phone_gone();
+        let Some(phone) = phones.into_iter().next() else {
+            continue;
+        };
+        let claim = match hu.admission.claim(Side::Usb) {
+            Some(claim) => claim,
+            // The wireless link got there first in this same moment, and this
+            // loop's next pass looks at it as a takeover instead.
+            None => continue,
+        };
+        seen = Some(phone.id.clone());
+        tracing::info!("carplay.attached phone={} transport=usb", short(&phone.id));
+        status.with(|s| {
+            s.carplay.phone = Some(phone.id.clone());
+            s.carplay.identified = false;
+            s.carplay.authenticated = false;
+            s.carplay.subscribed = false;
+            s.carplay.failed = None;
+        });
+        // Subscribed for this session only: a shutdown sent while no
+        // session was running must not end the next one before it starts.
+        let mut shutdown = hu.shutdown.subscribe();
+        // The cable going away is not something the session itself can tell:
+        // it is ended from outside, and this is what does the telling.
+        let unplugged = watch_unplug(present.clone(), phone.id.clone(), hu.shutdown.clone());
+        match attach(
+            &cfg,
+            auth.clone(),
+            &phone,
+            airplay_port,
+            &accessory_key,
+            &restart,
+            &mut shutdown,
+            &hu.admission,
+            &panel,
+            &status,
+            &vehicle,
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                "carplay.attach_failed phone={} err={e}",
+                short(&phone.id)
+            ),
         }
-        tokio::time::sleep(SCAN_INTERVAL).await;
+        unplugged.abort();
+        // The session is over, whatever ended it: the claim goes back and
+        // both links are free to wait for the next phone.
+        drop(claim);
+        status.phone_gone();
+        // A phone still on the cable after its session ended — a restart, or a
+        // link that would not come up — is served again, but not in a tight
+        // loop. One that has left is waited for by the top of this loop.
+        let still_here = present.borrow().iter().any(|on| on.id == phone.id);
+        if still_here {
+            tokio::time::sleep(RETRY_PAUSE).await;
+        }
     }
 }
 
@@ -592,4 +725,48 @@ async fn av_interface() -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn phone(id: &str) -> Phone {
+        Phone { id: id.into() }
+    }
+
+    /// The cable going away ends the session through the same signal the car's
+    /// going away sends: that is the only thing that ends an iAP2 session from
+    /// outside, and nothing on this link would notice the cable in time — the
+    /// stream it carried falls silent five seconds later.
+    #[tokio::test]
+    async fn a_phone_leaving_the_cable_ends_the_session() {
+        let (cable, present) = watch::channel(vec![phone("CP2CL0001")]);
+        let (shutdown, mut ended) = broadcast::channel(1);
+        let watching = watch_unplug(present, "CP2CL0001".into(), shutdown);
+
+        cable.send(Vec::new()).expect("the watcher is listening");
+
+        ended.recv().await.expect("the session is ended");
+        watching.await.expect("the watcher stops with it");
+    }
+
+    /// Another phone arriving, or the same one read again, is not the phone
+    /// being served going away.
+    #[tokio::test]
+    async fn a_phone_still_on_the_cable_ends_nothing() {
+        let (cable, present) = watch::channel(vec![phone("CP2CL0001")]);
+        let (shutdown, mut ended) = broadcast::channel(1);
+        let watching = watch_unplug(present, "CP2CL0001".into(), shutdown);
+
+        cable
+            .send(vec![phone("CP2CL0001"), phone("CP2CL0002")])
+            .expect("the watcher is listening");
+        // The watcher reads the change in its own task; this is long enough for
+        // it to have acted on it and still says nothing.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert!(ended.try_recv().is_err(), "nothing was ended");
+        watching.abort();
+    }
 }

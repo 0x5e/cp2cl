@@ -18,6 +18,7 @@ use zbus::Connection;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue};
 
 use super::Handover;
+use crate::admission::Side;
 
 /// What the iPhone advertises for its own side of iAP2. Connecting to it is what
 /// wakes the phone; the channel that follows is the one we take.
@@ -66,6 +67,11 @@ struct Phone {
 
 /// Pages every paired phone, again and again, until the caller stops the task.
 ///
+/// `slot` is who owns the one CarPlay session: while the cable does, the page
+/// is held, because the phone on the cable is being served and a page woken now
+/// is a second `CarPlayStartSession` that the session on the cable cannot
+/// survive — see `Handover` for the same pause over the Wi-Fi leg.
+///
 /// `car` is whether the car still has a CarLife session, which is what the phone
 /// is being called back for: a phone woken for a session nobody reads starts a
 /// CarPlay that goes nowhere, and leaves it on the car's screen to be dismissed.
@@ -73,9 +79,9 @@ pub(super) async fn run(
     conn: Connection,
     adapter: String,
     handover: Arc<Handover>,
+    mut slot: tokio::sync::watch::Receiver<Option<Side>>,
     car: tokio::sync::watch::Receiver<bool>,
-) {
-    // A page that took its time must not be followed by a burst of retries, which
+) {    // A page that took its time must not be followed by a burst of retries, which
     // is what a missed tick would otherwise produce.
     let mut round = tokio::time::interval(ROUND);
     round.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -85,9 +91,10 @@ pub(super) async fn run(
     // was last seen working. At `REFUSALS` the address is unpaired rather than
     // called again, which is what takes it out of the list above.
     let mut refused: HashMap<String, u32> = HashMap::new();
-    // Said when the state changes rather than once a round: five seconds apart,
-    // the line would be the only thing in the log for as long as a tunnel lasts.
-    let mut held = false;
+    // Which state the page is being held by, said once on the way in and
+    // once on the way out: five seconds apart, the lines would be the only
+    // thing in the log for as long as the state lasts.
+    let mut held: Option<&'static str> = None;
     // What the last round had to call. An empty list is the one state that
     // leaves the log at `bt_service_up` with nothing after it, and telling that
     // apart from a phone that is merely away — which does log, one line per
@@ -108,15 +115,27 @@ pub(super) async fn run(
         // second `CarPlayStartSession`, which the one on Wi-Fi cannot survive —
         // see `Handover`.
         if handover.live() {
-            if !held {
-                held = true;
+            if held.is_none() {
+                held = Some("handover");
                 tracing::info!("bt.page_held reason=handover");
             }
             continue;
         }
-        if held {
-            held = false;
-            tracing::info!("bt.page_resumed reason=handover_cleared");
+        // The cable is serving the phone. The one on the cable has its session,
+        // and waking it again is a second one the cable's session cannot
+        // survive; a phone that is only paired — not served — is one this round
+        // will reach once the cable's turn is over, which is why the page waits
+        // the turn out rather than going away.
+        if *slot.borrow_and_update() == Some(Side::Usb) {
+            if held.is_none() {
+                held = Some("usb_session");
+                tracing::info!("bt.page_held reason=usb_session");
+            }
+            continue;
+        }
+        if let Some(reason) = held {
+            held = None;
+            tracing::info!("bt.page_resumed reason={reason}_cleared");
         }
         let phones = match paired(&conn, &adapter).await {
             Ok(phones) => phones,

@@ -24,10 +24,13 @@ use crate::machine::Machine;
 use crate::Hu;
 use crate::bringup::{carry_artwork, Ended};
 
-/// Keeps serving phones until the program stops. The service is published only
-/// while the car has a CarLife session of its own and the cable does not own the
-/// one CarPlay slot: a phone that finds it otherwise starts a CarPlay that
-/// nothing is reading, or a second session on top of the wired one.
+/// Keeps serving phones until the program stops. The service is published
+/// while the car has a CarLife session of its own, whichever link owns the one
+/// CarPlay slot: while the cable has it, the service is one a phone can still
+/// pair with — a channel a phone opens then is closed rather than answered,
+/// and the pairing outlives the session that refused it. The one time the box
+/// is undiscoverable by design is a 2.4 GHz wireless session, when the power
+/// guard has the controller off.
 ///
 /// Nothing pushes "a phone just paired" from outside, so a session that ends
 /// puts us back to waiting for the same phone to come again.
@@ -43,7 +46,9 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
     let handover = hu.handover.clone();
     let delegate = hu.delegate.clone();
     let mut gate = hu.gate.clone();
-    let mut owner = hu.admission.subscribe();
+    // The paging task's own view of who owns the CarPlay slot; nothing else
+    // in this watcher needs it any more.
+    let slot = hu.admission.subscribe();
     let mut stopping = hu.stopping.subscribe();
     // The boot loads the two modules and goes on, so neither radio is here when
     // this starts: an interface appears once brcmfmac has taken its firmware, a
@@ -70,9 +75,9 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
     }
 
     // The iAP service is what tells the phone there is CarPlay here, so it is
-    // not published until there is: with CarLife in the picture the CarPlay half
-    // only exists for as long as the car's session does, and with the cable in
-    // the picture only the link that saw a phone first may offer itself.
+    // not published until the car has a session for one to run in. Whoever
+    // owns the one CarPlay slot is not part of that question — see the doc on
+    // `watch` for what a phone is given while the cable has it.
     //
     // Said out loud, because the wait is silent and can last as long as the car
     // takes to turn up: a log that stops here looks like a run that failed
@@ -91,11 +96,11 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
         .ok();
 
     loop {
-        // Nothing is published while the car has no session or while the cable
-        // owns the slot, and the profiles come out with it: BlueZ's own
-        // auto-connect follows whatever is registered, so a profile left up is
-        // a phone called back for a CarPlay nobody is reading.
-        if !wait_ready(&mut gate, &mut owner, &mut stopping).await {
+        // Nothing is published while the car has no session. The cable owning
+        // the slot is not a reason to take the service down: what a phone
+        // cannot have then is a session, and what it still can — the pairing —
+        // is what the service is published for.
+        if !wait_ready(&mut gate, &mut stopping).await {
             return;
         }
         tracing::info!("bt.car_up action=publish_service");
@@ -106,15 +111,11 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
         // network is there has nothing to come back to.
         let ap = wait_for_access_point().await;
 
-        // That wait can last five seconds, and the car's session can end
-        // inside it, or the cable can take the slot. Publishing a service then
-        // is a phone called back for a session that has already gone or that
-        // the receiver will not accept, so both are asked again rather than
+        // That wait can last ten seconds, and the car's session can end
+        // inside it. Publishing a service then is a phone called back for a
+        // CarPlay nobody is reading, so it is asked again rather than
         // answered by the wait that came before it.
-        if !*gate.borrow()
-            || (*owner.borrow()).is_some_and(|side| side != Side::Wireless)
-            || *stopping.borrow()
-        {
+        if !*gate.borrow() || *stopping.borrow() {
             tracing::info!("bt.publish_skipped reason=state_changed");
             continue;
         }
@@ -193,25 +194,25 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
             ))
         });
 
-        // Set when this round ended because the cable owns the slot. Such a
-        // round is owed another one once the slot is free; a round that ended
-        // on a signal is not.
-        let mut refused = false;
+        // The peer of the last channel this round refused, so a phone that
+        // keeps knocking while the cable serves it says so once rather than a
+        // line per knock.
+        let mut last_refused: Option<String> = None;
         loop {
-            // Only while nothing is on the link: a phone that is already coming
-            // in does not need calling, and one that is mid-session must not be
-            // paged again on top of it. And not at all while the phone has moved
-            // its iAP2 session onto the CarPlay data stream — see `Handover`.
+            // The page holds itself back when it has nothing to call for: a
+            // phone that is already coming in does not need calling, one that
+            // is mid-session must not be paged on top of it, and one whose
+            // session is on the cable is neither — see `page` and `Handover`.
             let paging = tokio::spawn(page::run(
                 conn.clone(),
                 cfg.bt_adapter.clone(),
                 handover.clone(),
+                slot.clone(),
                 gate.clone(),
             ));
             // The car's session ending is checked between sessions and never
             // inside one: `run_session` has tasks of its own, and dropping it
-            // half way leaves them behind. The same goes for the slot being
-            // taken by the cable while this link is idle.
+            // half way leaves them behind.
             let next = match &mut stop {
                 Some(sig) => tokio::select! {
                     next = incoming.recv() => next,
@@ -223,19 +224,11 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
                         None
                     },
                     _ = wait_car_down(&mut gate) => None,
-                    _ = wait_blocked(&mut owner, Side::Wireless) => {
-                        refused = true;
-                        None
-                    },
                     _ = stopping.changed() => None,
                 },
                 None => tokio::select! {
                     next = incoming.recv() => next,
                     _ = wait_car_down(&mut gate) => None,
-                    _ = wait_blocked(&mut owner, Side::Wireless) => {
-                        refused = true;
-                        None
-                    },
                     _ = stopping.changed() => None,
                 },
             };
@@ -245,12 +238,17 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
             };
             let peer = short(&peer_mac);
             // The first link to see a phone takes the slot. A channel that
-            // arrives after the cable won is answered by closing it.
+            // arrives after the cable won is answered by closing it — and the
+            // service stays up for it, because the pairing a phone makes over
+            // it is what the cable's turn cannot give it.
             let Some(claim) = hu.admission.claim(Side::Wireless) else {
-                tracing::info!("bt.channel_refused peer={peer} reason=usb_active");
-                refused = true;
-                break;
+                if last_refused.as_deref() != Some(&peer_mac) {
+                    tracing::info!("bt.channel_refused peer={peer} reason=usb_active");
+                }
+                last_refused = Some(peer_mac);
+                continue;
             };
+            last_refused = None;
             tracing::info!("bt.channel_opened peer={peer} transport=wireless");
             // Over Bluetooth there is no serial to be had: the peer is an
             // address and nothing more, so that is what the page is given.
@@ -340,9 +338,9 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
         }
         livi_runtime::bt::let_go(&conn, &cfg.bt_adapter, &held).await;
         // A signal ends the run. A round that ended for any other reason — the
-        // car went away, or the cable took the slot — is owed the next one,
-        // which starts by waiting for both to change back.
-        if *stopping.borrow() || (!refused && *gate.borrow()) {
+        // car went away and came back before the controllers were restored — is
+        // owed the next one, which starts by waiting for the car again.
+        if *stopping.borrow() || *gate.borrow() {
             tracing::info!(
                 "bt.service_down adapter={} state=restored",
                 cfg.bt_adapter
@@ -357,45 +355,28 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
 }
 
 /// Waits until there is something to publish a service for: the car has a
-/// CarLife session, the cable does not own the one CarPlay slot, and the
-/// program is not stopping. `false` is one of those channels being gone, which
-/// is the program shutting down.
+/// CarLife session, and the program is not stopping. Whoever owns the one
+/// CarPlay slot is not part of the question — see the doc on `watch`.
+/// `false` is one of those channels being gone, which is the program
+/// shutting down.
 async fn wait_ready(
     gate: &mut watch::Receiver<bool>,
-    owner: &mut watch::Receiver<Option<Side>>,
     stopping: &mut watch::Receiver<bool>,
 ) -> bool {
     loop {
-        // `borrow_and_update` on all three: `changed()` must wait for the next
+        // `borrow_and_update` on both: `changed()` must wait for the next
         // change, not answer at once for one this loop has already read.
         let car = *gate.borrow_and_update();
-        let free = (*owner.borrow_and_update()).is_none();
         let asked_to_stop = *stopping.borrow_and_update();
         if asked_to_stop {
             return false;
         }
-        if car && free {
+        if car {
             return true;
         }
         tokio::select! {
             changed = gate.changed() => { if changed.is_err() { return false; } },
-            changed = owner.changed() => { if changed.is_err() { return false; } },
             changed = stopping.changed() => { if changed.is_err() { return false; } },
-        }
-    }
-}
-
-/// Waits until another link owns the slot, which is when this one has to take
-/// its service down. A slot owned by this link is not a reason to stop.
-async fn wait_blocked(owner: &mut watch::Receiver<Option<Side>>, mine: Side) {
-    loop {
-        if (*owner.borrow_and_update()).is_some_and(|side| side != mine) {
-            return;
-        }
-        if owner.changed().await.is_err() {
-            // The channel only goes away with the whole half, and with it any
-            // reason to keep waiting here.
-            std::future::pending::<()>().await;
         }
     }
 }

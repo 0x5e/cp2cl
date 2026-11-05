@@ -17,6 +17,10 @@ livi-runtime = { path = "../../vendor/LIVI/native/crates/livi-runtime" }
 livi-wifi = { path = "../../vendor/LIVI/native/crates/livi-wifi" }
 # Paging a paired phone is one BlueZ D-Bus call.
 zbus = { version = "5", default-features = false, features = ["tokio"] }
+# The cable is watched through the kernel's hotplug events rather than asked
+# about once a second. On Linux `nusb` listens on the socket `udevd` broadcasts
+# on, so the board runs the daemon — see `buildroot/configs`.
+nusb = "0.2.8"
 # Needed directly to name `idevice::ReadWrite` in our own function signatures.
 idevice = "0.1"
 

@@ -267,6 +267,7 @@ dependencies = [
  "livi-runtime",
  "livi-wifi",
  "num-bigint",
+ "nusb",
  "plist",
  "rand 0.8.8",
  "rusty-opus",

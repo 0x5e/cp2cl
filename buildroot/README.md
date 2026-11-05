@@ -202,11 +202,15 @@ the core; none is loaded on this chip.
 
 ### 3.5 Start order
 
-    S00diag  S10radio  S12firstboot  S30dbus-daemon  S40bluetoothd  S50cp2cl  S55ap
+    S00diag  S10radio  S10udev  S12firstboot  S30dbus-daemon  S40bluetoothd
+    S50cp2cl  S55ap
+
+`S10udev` is what the USB hotplug events are read from; the UFI001C's
+`S05firmware` runs before it and reads partition names out of sysfs.
 
 ### 3.6 Not needed
 
-    udev, systemd, kmod, OpenSSL, wpa_supplicant, avahi/mDNS, ntp,
+    systemd, OpenSSL, wpa_supplicant, avahi/mDNS, ntp,
     DRM, framebuffer, ALSA, USB mass storage, DNS resolver
 
 Leftovers in this image, doing nothing: `S11modules` (no `/etc/modules`),
@@ -341,9 +345,9 @@ differs from the NanoPi:
                     `red:` device and logs `led.unavailable`, and the first
                     boot's blink does nothing
     image           sdcard.img — SPL at 8 KiB, a 32 MB FAT boot partition, a
-                    64 MB ext4 root. The boot half is four times the NanoPi's
+                    96 MB ext4 root. The boot half is four times the NanoPi's
                     because the arm64 image is 13.5 MB gzipped where the armv7
-                    one is a megabyte or two. The root is 51 MB used of 64, and
+                    one is a megabyte or two. The root is 61 MB used of 96, and
                     24 MB of that is the 836 modules arm64's defconfig leaves
                     on — the list at the end of `board/orangepi-zero2w/kernel.fragment`
                     is what cuts them down from 1059
@@ -365,10 +369,10 @@ Eight things that cost an evening each:
       loadable sections and the modules install stripped — but the build tree
       does, at every rebuild.
     * The generic defconfig leaves a thousand modules on and they do not fit
-      the 64 MB root: mkfs stops partway through the tree with `Could not
-      allocate block`, after everything else has built. The list at the end of
-      `board/orangepi-zero2w/kernel.fragment` is what brings it back to the NanoPi's
-      sizes.
+      the root this board started with, 64 MB then: mkfs stops partway through
+      the tree with `Could not allocate block`, after everything else has
+      built. The list at the end of `board/orangepi-zero2w/kernel.fragment` is
+      what brings it back to the NanoPi's sizes.
     * U-Boot's arm64 image is packed by binman with TF-A's bl31.bin: without
       `BR2_TARGET_UBOOT_NEEDS_ATF_BL31` the build fails after the whole of
       U-Boot has compiled, with `is missing external blobs and is
