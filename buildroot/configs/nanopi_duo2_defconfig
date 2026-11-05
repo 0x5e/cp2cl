@@ -30,19 +30,17 @@ BR2_SYSTEM_DHCP=""
 # because the option's absence reads like an oversight.
 
 BR2_INIT_BUSYBOX=y
-BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y
-# The hardware database is 18 MB of what keyboards, cameras and sensors call
-# themselves. Nothing here has any: the daemon is installed for one device class
-# — a phone on USB — and what it is asked about is the cable's events, not names.
-# BR2_PACKAGE_EUDEV_ENABLE_HWDB is not set
+# Device nodes are devtmpfs's own: the kernel makes them as devices are probed,
+# with no daemon in between. The cable's events are read off the kernel's netlink
+# group, so nothing here needs one for those either.
+BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_DEVTMPFS=y
 BR2_TARGET_ROOTFS_EXT2=y
 BR2_TARGET_ROOTFS_EXT2_4=y
-# 120 MB, of which the tree uses 34: eudev, kmod and the util-linux libraries the
-# daemon links took it from 17 to 34, and the card was 72 MB when the tree was 17.
-# With the 8 MB boot partition in genimage.cfg the card is 128 MB in all, the same
-# as the other two boards'. The rest is room for a binary to replace, a key to
-# add, and the identity the program writes — and for the next thing to fit on the
-# card without re-partitioning it.
+# 120 MB. The tree took 17 before eudev was added and 34 with it; the daemon is
+# gone again, so it should be 17 again. With the 8 MB boot partition in
+# genimage.cfg the card is 128 MB in all, the same as the other two boards'. The
+# rest is room for a binary to replace, a key to add, and the identity the program
+# writes — and for the next thing to fit on the card without re-partitioning it.
 BR2_TARGET_ROOTFS_EXT2_SIZE="120M"
 # ext4 keeps 5% back for root by default, which is 6 MB of a 120 MB partition on a
 # filesystem where root is the only user.

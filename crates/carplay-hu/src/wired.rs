@@ -19,13 +19,14 @@
 //! else on a board gets there before the phone is answered. See `bridge`, and the second
 //! handle the session holds onto.
 
+use std::mem::MaybeUninit;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-use futures_util::StreamExt;
 use iap2_link::LinkConfig;
 use livi_runtime::bringup::{run_accessory, CpConfig};
 use livi_runtime::driver::spawn_link_stream;
@@ -36,6 +37,13 @@ use livi_runtime::ident::Transport;
 use livi_runtime::mfi_async::SharedCoprocessor;
 use livi_runtime::vehicle::{Fuels, Plugs, Vehicle};
 use livi_wifi::Channel;
+use rustix::io::Errno;
+use rustix::net::{
+    bind,
+    netlink::{self, SocketAddrNetlink},
+    recvfrom, socket_with, AddressFamily, RecvFlags, SocketFlags, SocketType,
+};
+use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{broadcast, mpsc, watch};
 
@@ -63,6 +71,15 @@ const UNPLUG_CONFIRM: Duration = Duration::from_millis(500);
 /// way anything here learns about a cable, so a watch that could not be made is
 /// retried rather than given up on.
 const HOTPLUG_RETRY: Duration = Duration::from_secs(1);
+
+/// Where the kernel broadcasts its own hotplug events: `NETLINK_KOBJECT_UEVENT`,
+/// multicast group 1. `udevd` reads this group and re-broadcasts what it has
+/// processed to group 2, which is the one `nusb` watches.
+const KERNEL_MULTICAST_GROUP: u32 = 1;
+
+/// What one uevent is read into. A packet longer than this is truncated, which
+/// costs nothing here: all a packet says is that the cable changed.
+const UEVENT_BUFFER: usize = 8192;
 
 /// How long the wireless link is given to let the slot go once it has been
 /// asked to. It ends in a fraction of this — the wait is only here so a link
@@ -100,35 +117,102 @@ async fn attached() -> Vec<Phone> {
 /// reason to read the cable again rather than an answer: what goes out on the
 /// channel is the list, published only when it changed. Nothing here polls.
 ///
-/// `nusb` listens on the socket `udevd` re-broadcasts on, so the daemon is what
-/// makes this work; the board runs it from `S10udev`.
+/// The events are read off the kernel's own multicast group rather than the one
+/// `udevd` re-broadcasts on, so no daemon has to be running for them to arrive.
+/// See `hotplug`.
 fn present() -> watch::Receiver<Vec<Phone>> {
     let (tx, rx) = watch::channel(Vec::new());
     tokio::spawn(async move {
         loop {
-            let mut events = match nusb::watch_devices() {
-                Ok(events) => events,
+            let socket = match hotplug() {
+                Ok(socket) => socket,
                 Err(e) => {
-                    tracing::warn!("usb.hotplug_unavailable err={e} action=retry");
+                    tracing::warn!("usb.hotplug_unavailable err={e:#} action=retry");
                     tokio::time::sleep(HOTPLUG_RETRY).await;
                     continue;
                 }
             };
             tracing::info!("usb.hotplug_ready action=listen");
-            // Read once the watch is in place, not before: a phone that arrived
+            // Read once the socket is in place, not before: a phone that arrived
             // while it was being made is in this first list rather than in an
             // event that has already been missed.
             refresh(&tx).await;
-            while events.next().await.is_some() {
-                refresh(&tx).await;
+            // The socket only stops reporting events if it breaks, and watching
+            // is the only way this link hears about a cable — so a broken one is
+            // replaced, and the read above runs again with it.
+            if let Err(e) = listen(&socket, &tx).await {
+                tracing::warn!("usb.hotplug_lost err={e:#} action=rewatch");
             }
-            // The stream only ends if the socket under it does, and watching is
-            // the only way this link hears about a cable.
-            tracing::warn!("usb.hotplug_ended action=rewatch");
             tokio::time::sleep(HOTPLUG_RETRY).await;
         }
     });
     rx
+}
+
+/// A socket on the group the kernel broadcasts uevents to.
+///
+/// Group 1 is the kernel's own and needs nothing running to hear it; group 2 is
+/// `udevd`'s relay, and with no daemon under it the socket opens, binds and then
+/// stays silent for ever — which is what a watch on it looks like when the
+/// daemon is not there.
+///
+/// Only root may broadcast on this group, and what a forged packet would buy is
+/// one more read of sysfs, so the sender is not checked.
+fn hotplug() -> anyhow::Result<AsyncFd<OwnedFd>> {
+    let fd: OwnedFd = socket_with(
+        AddressFamily::NETLINK,
+        SocketType::RAW,
+        SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
+        Some(netlink::KOBJECT_UEVENT),
+    )?;
+    bind(&fd, &SocketAddrNetlink::new(0, KERNEL_MULTICAST_GROUP))?;
+    // SAFETY: the descriptor is owned by the `AsyncFd` that registers it and is
+    // closed only when that is dropped, which is what `register` asks of it.
+    let socket = unsafe { AsyncFd::register(fd) }
+        .map_err(|e| anyhow::anyhow!("netlink socket: {e}"))?;
+    Ok(socket)
+}
+
+/// Reads the cable on every event until the socket stops reporting them.
+async fn listen(socket: &AsyncFd<OwnedFd>, tx: &watch::Sender<Vec<Phone>>) -> std::io::Result<()> {
+    loop {
+        let mut ready = socket.readable().await?;
+        // One read of sysfs answers every event waiting on the socket, so the
+        // socket is emptied first and the cable is read once after it.
+        match ready.try_io(|fd| drain(fd.get_ref().as_fd())) {
+            Ok(Ok(_)) => refresh(tx).await,
+            Ok(Err(e)) => return Err(e),
+            // Readiness for something already taken: `try_io` has cleared it and
+            // the next wait answers again.
+            Err(_nothing_there) => {}
+        }
+    }
+}
+
+/// Empties the socket, and says how much was in it.
+///
+/// Nothing a uevent carries is used — it is only a reason to look at the cable
+/// again — so each packet goes into one buffer and is dropped, and a truncated
+/// one counts the same as a whole one.
+///
+/// An empty socket is `WouldBlock` rather than an empty answer: that error is
+/// what `try_io` clears the readiness it was handed for, and returning `Ok`
+/// instead would leave it set and the next wait would answer at once every time.
+fn drain(fd: BorrowedFd<'_>) -> std::io::Result<usize> {
+    let mut buf = [MaybeUninit::uninit(); UEVENT_BUFFER];
+    let mut bytes = 0;
+    loop {
+        match recvfrom(fd, &mut buf, RecvFlags::DONTWAIT) {
+            Ok(((packet, _), _, _)) => bytes += packet.len(),
+            Err(Errno::AGAIN) if bytes == 0 => {
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            // Nothing left: the socket has been emptied.
+            Err(Errno::AGAIN) => return Ok(bytes),
+            Err(Errno::INTR) => continue,
+            Err(e) => return Err(std::io::Error::from_raw_os_error(e.raw_os_error())),
+        }
+    }
 }
 
 /// Reads the cable and says so when the answer changed.

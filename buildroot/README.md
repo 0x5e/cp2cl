@@ -202,16 +202,18 @@ the core; none is loaded on this chip.
 
 ### 3.5 Start order
 
-    S00diag  S10radio  S10udev  S12firstboot  S30dbus-daemon  S40bluetoothd
+    S00diag  S10radio  S12firstboot  S30dbus-daemon  S40bluetoothd
     S50cp2cl  S55ap
 
-`S10udev` is what the USB hotplug events are read from; the UFI001C's
-`S05firmware` runs before it and reads partition names out of sysfs.
+No udev: device nodes are devtmpfs's, made by the kernel as devices are probed,
+and the cable's hotplug events are read straight off the kernel's own netlink
+group. That is why the UFI001C's `S05firmware` reads partition names out of
+sysfs — there is no `/dev/disk/by-partlabel` for them to come from.
 
 ### 3.6 Not needed
 
     systemd, OpenSSL, wpa_supplicant, avahi/mDNS, ntp,
-    DRM, framebuffer, ALSA, USB mass storage, DNS resolver
+    DRM, framebuffer, ALSA, USB mass storage, DNS resolver, udev
 
 Leftovers in this image, doing nothing: `S11modules` (no `/etc/modules`),
 `S40network` (no interfaces), `S50crond` (no crontabs). `S80dnsmasq` is deleted
@@ -347,10 +349,11 @@ differs from the NanoPi:
     image           sdcard.img — SPL at 8 KiB, a 32 MB FAT boot partition, a
                     96 MB ext4 root. The boot half is four times the NanoPi's
                     because the arm64 image is 13.5 MB gzipped where the armv7
-                    one is a megabyte or two. The root is 61 MB used of 96, and
-                    24 MB of that is the 836 modules arm64's defconfig leaves
-                    on — the list at the end of `board/orangepi-zero2w/kernel.fragment`
-                    is what cuts them down from 1059
+                    one is a megabyte or two. The root is 51 MB used of 96 — it
+                    was 61 while eudev was in it — and 24 MB of that is the 836
+                    modules arm64's defconfig leaves on: the list at the end of
+                    `board/orangepi-zero2w/kernel.fragment` is what cuts them
+                    down from 1059
     libc            glibc, where the other two boards are musl: `hciattach_opi`
                     is a glibc binary and there is no other tool that speaks
                     `sprd`. cp2cl is statically linked either way

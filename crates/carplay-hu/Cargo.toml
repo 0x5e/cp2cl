@@ -17,15 +17,14 @@ livi-runtime = { path = "../../vendor/LIVI/native/crates/livi-runtime" }
 livi-wifi = { path = "../../vendor/LIVI/native/crates/livi-wifi" }
 # Paging a paired phone is one BlueZ D-Bus call.
 zbus = { version = "5", default-features = false, features = ["tokio"] }
-# The cable is watched through the kernel's hotplug events rather than asked
-# about once a second. On Linux `nusb` listens on the socket `udevd` broadcasts
-# on, so the board runs the daemon — see `buildroot/configs`.
-nusb = "0.2.8"
+# The cable is watched through the kernel's own hotplug events rather than asked
+# about once a second. `AF_NETLINK` is not in std, and `rustix` is the crate
+# `nusb` itself opens that socket with.
+rustix = { version = "1", features = ["net"] }
 # Needed directly to name `idevice::ReadWrite` in our own function signatures.
 idevice = "0.1"
 
 tokio = { version = "1", features = ["full"] }
-futures-util = "0.3"
 
 # The phone's music arrives as AAC-LC and a prompt as Opus; the car's media and
 # TTS channels take PCM, so both are decoded on the way past.

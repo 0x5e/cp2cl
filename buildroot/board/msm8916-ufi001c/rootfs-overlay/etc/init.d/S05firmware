@@ -37,8 +37,8 @@ start() {
 	mkdir -p "$BASEDIR/mnt" "$BASEDIR/target"
 
 	# The names come out of sysfs rather than out of /dev/disk/by-partlabel:
-	# this runs before S10udev, and the nodes it wants are the ones devtmpfs
-	# made.
+	# no udev runs in this image to make those links, and the nodes this wants
+	# are the ones devtmpfs made.
 	mounted=0
 	for part in /sys/block/mmcblk*/mmcblk*p*; do
 		[ -r "$part/uevent" ] || continue
