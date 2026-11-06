@@ -3,9 +3,9 @@
 //! One consumer takes them: the head unit on the other end of a CarLife session.
 //! The phone's audio does not all go to one place — the music is the car's media
 //! channel, the navigation prompt is its Navi TTS channel, and a call and the
-//! voice assistant are channels of the car's own, which this bridge has nothing
-//! to say to. Which is which is decided by the name the phone gives the stream
-//! in its SETUP — see `is_media` and `is_navigation`.
+//! voice assistant are its voice channel, the one that carries speech in both
+//! directions. Which is which is decided by the name the phone gives the stream
+//! in its SETUP — see `is_media`, `is_navigation` and `is_voice`.
 //!
 //! Nothing here interprets either half's protocol: an event from the CarPlay
 //! crate is mapped onto a queue of the CarLife crate's, and what the phone is
@@ -15,29 +15,34 @@ use std::sync::{Arc, Mutex};
 
 use carplay_hu::now_playing::NowPlaying;
 use carplay_hu::sink::{StreamSink, StreamEvent, StreamId};
-use carplay_hu::sink::{is_media, is_navigation};
+use carplay_hu::sink::{is_media, is_voice};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::now_playing::{NowPlaying as Playing, Position, Track};
 
-// The two shapes the car's channels carry, which belong to the CarLife half.
-pub use carlife_md::media::{Media, Navi};
+// The three shapes the car's channels carry, which belong to the CarLife half.
+pub use carlife_md::media::{Media, Navi, Voice};
 
 /// Which of the car's channels an audio stream feeds.
 enum Role {
     Media,
     Navi,
-    /// The car's own: a call or the voice assistant.
-    Other,
+    /// The car's speech channel, which is the one that runs both ways: a call
+    /// and the voice assistant go down it, and the microphone comes back up it.
+    Voice,
 }
 
-fn role(name: &str) -> Role {
-    if is_media(name) {
+fn role(name: &str, two_way: bool) -> Role {
+    // The microphone decides first: a stream the phone wants to hear on is a
+    // call or the assistant, whatever it is labelled, and the music never is.
+    if is_voice(name, two_way) {
+        Role::Voice
+    } else if is_media(name) {
         Role::Media
-    } else if is_navigation(name) {
-        Role::Navi
     } else {
-        Role::Other
+        // Everything else the phone names an audio stream with is a prompt: see
+        // `is_navigation`, which is written as exactly that.
+        Role::Navi
     }
 }
 
@@ -79,12 +84,13 @@ pub struct ClSink {
     /// next frame. Held outside the queue deliberately: the queue can be full,
     /// and a dropped SPS/PPS costs everything that follows it.
     pending: Mutex<Vec<u8>>,
-    /// Which instance of which stream each of the two audio channels is being
+    /// Which instance of which stream each of the three audio channels is being
     /// fed from. A packet carries no name — only the stream's opening does — so
-    /// this is what the ones that follow are measured against. The two are kept
-    /// apart so that one stream ending cannot take the other channel with it.
+    /// this is what the ones that follow are measured against. They are kept
+    /// apart so that one stream ending cannot take another channel with it.
     media_stream: Mutex<Option<StreamId>>,
     navi_stream: Mutex<Option<StreamId>>,
+    voice_stream: Mutex<Option<StreamId>>,
 }
 
 impl ClSink {
@@ -95,6 +101,7 @@ impl ClSink {
             pending: Mutex::new(Vec::new()),
             media_stream: Mutex::new(None),
             navi_stream: Mutex::new(None),
+            voice_stream: Mutex::new(None),
         }
     }
 }
@@ -122,12 +129,14 @@ impl StreamSink for ClSink {
                 self.queues.video(access_unit);
             }
             // Which of the car's channels a stream feeds is said once, when the
-            // stream opens, and by the name the phone gave it.
+            // stream opens, by the name the phone gave it and by whether it
+            // named a port for a microphone.
             StreamEvent::AudioConfig {
                 stream,
                 codec,
                 name,
-            } => match role(&name) {
+                two_way,
+            } => match role(&name, two_way) {
                 Role::Media => {
                     feed(&self.media_stream, stream);
                     // The format the car is told is the one the phone
@@ -150,8 +159,14 @@ impl StreamSink for ClSink {
                         channels: codec.channels(),
                     });
                 }
-                Role::Other => {
-                    tracing::debug!("carlife.audio_unbridged name={name:?}");
+                // The same two numbers as a prompt, and for the same reason: the
+                // car's speech channels take 16 kHz mono whatever Opus carried.
+                Role::Voice => {
+                    feed(&self.voice_stream, stream);
+                    self.queues.voice(Voice::Format {
+                        rate: codec.rate(),
+                        channels: codec.channels(),
+                    });
                 }
             },
             StreamEvent::AudioPacket {
@@ -170,6 +185,11 @@ impl StreamSink for ClSink {
                         timestamp_ms: at,
                         data,
                     });
+                } else if feeding(&self.voice_stream, stream) {
+                    self.queues.voice(Voice::Pcm {
+                        timestamp_ms: at,
+                        data,
+                    });
                 }
             }
             // One instance ended. If it is the one the channel is on, the
@@ -182,6 +202,9 @@ impl StreamSink for ClSink {
                 }
                 if starve(&self.navi_stream, stream) {
                     self.queues.navi(Navi::Ended);
+                }
+                if starve(&self.voice_stream, stream) {
+                    self.queues.voice(Voice::Ended);
                 }
             }
             // The car learns nothing from this: it is the video channel that
@@ -249,14 +272,15 @@ mod tests {
     }
 
     /// The phone mixes three different things onto one stream of events and only
-    /// one of them is the car's media channel. A call is the car's own
-    /// telephone, and the music playing under it is not the call.
+    /// one of them is the car's media channel. A call is the car's voice channel,
+    /// and the music playing under it is not the call.
     #[test]
     fn only_the_music_finds_its_way_to_the_media_channel() {
         let outlet = Outlet::new();
         let sink = sink(&outlet);
         let mut media = outlet.take_media().expect("nothing has taken it");
         let mut navi = outlet.take_navi().expect("nothing has taken it");
+        let mut voice = outlet.take_voice().expect("nothing has taken it");
 
         let opened = |stream, name: &str| StreamEvent::AudioConfig {
             stream,
@@ -265,6 +289,7 @@ mod tests {
                 channels: 2,
             },
             name: name.to_string(),
+            two_way: false,
         };
         let sound = |stream| StreamEvent::AudioPacket {
             stream,
@@ -276,6 +301,17 @@ mod tests {
         sink.push(sound(id(100, 1)));
         assert!(media.try_recv().is_err(), "a call is not the car's music");
         assert!(navi.try_recv().is_err(), "nor is it a prompt");
+        assert!(
+            matches!(
+                voice.try_recv(),
+                Ok(Voice::Format {
+                    rate: 44_100,
+                    channels: 2
+                })
+            ),
+            "a call is the car's voice channel"
+        );
+        assert!(matches!(voice.try_recv(), Ok(Voice::Pcm { .. })));
 
         sink.push(opened(id(102, 2), "media"));
         sink.push(sound(id(102, 2)));
@@ -333,6 +369,7 @@ mod tests {
                 channels: 2,
             },
             name: "media".into(),
+            two_way: false,
         });
         // The prompt opens as its own type and its own instance, with the codec
         // it is delivered in rather than the one on the wire.
@@ -343,6 +380,7 @@ mod tests {
                 channels: 1,
             },
             name: "default".into(),
+            two_way: false,
         });
         sink.push(StreamEvent::AudioPacket {
             stream: id(100, 8),
@@ -384,6 +422,7 @@ mod tests {
                 channels: 2,
             },
             name: "media".into(),
+            two_way: false,
         };
         sink.push(opened(3));
         assert!(matches!(media.try_recv(), Ok(Media::Format { .. })));

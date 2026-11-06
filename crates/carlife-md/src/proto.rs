@@ -400,9 +400,14 @@ pub const NAVI_MODULE: i32 = 2;
 /// whether the song is moving.
 pub const MUSIC_MODULE: i32 = 3;
 
-/// `CARLIFE_VR_MODULE_ID`: the assistant's module, idle here for the same reason
-/// the phone's is — see `modules_at_rest`.
+/// `CARLIFE_VR_MODULE_ID`: the assistant's module. Its running state is what
+/// tells the car that the voice channel is live, which is what makes it hold
+/// the music down for the length of a request.
 pub const VR_MODULE: i32 = 4;
+
+/// `VRStatus.RUNNING`: a request or a call is being carried. `MODULE_IDLE` is
+/// the state it returns to, and the only other one this side reports.
+pub const VR_RUNNING: i32 = 1;
 
 /// `MusicState`. `IDLE` is a song that is not moving through its own time and
 /// `RUNNING` one that is — the same distinction the car's own pause and play

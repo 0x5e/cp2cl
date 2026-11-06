@@ -71,6 +71,8 @@ fn name(service_type: u32) -> &'static str {
         0x0001_001B => "MSG_CMD_FOREGROUND",
         0x0001_001C => "MSG_CMD_BACKGROUND",
         0x0001_0021 => "MSG_CMD_GO_TO_DESKTOP",
+        0x0001_0023 => "MSG_CMD_MIC_RECORD_END",
+        0x0001_0024 => "MSG_CMD_MIC_RECORD_RECOG_START",
         0x0001_0026 => "MSG_CMD_MODULE_STATUS",
         0x0001_0030 => "MSG_CMD_NAVI_NEXT_TURN_INFO",
         0x0001_0031 => "MSG_CMD_CAR_DATA_SUBSCRIBE",
@@ -96,6 +98,13 @@ fn name(service_type: u32) -> &'static str {
         0x0004_0001 => "MSG_NAVI_TTS_INIT",
         0x0004_0002 => "MSG_NAVI_TTS_END",
         0x0004_0003 => "MSG_NAVI_TTS_DATA",
+        // The voice channel: speech down, the microphone back up. The names are
+        // the phone app's own, which is what a head unit's log prints for them.
+        0x0005_0002 => "MSG_VR_AUDIO_INIT",
+        0x0005_0003 => "MSG_VR_AUDIO_DATA",
+        0x0005_0004 => "MSG_VR_AUDIO_STOP",
+        0x0005_0005 => "MSG_VR_MODULE_STATUS",
+        0x0005_8001 => "MSG_VR_MIC_DATA",
         // The input channel.
         0x0006_8001 => "MSG_TOUCH_ACTION",
         0x0006_8002 => "MSG_TOUCH_ACTION_DOWN",

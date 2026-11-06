@@ -16,18 +16,19 @@
 //! frame. Frames go out exactly as the codec packs them — a decoder is told the
 //! codec out of band, so wrapping them (ADTS, once) would only be in the way.
 //!
-//! **AAC-LC and the navigation prompt's Opus are decoded here, and PCM is not.**
-//! The car at the other end of the bridge takes 16-bit PCM on its media channel
-//! and its navigation channel, a phone on wireless CarPlay sends its music as
-//! AAC-LC and its prompts as Opus, so both codecs come off on this side of the
-//! `StreamSink` — the stream's codec is known exactly here and nowhere later. The
-//! two voice streams that are not prompts, a call and the voice assistant,
-//! belong to the car's own channels; they arrive as Opus too and are not decoded
-//! at all, because nothing downstream of here is going to be given them.
+//! **AAC-LC and the Opus of every speech stream are decoded here, and PCM is
+//! not.** The car at the other end of the bridge takes 16-bit PCM on its media
+//! channel and on the two it keeps for speech, a phone on wireless CarPlay sends
+//! its music as AAC-LC and its speech as Opus, so both codecs come off on this
+//! side of the `StreamSink` — the stream's codec is known exactly here and
+//! nowhere later.
 //!
-//! A prompt is also the one stream whose rate changes on the way past: Opus is
-//! 48 kHz on the wire and the car's navigation channel is given 16 kHz, so what
-//! comes out of the decoder is decimated 3:1. See `Decimator`.
+//! A speech stream is also the one whose rate changes on the way past: the car's
+//! speech channels are 16 kHz whatever the phone sent. Wireless, that is Opus at
+//! 48 kHz and a 3:1 decimation — see `Decimator`. Wired, it is PCM at 24 kHz and
+//! a 3:2 one — see `Thirds`. That covers a navigation prompt, a call and the
+//! voice assistant alike — the three the phone names, and the three the car's
+//! two speech channels carry.
 
 use rusty_opus::OpusDecoder;
 
@@ -44,8 +45,13 @@ const NONCE_LEN: usize = 8;
 /// later given.
 const OPUS_RATE: u32 = 48_000;
 
-/// What the car's navigation channel is given.
+/// What the car's speech channels are given, and what both of them carry: the
+/// CarLife guide writes 16 kHz mono for the VR channel in both directions.
 const SPEECH_RATE: u32 = 16_000;
+
+/// The rate a wired session's speech stream is negotiated at. The phone picks
+/// it, not us — `audioFormat` 0x40 is 24 kHz mono.
+const WIRED_SPEECH_RATE: u32 = 24_000;
 
 /// The longest frame an Opus packet may carry: 120 ms at 48 kHz.
 const OPUS_FRAME: usize = 5_760;
@@ -63,9 +69,12 @@ pub struct AudioReceiver {
     /// the car takes. `None` for PCM, which needs nothing, and for the Opus of a
     /// stream the car is never given.
     decoder: Option<aac::Decoder>,
-    /// The same, for a prompt: Opus off, and out at the rate the car's channel
-    /// takes.
+    /// The same, for a stream the car is given as speech: Opus off, and out at
+    /// the rate the car's speech channels take.
     speech: Option<Speech>,
+    /// The wired speech stream's own way there: PCM, so nothing to decode, but
+    /// 24 kHz on the wire against the 16 kHz the car takes.
+    wired: Option<Narrow>,
     /// Whether a frame has already been reported as dropped. A frame the decoder
     /// refuses is dropped, which is a moment of sound rather than the stream —
     /// but a stream it refuses *every* frame of would otherwise be a line per
@@ -74,17 +83,18 @@ pub struct AudioReceiver {
 }
 
 impl AudioReceiver {
-    /// `name` is the phone's `audioType` for the stream, which is what decides
-    /// whether it is a prompt; `stream` is the instance, which is what every
-    /// frame is stamped with.
+    /// `name` is the phone's `audioType` for the stream and `two_way` says it
+    /// named a send port, which together decide whether it is speech; `stream`
+    /// is the instance, which is what every frame is stamped with.
     pub fn new(
         key: SymKey,
         stream: StreamId,
         codec: AudioCodec,
         name: &str,
+        two_way: bool,
         sink: Arc<dyn StreamSink>,
     ) -> Self {
-        let delivered = delivered(codec, name);
+        let delivered = delivered(codec, name, two_way);
         let decoder = match codec {
             AudioCodec::AacLc { rate, channels } => match aac::Decoder::new(rate, channels) {
                 Some(decoder) => Some(decoder),
@@ -102,6 +112,16 @@ impl AudioReceiver {
             AudioCodec::Pcm { .. } if matches!(codec, AudioCodec::Opus { .. }) => Speech::new(),
             _ => None,
         };
+        // What `delivered` decided, in the form the frames need: a speech stream
+        // that arrives wider than the channel, and is not decoded on the way.
+        let wired = match (codec, delivered) {
+            (AudioCodec::Pcm { rate, channels }, AudioCodec::Pcm { rate: SPEECH_RATE, .. })
+                if rate != SPEECH_RATE || channels != 1 =>
+            {
+                Some(Narrow::new(rate))
+            }
+            _ => None,
+        };
         Self {
             key,
             stream,
@@ -109,6 +129,7 @@ impl AudioReceiver {
             sink,
             decoder,
             speech,
+            wired,
             dropped: false,
         }
     }
@@ -143,7 +164,13 @@ impl AudioReceiver {
             // Raw samples, but every consumer wants them little-endian and
             // CarPlay sends them big-endian. Swapping every pair is the whole
             // fix — skip it and the sound is pure noise.
-            AudioCodec::Pcm { .. } => to_le16(&payload),
+            AudioCodec::Pcm { channels, .. } => {
+                let pcm = to_le16(&payload);
+                match self.wired.as_mut() {
+                    Some(narrow) => narrow.push(&pcm, channels),
+                    None => pcm,
+                }
+            }
             AudioCodec::AacLc { .. } => {
                 let decoded = match self.decoder.as_mut() {
                     Some(decoder) => decoder.decode(&payload).map(<[u8]>::to_vec),
@@ -165,9 +192,8 @@ impl AudioReceiver {
                         return None;
                     }
                 },
-                // A call or the voice assistant, which the car has channels of
-                // its own for: there is nothing to decode, and nothing is being
-                // dropped that anyone wanted.
+                // No decoder: the stream is not speech the car is given, or the
+                // decoder could not be built. `new` has said which.
                 None => return None,
             },
         };
@@ -196,17 +222,35 @@ impl AudioReceiver {
 /// What the car is given for a stream.
 ///
 /// The music arrives as AAC-LC and is decoded, which changes neither the rate nor
-/// the channel count. A prompt arrives as Opus at 48 kHz and the car's navigation
-/// channel takes 16 kHz mono, which changes both — so the format the car is told
-/// is the format this returns, not the one the phone negotiated. Everything else
-/// is passed through as it arrives: a wired session sends PCM, and the car is
-/// told whatever that was.
-pub fn delivered(codec: AudioCodec, name: &str) -> AudioCodec {
+/// the channel count. Everything the car's speech channels carry — a navigation
+/// prompt, a call, the voice assistant — is 16 kHz mono there, and the phone
+/// sends it wider: 48 kHz Opus on a wireless session, and on a wired one the PCM
+/// its `audioFormat` names, which has been 24 kHz mono and may be 48 kHz stereo.
+/// So the format the car is told is the format this returns, not the one the
+/// phone negotiated, and anything this does not know how to narrow is left as it
+/// arrived rather than announced as something it is not.
+pub fn delivered(codec: AudioCodec, name: &str, two_way: bool) -> AudioCodec {
+    if !(sink::is_navigation(name, two_way) || sink::is_voice(name, two_way)) {
+        return codec;
+    }
+    let speech = AudioCodec::Pcm {
+        rate: SPEECH_RATE,
+        channels: 1,
+    };
     match codec {
-        AudioCodec::Opus { .. } if sink::is_navigation(name) => AudioCodec::Pcm {
+        AudioCodec::Opus { .. } => speech,
+        // Every rate a wired speech stream has been seen at, mono or stereo.
+        // `Narrow` is the other half of this decision and is built from the same
+        // two numbers.
+        AudioCodec::Pcm {
+            rate: WIRED_SPEECH_RATE | OPUS_RATE,
+            channels: 1 | 2,
+        } => speech,
+        // Already at the car's rate and in stereo: only the mix is left to do.
+        AudioCodec::Pcm {
             rate: SPEECH_RATE,
-            channels: 1,
-        },
+            channels: 2,
+        } => speech,
         _ => codec,
     }
 }
@@ -239,6 +283,22 @@ fn to_le16(payload: &[u8]) -> Vec<u8> {
         pair.swap(0, 1);
     }
     out
+}
+
+/// Little-endian s16 in, one channel of -1..1 out: a stereo pair is averaged,
+/// which is what a call's two channels are for — the same voice in both.
+fn to_mono(pcm: &[u8], channels: u16) -> Vec<f32> {
+    let samples: Vec<f32> = pcm
+        .chunks_exact(2)
+        .map(|pair| f32::from(i16::from_le_bytes([pair[0], pair[1]])) / f32::from(i16::MAX))
+        .collect();
+    if channels < 2 {
+        return samples;
+    }
+    samples
+        .chunks_exact(2)
+        .map(|pair| (pair[0] + pair[1]) / 2.0)
+        .collect()
 }
 
 /// Takes a prompt off Opus and out at the rate the car's channel takes.
@@ -375,6 +435,132 @@ impl Decimator {
     }
 }
 
+/// A speech stream that arrives wider than the car's channel: mixed to one
+/// channel, and brought down in the ratio its rate calls for.
+///
+/// Only the rates a wired session has been seen to negotiate, because those are
+/// the only ones `delivered` will announce as 16 kHz — a stream this does not
+/// cover is left at its own rate rather than played at the wrong speed.
+enum Narrow {
+    /// Already 16 kHz and only in stereo: the mix is all that is left to do.
+    Same,
+    /// 48 kHz: one sample in three.
+    ThreeToOne(Decimator),
+    /// 24 kHz: two in three.
+    ThreeToTwo(Thirds),
+}
+
+impl Narrow {
+    fn new(rate: u32) -> Self {
+        match rate {
+            SPEECH_RATE => Self::Same,
+            WIRED_SPEECH_RATE => Self::ThreeToTwo(Thirds::default()),
+            _ => Self::ThreeToOne(Decimator::default()),
+        }
+    }
+
+    /// One packet of little-endian s16 in, mono 16 kHz little-endian s16 out.
+    fn push(&mut self, pcm: &[u8], channels: u16) -> Vec<u8> {
+        let mono = to_mono(pcm, channels);
+        match self {
+            Self::Same => mono.iter().flat_map(|s| to_i16(*s).to_le_bytes()).collect(),
+            Self::ThreeToOne(decimator) => decimator.push(&mono),
+            Self::ThreeToTwo(thirds) => thirds.push(&mono),
+        }
+    }
+}
+
+/// 24 kHz → 16 kHz: three samples in, two out, with a low-pass in front.
+///
+/// The two kept samples of each triple fall at the first and the middle of the
+/// three, and the middle one is half way between two input samples — so the same
+/// kernel is needed twice, once centred on a sample and once between two. Both
+/// are 41 taps of a Hamming-windowed sinc at 7 kHz over the 24 kHz input: flat to
+/// 4 kHz, and 48 dB down by the 8 kHz that is the most a 16 kHz channel can
+/// carry, which is where a wired call's sibilants would otherwise fold back.
+///
+/// Fixed at 3:2 because that is the one ratio a wired speech stream arrives at,
+/// for the reason `Decimator` is fixed at 3:1.
+struct Thirds {
+    /// The tail of the frame before this one, which the kernel's first taps
+    /// reach into. Shorter than the kernel: only half of it is behind the centre.
+    history: [f32; SPEECH_CENTRE],
+}
+
+const SPEECH_TAPS: usize = 41;
+const SPEECH_CENTRE: usize = SPEECH_TAPS / 2;
+
+/// Centred on an input sample, oldest first.
+const SPEECH_KEEP: [f32; SPEECH_TAPS] = [
+    -0.001104340, -0.000372006, 0.001815611, -0.000631626, -0.002896342, 0.003227011, 0.003069759,
+    -0.007844337, 0.000000000, 0.013102266, -0.008607479, -0.015327723, 0.023541349, 0.008826670,
+    -0.043057651, 0.014278732, 0.062957587, -0.071373490, -0.077904540, 0.306188893, 0.584223308,
+    0.306188893, -0.077904540, -0.071373490, 0.062957587, 0.014278732, -0.043057651, 0.008826670,
+    0.023541349, -0.015327723, -0.008607479, 0.013102266, 0.000000000, -0.007844337, 0.003069759,
+    0.003227011, -0.002896342, -0.000631626, 0.001815611, -0.000372006, -0.001104340,
+];
+
+/// The same kernel half a sample later, which is where the second of each pair
+/// of output samples falls. Indexed against the same input samples as `KEEP`.
+const SPEECH_HALF: [f32; SPEECH_TAPS] = [
+    0.001187684, -0.000175598, -0.001563669, 0.001378659, 0.001879823, -0.003870853, -0.000730966,
+    0.007289957, -0.003630851, -0.009563581, 0.011993429, 0.007180490, -0.022919452, 0.003702082,
+    0.032138398, -0.026089500, -0.032503524, 0.062783364, 0.011736023, -0.126952945, 0.082135174,
+    0.507938197, 0.499330365, 0.078017163, -0.116459404, 0.010388710, 0.053563997, -0.026684048,
+    -0.020568047, 0.024269331, 0.002669644, -0.015725659, 0.004668237, 0.007355178, -0.005509188,
+    -0.001959662, 0.003694948, -0.000352815, -0.001847972, 0.000959367, 0.000847513,
+];
+
+impl Default for Thirds {
+    fn default() -> Self {
+        Self {
+            history: [0.0; SPEECH_CENTRE],
+        }
+    }
+}
+
+impl Thirds {
+    /// One frame of 24 kHz samples in, two thirds as many at 16 kHz.
+    ///
+    /// A frame that does not end on a whole triple keeps the samples that did
+    /// not make one, which at 20 ms a frame is a frame that never happens.
+    fn push(&mut self, frame: &[f32]) -> Vec<u8> {
+        let whole = frame.len() - frame.len() % 3;
+        let mut out = Vec::with_capacity(whole * 2 / 3 * 2);
+        for base in (0..whole).step_by(3) {
+            for kernel in [&SPEECH_KEEP, &SPEECH_HALF] {
+                out.extend_from_slice(&to_i16(self.tap(&frame, base, kernel)).to_le_bytes());
+            }
+        }
+        if frame.len() >= SPEECH_CENTRE {
+            self.history
+                .copy_from_slice(&frame[frame.len() - SPEECH_CENTRE..]);
+        }
+        out
+    }
+
+    /// One output sample: the kernel centred on `base`, or half a sample past it.
+    ///
+    /// Past the end of the frame it holds the last sample, for the reason
+    /// `Decimator` does: the kernel's last few taps reach into the frame after
+    /// this one, and a frame of 20 ms of speech is worth more than a frame of
+    /// delay to wait for them.
+    fn tap(&self, frame: &[f32], base: usize, kernel: &[f32; SPEECH_TAPS]) -> f32 {
+        let origin = base as isize - SPEECH_CENTRE as isize;
+        let mut acc = 0.0f32;
+        for (i, weight) in kernel.iter().enumerate() {
+            let at = origin + i as isize;
+            let sample = if at < 0 {
+                self.history[(at + SPEECH_CENTRE as isize) as usize]
+            } else {
+                frame[(at as usize).min(frame.len() - 1)]
+            };
+            acc += weight * sample;
+        }
+        acc
+    }
+}
+
 /// One decoded sample, which the decoder gives in -1..1.
 fn to_i16(sample: f32) -> i16 {
     (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16
@@ -400,10 +586,10 @@ mod tests {
         assert!(!could_be_a_frame(&packet));
     }
 
-    /// The car's navigation channel takes 16 kHz mono, and a prompt arrives as
-    /// 48 kHz Opus. What the car is *told* has to be what it is *given*, so this
-    /// is the mapping between them — and the three streams that are not prompts
-    /// are left alone.
+    /// The car's speech channels take 16 kHz mono. Wireless, every speech stream
+    /// arrives as 48 kHz Opus; on a wired one, as the PCM its `audioFormat`
+    /// names. What the car is *told* has to be what it is *given* — and a stream
+    /// this cannot narrow, or one that is not speech at all, is left alone.
     #[test]
     fn a_prompt_is_delivered_at_the_rate_the_cars_channel_takes() {
         let opus = AudioCodec::Opus {
@@ -411,36 +597,82 @@ mod tests {
             channels: 1,
         };
         assert_eq!(
-            delivered(opus, "default"),
+            delivered(opus, "default", false),
             AudioCodec::Pcm {
                 rate: 16_000,
                 channels: 1
             }
         );
         assert_eq!(
-            delivered(opus, "alert"),
+            delivered(opus, "alert", false),
             AudioCodec::Pcm {
                 rate: 16_000,
                 channels: 1
             }
         );
-        // A call and the voice assistant are Opus as well, and neither is
-        // bridged: they are delivered as they arrive and dropped downstream.
+        // A call and the voice assistant are Opus as well, and the bridge gives
+        // them the same rate as a prompt: the car has one channel for speech
+        // whichever of the two is talking.
         for name in ["telephony", "speechrecognition"] {
-            assert_eq!(delivered(opus, name), opus, "{name}");
+            assert_eq!(
+                delivered(opus, name, false),
+                AudioCodec::Pcm {
+                    rate: 16_000,
+                    channels: 1
+                },
+                "{name}"
+            );
         }
         // The music is decoded, but decoding changes neither number.
         let aac = AudioCodec::AacLc {
             rate: 48_000,
             channels: 2,
         };
-        assert_eq!(delivered(aac, "media"), aac);
-        // And a wired session's PCM is already what the car takes.
-        let pcm = AudioCodec::Pcm {
+        assert_eq!(delivered(aac, "media", false), aac);
+        // A wired speech stream is PCM, and 24 kHz rather than the 16 the car
+        // takes, so it is narrowed too.
+        let wired = AudioCodec::Pcm {
             rate: 24_000,
             channels: 1,
         };
-        assert_eq!(delivered(pcm, "default"), pcm);
+        assert_eq!(
+            delivered(wired, "speechrecognition", false),
+            AudioCodec::Pcm {
+                rate: 16_000,
+                channels: 1
+            }
+        );
+        // The music channel is not a speech channel and keeps its rate.
+        assert_eq!(delivered(wired, "media", false), wired);
+        // A call that arrived at 48 kHz stereo — which is what a wired one has
+        // been seen to do — is both mixed down and decimated.
+        let wide = AudioCodec::Pcm {
+            rate: 48_000,
+            channels: 2,
+        };
+        assert_eq!(
+            delivered(wide, "telephony", false),
+            AudioCodec::Pcm {
+                rate: 16_000,
+                channels: 1
+            }
+        );
+        // And a call the phone labelled with the music's own name is still a
+        // call, because it named a port for a microphone.
+        assert_eq!(
+            delivered(wide, "media", true),
+            AudioCodec::Pcm {
+                rate: 16_000,
+                channels: 1
+            }
+        );
+        // And one this cannot narrow is left as it arrived rather than announced
+        // as something it is not.
+        let odd = AudioCodec::Pcm {
+            rate: 44_100,
+            channels: 2,
+        };
+        assert_eq!(delivered(odd, "default", false), odd);
     }
 
     /// The decimation has to keep every third sample and nothing else: a frame
@@ -470,6 +702,80 @@ mod tests {
             .collect();
         // The middle of the frame, past the filter's history and clear of the
         // held tail: a 1 kHz tone is well inside the passband.
+        let peak = out[40..280].iter().map(|s| i32::from(*s).abs()).max();
+        let expected = (0.5 * f32::from(i16::MAX)) as i32;
+        assert!(
+            (peak.unwrap() - expected).abs() < expected / 20,
+            "peak {peak:?} is not near {expected}"
+        );
+    }
+
+    /// A wired speech stream is 24 kHz and the car's channel is 16 kHz: three
+    /// samples in, two out. The order of the pair matters — a tone that came out
+    /// with its halves swapped would be a buzz rather than speech — so this
+    /// compares the whole stretch against the sine it started as.
+    #[test]
+    fn a_wired_speech_stream_is_decimated_three_to_two() {
+        let mut thirds = Thirds::default();
+        let mut bytes = Vec::new();
+        for frame in 0..4 {
+            let base = frame * 480;
+            let samples: Vec<f32> = (0..480)
+                .map(|i| {
+                    let t = (base + i) as f32 / WIRED_SPEECH_RATE as f32;
+                    0.5 * (2.0 * std::f32::consts::PI * 1_000.0 * t).sin()
+                })
+                .collect();
+            bytes.extend_from_slice(&thirds.push(&samples));
+        }
+        assert_eq!(bytes.len(), 4 * 480 * 2 / 3 * 2, "two for every three");
+
+        let out: Vec<i16> = bytes
+            .chunks_exact(2)
+            .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        let ideal = |m: usize| {
+            0.5 * f32::from(i16::MAX)
+                * (2.0 * std::f32::consts::PI * 1_000.0 * m as f32 / SPEECH_RATE as f32).sin()
+        };
+        // Past the kernel's history and clear of the held tail.
+        let worst = out[120..1_100]
+            .iter()
+            .enumerate()
+            .map(|(i, sample)| (f32::from(*sample) - ideal(120 + i)).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst < 0.05 * f32::from(i16::MAX),
+            "worst deviation {worst} is too far from the tone"
+        );
+    }
+
+    /// A call at 48 kHz stereo is the widest a wired speech stream has been
+    /// seen: the pair is mixed to one channel and then decimated, and the mix
+    /// has to leave the amplitude alone — a call whose two channels carry the
+    /// same voice is not half as loud as a mono one.
+    #[test]
+    fn a_wider_speech_stream_is_mixed_down_and_decimated() {
+        let mut narrow = Narrow::new(48_000);
+        let mut bytes = Vec::new();
+        for frame in 0..3 {
+            let base = frame * 960;
+            let mut samples = Vec::with_capacity(960 * 4);
+            for i in 0..960 {
+                let t = (base + i) as f32 / 48_000.0;
+                let sample =
+                    to_i16(0.5 * (2.0 * std::f32::consts::PI * 1_000.0 * t).sin()).to_le_bytes();
+                samples.extend_from_slice(&sample);
+                samples.extend_from_slice(&sample);
+            }
+            bytes.extend_from_slice(&narrow.push(&samples, 2));
+        }
+        assert_eq!(bytes.len(), 3 * 960 / 3 * 2, "mono, one in three");
+
+        let out: Vec<i16> = bytes
+            .chunks_exact(2)
+            .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
         let peak = out[40..280].iter().map(|s| i32::from(*s).abs()).max();
         let expected = (0.5 * f32::from(i16::MAX)) as i32;
         assert!(

@@ -33,7 +33,7 @@ use super::auth;
 use crate::channels::{self, ChannelEntry};
 use crate::link::Location;
 use crate::machine::Machine;
-use crate::media::{Media, Navi};
+use crate::media::{Media, Navi, Voice};
 use crate::now_playing::{NowPlaying, Track};
 use crate::ports::Ports;
 use crate::press::{Command, TouchContact, PHONE_DROP, PHONE_HOOK_SWITCH, PHONE_MUTE};
@@ -95,6 +95,23 @@ const MEDIA_DATA: u32 = 0x0003_0006;
 const NAVI_TTS_INIT: u32 = 0x0004_0001;
 const NAVI_TTS_END: u32 = 0x0004_0002;
 const NAVI_TTS_DATA: u32 = 0x0004_0003;
+
+// The voice channel is the one the car keeps for speech, and the only audio
+// channel that runs both ways: what the assistant says comes down it, and the
+// microphone goes back up it. See the guide's §10.5 and CarLifeVehicleLib's
+// `EPackageHeadType` — the naming there is not consistent, so the numbers below
+// are the authority rather than the names.
+const VR_INIT: u32 = 0x0005_0002;
+const VR_DATA: u32 = 0x0005_0003;
+const VR_STOP: u32 = 0x0005_0004;
+/// The voice module's state again, carried on the voice channel instead of the
+/// command one. The phone's own app sends this one as well as `MODULE_STATUS`.
+const VR_MODULE_STATUS: u32 = 0x0005_0005;
+const VR_MIC_DATA: u32 = 0x0005_8001;
+/// The car starts recording when it is told to and not before: it has no other
+/// way to know that the phone wants its microphone.
+const MIC_RECORD_END: u32 = 0x0001_0023;
+const MIC_RECOG_START: u32 = 0x0001_0024;
 
 const TOUCH_ACTION: u32 = 0x0006_8001;
 const TOUCH_HARD_KEY: u32 = 0x0006_8008;
@@ -215,18 +232,19 @@ where
     // keyframe can be asked for at all. It is the sink's own state, watched
     // rather than copied: the stream opens and closes on the other side of the
     // bridge.
-    let (mut video, mut media, mut navi, mut playing, phone_screen) =
+    let (mut video, mut media, mut navi, mut voice, mut playing, phone_screen) =
         match ports.outlet.take_video() {
             Some(rx) => (
                 Some(rx),
                 ports.outlet.take_media(),
                 ports.outlet.take_navi(),
+                ports.outlet.take_voice(),
                 ports.outlet.take_playing(),
                 Some(ports.outlet.streaming()),
             ),
             None => {
                 tracing::warn!("carlife.video_source_taken action=heartbeat_only");
-                (None, None, None, None, None)
+                (None, None, None, None, None, None)
             }
         };
 
@@ -264,6 +282,9 @@ where
         navi_format: None,
         navi_open: false,
         nav_deadline: None,
+        voice_format: None,
+        voice_open: false,
+        mic_recording: false,
         track: Track::default(),
         art: None,
         // Nothing is known about where the song is until the phone says, and
@@ -365,6 +386,18 @@ where
                     break Err(e);
                 }
             },
+            // The voice channel: what the assistant says, and what the other end
+            // of a call says. Written as it arrives, like the three above —
+            // there is no idle timeout, because silence in a call is silence.
+            item = recv_voice(&mut voice) => match item {
+                Some(item) => {
+                    if let Err(e) = session.send_voice(item).await {
+                        break Err(e);
+                    }
+                }
+                // The CarPlay side has gone; there is nothing left to say.
+                None => voice = None,
+            },
             // What the phone is playing, on the command channel. Written as it
             // arrives, like the three above: the phone is what decides when the
             // song changes, and what the car is told is the whole of what is
@@ -421,6 +454,9 @@ where
     }
     if let Some(rx) = navi {
         ports.outlet.return_navi(rx);
+    }
+    if let Some(rx) = voice {
+        ports.outlet.return_voice(rx);
     }
     if let Some(rx) = playing {
         ports.outlet.return_playing(rx);
@@ -574,6 +610,14 @@ async fn recv_navi(navi: &mut Option<mpsc::Receiver<Navi>>) -> Option<Navi> {
     }
 }
 
+/// The same, for the voice channel.
+async fn recv_voice(voice: &mut Option<mpsc::Receiver<Voice>>) -> Option<Voice> {
+    match voice {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// Waits for the moment a prompt that has gone quiet is taken as over, or never
 /// when none is waiting — the same trick the three above use to keep a branch
 /// in the loop without a second code path.
@@ -651,6 +695,18 @@ struct Session<'a, W> {
     /// When silence on the navigation channel is taken as the end of the prompt.
     /// `None` while no prompt player is open.
     nav_deadline: Option<Instant>,
+    /// The format the car has been told the voice channel's samples are in. Only
+    /// the downlink's format is announced: the microphone goes back up at a rate
+    /// the car fixed and the phone agreed to separately.
+    voice_format: Option<(u32, u16)>,
+    /// Whether the car currently has a voice player open, which is what
+    /// `MSG_VR_STOP` closes. Unlike a prompt there is no idle timeout: silence
+    /// in a call is silence, not the end of one.
+    voice_open: bool,
+    /// Whether the car has been told to record. It is the last thing said about
+    /// the microphone, and the reason the two messages that say it are sent once
+    /// per change rather than once per block.
+    mic_recording: bool,
     /// What the phone has said about the song that is playing, folded together.
     /// It describes one attribute per update and the car's message is the whole
     /// song, so this is what the two are reconciled through.
@@ -1428,12 +1484,16 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
 
     /// A chunk on any channel but the command channel.
     ///
-    /// The sixth channel is the car's input, and it is the only one of the other
-    /// five that carries anything: the four after it are the media and voice
-    /// channels, which are the car's own. What arrives here is turned into the
-    /// commands the CarPlay side sends, and a key or a touch the CarLife protocol
-    /// has no meaning for is dropped with a line rather than guessed at.
+    /// Two of the other five carry anything: the car's input, and its
+    /// microphone — the only audio that travels in this direction, on the one
+    /// channel that carries speech both ways. The microphone is handed on as it
+    /// arrived; what to do with it is the program's, and it is the program that
+    /// knows what coding the phone asked for.
     async fn other_channel(&mut self, chunk: frame::Chunk) {
+        if chunk.channel == frame::VR {
+            self.car_microphone(chunk).await;
+            return;
+        }
         if chunk.channel != frame::TOUCH {
             self.unknown(&chunk, None, "channel_unread");
             return;
@@ -1493,6 +1553,35 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         if let Err(e) = self.ports.input.press(command).await {
             tracing::warn!("carlife.input_send_failed err={e}");
         }
+    }
+
+    /// One block of the car's microphone, from the channel speech also comes
+    /// down.
+    ///
+    /// Raw 16 kHz mono PCM with no protobuf around it — the guide is explicit
+    /// that the voice channel takes its data unframed, and the car's library
+    /// writes a header and then the samples — so there is nothing to parse and
+    /// nothing to interpret here.
+    async fn car_microphone(&mut self, chunk: frame::Chunk) {
+        let Some(message) = frame::decode(frame::VR, &chunk.body) else {
+            tracing::warn!(
+                "carlife.voice_dropped channel=vr reason=decode_failed bytes={} body={}",
+                chunk.body.len(),
+                hex(&chunk.body)
+            );
+            return;
+        };
+        if message.service_type != VR_MIC_DATA {
+            self.unknown(&chunk, Some(message.service_type), "unhandled");
+            return;
+        }
+        if !self.mic_recording {
+            // The car keeps sending for a moment after it is told to stop. Two
+            // blocks at most, and nothing to say about them.
+            tracing::trace!("carlife.mic_dropped reason=not_recording");
+            return;
+        }
+        self.ports.voice.mic(&message.body);
     }
 
     /// One touch action, as the report the phone wants: one six-byte slot per
@@ -1799,6 +1888,114 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
             names::ServiceType(NAVI_TTS_END)
         );
         self.send(NAVI_TTS_END, &[]).await
+    }
+
+    /// One thing the phone's speech produced, on the voice channel.
+    ///
+    /// The same three messages as the navigation channel and in the same order,
+    /// with two differences: the body is what the phone's speech stream produced
+    /// — a call or the assistant, which the car plays on the one channel it
+    /// keeps for speech that runs both ways — and there is no idle timeout. A
+    /// prompt that stops talking has ended; a call that stops talking has not.
+    async fn send_voice(&mut self, item: Voice) -> Result<()> {
+        match item {
+            Voice::Format { rate, channels } => {
+                // A second format for a player already open in it is the same
+                // player announced twice.
+                if self.voice_format == Some((rate, channels)) {
+                    return Ok(());
+                }
+                // A player open at another format is put down first, for the
+                // reason the prompt channel does the same — and putting it down
+                // stops the recording, so the new one starts it again below.
+                if self.voice_open {
+                    self.close_voice().await?;
+                }
+                self.voice_format = Some((rate, channels));
+                self.open_voice().await
+            }
+            Voice::Pcm {
+                timestamp_ms,
+                data,
+            } => {
+                if !self.voice_open {
+                    self.open_voice().await?;
+                }
+                self.send_frame(VR_DATA, timestamp_ms, &data).await
+            }
+            Voice::Ended => self.close_voice().await,
+        }
+    }
+
+    /// Opens the voice player, and the car's microphone with it.
+    ///
+    /// The phone asks for the two together: a stream that runs both ways is one
+    /// it is listening on, and the first thing it sends about it is the command
+    /// that opens the microphone. So the car is told to record before it is told
+    /// the format — the order the phone's own messages arrive in.
+    async fn open_voice(&mut self) -> Result<()> {
+        self.voice_open = true;
+        self.report_recording(true).await?;
+        let (rate, channels) = self.voice_format.unwrap_or((16_000, 1));
+        tracing::info!(
+            "carlife.msg.send service_type={} sampleRate={rate} \
+             channelConfig={channels} sampleFormat=16",
+            names::ServiceType(VR_INIT)
+        );
+        self.send(VR_INIT, &proto::media_init(rate, channels)).await
+    }
+
+    /// Closes the voice player, and the recording with it.
+    async fn close_voice(&mut self) -> Result<()> {
+        if !self.voice_open {
+            return Ok(());
+        }
+        self.voice_open = false;
+        tracing::debug!(
+            "carlife.msg.send service_type={}",
+            names::ServiceType(VR_STOP)
+        );
+        self.send(VR_STOP, &[]).await?;
+        self.report_recording(false).await
+    }
+
+    /// Starts or stops the car's recording, and says whether the voice channel
+    /// is live.
+    ///
+    /// Two messages, both sent once per change rather than once per block: the
+    /// command that opens and closes the microphone, and the module state the
+    /// car reads to decide what to do with the music underneath. They go
+    /// together because they have one cause — the voice channel is, or is no
+    /// longer, open.
+    async fn report_recording(&mut self, on: bool) -> Result<()> {
+        if self.mic_recording == on {
+            return Ok(());
+        }
+        self.mic_recording = on;
+        let (command, state) = if on {
+            tracing::info!(
+                "carlife.msg.send service_type={} action=record_start",
+                names::ServiceType(MIC_RECOG_START)
+            );
+            (MIC_RECOG_START, proto::VR_RUNNING)
+        } else {
+            tracing::info!(
+                "carlife.msg.send service_type={} action=record_end",
+                names::ServiceType(MIC_RECORD_END)
+            );
+            (MIC_RECORD_END, proto::MODULE_IDLE)
+        };
+        self.send(command, &[]).await?;
+        let body = proto::module_status(proto::VR_MODULE, state);
+        // The car is told on the voice channel as well, and first: the two are
+        // written from different threads on the phone, and on the wire this one
+        // leads.
+        tracing::debug!(
+            "carlife.msg.send service_type={}",
+            names::ServiceType(VR_MODULE_STATUS)
+        );
+        self.send_frame(VR_MODULE_STATUS, 0, &body).await?;
+        self.send(MODULE_STATUS, &body).await
     }
 
     /// One thing the phone said it is playing, folded into what is known and
@@ -2297,6 +2494,42 @@ mod tests {
         }
     }
 
+    /// Where nothing is heard: a car with no microphone, which is what every
+    /// test that is not about one gets.
+    struct NoMic;
+
+    impl crate::link::Voice for NoMic {
+        fn mic(&self, _pcm: &[u8]) {}
+    }
+
+    /// A car with a microphone, and what it heard.
+    struct Mic {
+        heard: Mutex<Vec<u8>>,
+        arrived: Notify,
+    }
+
+    impl Mic {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                heard: Mutex::new(Vec::new()),
+                arrived: Notify::new(),
+            })
+        }
+
+        /// The next block the car's microphone produced.
+        async fn next_block(&self) -> Vec<u8> {
+            self.arrived.notified().await;
+            self.heard.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::link::Voice for Mic {
+        fn mic(&self, pcm: &[u8]) {
+            self.heard.lock().unwrap().extend_from_slice(pcm);
+            self.arrived.notify_one();
+        }
+    }
+
     /// The ports a test runs with: nobody presses anything, the host is
     /// `watched`, and the only picture is the placeholder.
     fn ports<'a>(
@@ -2314,6 +2547,7 @@ mod tests {
             outlet,
             report,
             location,
+            voice: Arc::new(NoMic),
         }
     }
 
@@ -3223,6 +3457,95 @@ mod tests {
             &ports,
         )
         .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    /// A call and the assistant share one channel, and it is the only one that
+    /// runs both ways: the format its stream opens in, the frames themselves,
+    /// the car told to record for as long as the channel is open, and the
+    /// microphone handed back up the same channel.
+    ///
+    /// The order is the phone's own: the recording is asked for before the
+    /// player, because the microphone and the stream are one thing.
+    #[tokio::test]
+    async fn the_voice_channel_carries_speech_down_and_the_microphone_back_up() {
+        let cfg = Machine::default();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+
+        let outlet = Arc::new(Outlet::new());
+        let sink = outlet.sink();
+        let mic = Mic::new();
+
+        let car_mic = mic.clone();
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.introduce("20062100").await;
+
+            // A speech stream opens: the car starts recording, is told the voice
+            // module is the one making the noise — twice, on both channels a car
+            // of this number reads it from — and then gets the format.
+            sink.voice(Voice::Format {
+                rate: 16_000,
+                channels: 1,
+            });
+            car.expect(MIC_RECOG_START).await;
+            let spoken = car.expect(VR_MODULE_STATUS).await;
+            assert_eq!(
+                spoken.body,
+                proto::module_status(proto::VR_MODULE, proto::VR_RUNNING)
+            );
+            let status = car.expect(MODULE_STATUS).await;
+            assert_eq!(
+                status.body,
+                proto::module_status(proto::VR_MODULE, proto::VR_RUNNING)
+            );
+            let init = car.expect(VR_INIT).await;
+            assert_eq!(init.body, proto::media_init(16_000, 1));
+
+            // The samples follow on the player just opened.
+            sink.voice(Voice::Pcm {
+                timestamp_ms: 7_000,
+                data: vec![0xaa, 0xbb],
+            });
+            let said = car.expect(VR_DATA).await;
+            assert_eq!(said.body, vec![0xaa, 0xbb]);
+            assert_eq!(said.timestamp_ms, Some(7_000));
+
+            // What the car hears comes back up the same channel.
+            car.send(VR_MIC_DATA, &[0x01, 0x02, 0x03, 0x04]).await;
+            assert_eq!(car_mic.next_block().await, vec![0x01, 0x02, 0x03, 0x04]);
+
+            // And when the phone is done it closes the stream, which stops the
+            // recording and puts the module back to idle.
+            sink.voice(Voice::Ended);
+            car.expect(VR_STOP).await;
+            car.expect(MIC_RECORD_END).await;
+            let spoken = car.expect(VR_MODULE_STATUS).await;
+            assert_eq!(
+                spoken.body,
+                proto::module_status(proto::VR_MODULE, proto::MODULE_IDLE)
+            );
+            let status = car.expect(MODULE_STATUS).await;
+            assert_eq!(
+                status.body,
+                proto::module_status(proto::VR_MODULE, proto::MODULE_IDLE)
+            );
+        });
+
+        let watched = Watched::default();
+        let ports = Ports {
+            voice: mic.clone(),
+            ..ports(
+                outlet.clone(),
+                &watched,
+                home(),
+                Arc::new(Report::new()),
+                no_location(),
+            )
+        };
+        run(device, &cfg, None, &ports)
+            .await
             .expect("the session ends cleanly");
         car.await.unwrap();
     }

@@ -35,7 +35,7 @@ use crate::link::{Delegate, Link, Panel};
 use crate::wireless::Handover;
 use livi_runtime::vehicle::Vehicle;
 use crate::machine::Machine;
-use crate::sink::{AudioCodec, StreamSink, StreamEvent, StreamId};
+use crate::sink::{self, AudioCodec, StreamSink, StreamEvent, StreamId};
 use crate::report::{Audio, Mic, Rendering, Report};
 
 /// What a coding is called on the page. `AudioCodec`'s own `Debug` is a struct
@@ -1279,10 +1279,11 @@ impl Session {
             }),
             _ => {}
         }
-        // Only the main audio stream ever carries a microphone, and a phone that
-        // has stopped sending us audio is not listening for any either.
-        if stream_type == 100 {
-            self.mic.close().await;
+        // A phone that has stopped sending us a stream is not listening for a
+        // microphone on it either. Which stream that is, the sink decides: it is
+        // whichever one named the port the uplink goes to.
+        if matches!(stream_type, 100 | 101 | 102) {
+            self.mic.close(connection_id).await;
         }
     }
 
@@ -1626,22 +1627,44 @@ impl Session {
                     // that has someone talking at the other end. It is the only
                     // inbound stream that names a port — for every other one it
                     // is we who do.
+                    // An audio stream that has someone talking at the other end
+                    // is the one that can be set up bidirectionally, and the way
+                    // the phone says so is a send port in its own SETUP. It is
+                    // the only inbound stream that names a port — for every
+                    // other one it is we who do. The stream type is not asked:
+                    // a call and an assistant have been seen on more than one.
+                    // Nor is the name alone enough: a wired call has arrived
+                    // labelled `media`, and the port is what gives it away.
                     let mic_port = table
                         .get("dataPort")
                         .and_then(|v| v.as_signed_integer())
                         .unwrap_or(0);
-                    if stream_type == 100
-                        && matches!(audio_type.as_str(), "telephony" | "speechrecognition")
-                        && (1..=65535).contains(&mic_port)
-                    {
-                        self.open_mic(stream_id, mic_port as u16, codec, frames_per_packet, keys)
-                            .await;
+                    let two_way = (1..=65535).contains(&mic_port);
+                    if two_way {
+                        self.open_mic(
+                            stream_type,
+                            stream_id,
+                            mic_port as u16,
+                            codec,
+                            frames_per_packet,
+                            keys,
+                        )
+                        .await;
+                    } else if sink::is_voice(&audio_type, false) {
+                        // The phone opened one of the two streams that are
+                        // two-way without naming the port it would listen on.
+                        // Nothing this end captures reaches it, which is a line
+                        // rather than a silence.
+                        tracing::warn!(
+                            "carplay.mic.uplink_absent stream={stream_id} type={stream_type} \
+                             name={audio_type:?} reason=no_data_port consequence=voice_silent"
+                        );
                     }
                     // Which of the car's channels this stream feeds is decided by
-                    // `audio_type`, downstream; what the car is told its samples
-                    // are is `delivered`, which is the same as the negotiated
-                    // codec until a prompt's Opus is decoded into 16 kHz PCM.
-                    let delivered = audio::delivered(codec, &audio_type);
+                    // `audio_type` and `two_way`, downstream; what the car is told
+                    // its samples are is `delivered`, which narrows speech to what
+                    // the car's channel takes.
+                    let delivered = audio::delivered(codec, &audio_type, two_way);
                     let name = audio_type.clone();
                     self.audio_sink.push(StreamEvent::AudioConfig {
                         stream: StreamId {
@@ -1650,6 +1673,7 @@ impl Session {
                         },
                         codec: delivered,
                         name: audio_type,
+                        two_way,
                     });
                     // The clock counts the samples the phone is sending, so it
                     // is told the rate on the wire — not the one the car is
@@ -1670,7 +1694,9 @@ impl Session {
                     };
                     let task = tokio::spawn(async move {
                         tracing::info!("carplay.audio.stream_attached");
-                        Self::pump_audio(socket, key, stream, &name, codec, sink, clock, id, status)
+                        Self::pump_audio(
+                            socket, key, stream, &name, two_way, codec, sink, clock, id, status,
+                        )
                             .await;
                     });
                     // Bound but never read; a failure here is not worth failing
@@ -1798,6 +1824,7 @@ impl Session {
     /// running, and the worst case is an uplink whose microphone does nothing.
     async fn open_mic(
         &self,
+        stream_type: i64,
         stream_id: i64,
         port: u16,
         codec: AudioCodec,
@@ -1812,8 +1839,21 @@ impl Session {
             }
         };
         let config = MicConfig::from_codec(codec, frames_per_packet);
-        let peer = SocketAddr::new(self.peer.ip(), port);
-        match self.mic.open(peer, 100, key, config).await {
+        // The port is the phone's, the address is the one it connected from —
+        // and the port is changed in place so the rest of that address survives.
+        // A wired session's address is link-local, and an IPv6 link-local address
+        // is only an address together with the interface it is scoped to: rebuilt
+        // from the bare `IpAddr` the scope is zero, and the kernel refuses to
+        // connect to it at all rather than sending a packet to the wrong link.
+        let mut peer = self.peer;
+        peer.set_port(port);
+        // The payload type is the stream type the downlink uses: it is the same
+        // stream, and the phone reads the uplink as the mirror of it.
+        match self
+            .mic
+            .open(stream_id, peer, stream_type as u8, key, config)
+            .await
+        {
             Ok(()) => {
                 self.status.with(|s| {
                     s.carplay.mic = Some(Mic {
@@ -1824,8 +1864,8 @@ impl Session {
                     });
                 });
                 tracing::info!(
-                    "carplay.mic.uplink_open peer={peer} codec={:?} rate_hz={} channels={} \
-                     samples_per_packet={}",
+                    "carplay.mic.uplink_open stream={stream_id} peer={peer} codec={:?} \
+                     rate_hz={} channels={} samples_per_packet={}",
                     config.codec,
                     config.sample_rate,
                     config.channels,
@@ -1923,6 +1963,7 @@ impl Session {
         key: SymKey,
         stream: StreamId,
         name: &str,
+        two_way: bool,
         codec: AudioCodec,
         sink: Arc<dyn StreamSink>,
         clock: Arc<Mutex<AudioClock>>,
@@ -1930,7 +1971,7 @@ impl Session {
         status: Arc<Report>,
     ) {
         let stream_type = stream.stream_type;
-        let mut rx = AudioReceiver::new(key, stream, codec, name, sink.clone());
+        let mut rx = AudioReceiver::new(key, stream, codec, name, two_way, sink.clone());
         let mut buf = [0u8; 2048];
         let mut packets: u64 = 0;
         // Sound that stutters is either packets that never arrived or ones that

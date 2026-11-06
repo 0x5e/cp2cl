@@ -6,10 +6,10 @@
 //!
 //! The phone's audio does not all go to one place: the music is the car's media
 //! channel, a navigation prompt is its TTS channel, and a call and the voice
-//! assistant are channels of the car's own that this bridge has nothing to say
-//! to. Which is which is decided by the name the phone gives the stream in its
-//! SETUP — see `is_media` and `is_navigation` — and what a consumer does with
-//! that is its own business.
+//! assistant are its voice channel — the one that carries audio in both
+//! directions. Which is which is decided by the name the phone gives the stream
+//! in its SETUP — see `is_media`, `is_navigation` and `is_voice` — and what a
+//! consumer does with that is its own business.
 
 /// What the audio pipeline agreed to deliver, which decides how the frames are
 /// framed for whoever decodes them.
@@ -142,11 +142,13 @@ pub enum StreamEvent {
     /// The screen stream opened or closed. Says whether a session is up at all.
     ScreenActive(bool),
     /// An audio stream's format. `name` is the phone's own `audioType` from the
-    /// SETUP, which decides which of the car's channels the stream feeds.
+    /// SETUP and `two_way` says it named a port for a microphone, which together
+    /// decide which of the car's channels the stream feeds.
     AudioConfig {
         stream: StreamId,
         codec: AudioCodec,
         name: String,
+        two_way: bool,
     },
     /// One audio frame. `timestamp_us` is the phone's RTP sample counter turned
     /// into microseconds, which is what playback has to be scheduled against.
@@ -176,9 +178,26 @@ pub trait StreamSink: Send + Sync {
 /// The phone's name for the one audio stream the car's media channel carries.
 const MEDIA_STREAM: &str = "media";
 
+/// The two names the phone gives a stream that has someone talking at the far
+/// end: a call and the voice assistant. Both are bidirectional — the stream's
+/// SETUP carries the port the microphone goes back to.
+const VOICE_STREAMS: [&str; 2] = ["telephony", "speechrecognition"];
+
 /// Whether this stream is the music.
 pub fn is_media(name: &str) -> bool {
     name == MEDIA_STREAM
+}
+
+/// Whether this stream is a call or the voice assistant.
+///
+/// Both are 16 kHz mono speech, and the car takes them on one channel — the
+/// voice one, which is the only channel in the protocol that runs both ways.
+///
+/// `two_way` is the deciding half: a stream that names a port for a microphone
+/// has someone talking at the far end whatever it is labelled, and a call on a
+/// wired session has been seen to arrive under the music's own label.
+pub fn is_voice(name: &str, two_way: bool) -> bool {
+    two_way || VOICE_STREAMS.contains(&name)
 }
 
 /// Whether this stream is a navigation prompt.
@@ -186,13 +205,10 @@ pub fn is_media(name: &str) -> bool {
 /// The phone names the music, a call and the voice assistant, and it labels a
 /// prompt as `default` or `alert` — or, on a wired session, does not label it at
 /// all, which the SETUP turns into `default`. So everything that is neither the
-/// music nor one of the two things the car does itself is a prompt, and writing
-/// it that way is shorter than a list of names that keeps growing.
-///
-/// The two that are left out are a call and Siri. The car has channels of its
-/// own for both, and nothing here is bridged to them.
-pub fn is_navigation(name: &str) -> bool {
-    !is_media(name) && !matches!(name, "telephony" | "speechrecognition")
+/// music nor one of the two voice streams is a prompt, and writing it that way
+/// is shorter than a list of names that keeps growing.
+pub fn is_navigation(name: &str, two_way: bool) -> bool {
+    !is_media(name) && !is_voice(name, two_way)
 }
 
 #[cfg(test)]
@@ -225,15 +241,29 @@ mod tests {
         assert_eq!(AudioCodec::from_format(0x7000_0000).bits(), None);
     }
 
-    /// A call and an assistant are the car's own channels; everything else the
-    /// phone mixes onto its audio streams is either the music or a prompt.
+    /// A call and an assistant are the voice channel; everything else the phone
+    /// mixes onto its audio streams is either the music or a prompt.
+    ///
+    /// And a stream that named a send port is a call whatever it is called: the
+    /// car's voice channel is the only one with a microphone at the other end of
+    /// it, so that alone decides.
     #[test]
     fn the_phones_stream_names_are_read_as_the_cars_channels() {
         assert!(is_media("media"));
-        assert!(!is_navigation("media"));
-        assert!(is_navigation("default"));
-        assert!(is_navigation("alert"));
-        assert!(!is_navigation("telephony"));
-        assert!(!is_navigation("speechrecognition"));
+        assert!(!is_navigation("media", false));
+        assert!(is_navigation("default", false));
+        assert!(is_navigation("alert", false));
+        assert!(!is_navigation("telephony", false));
+        assert!(!is_navigation("speechrecognition", false));
+        assert!(is_voice("telephony", false));
+        assert!(is_voice("speechrecognition", false));
+        assert!(!is_voice("media", false));
+        assert!(!is_voice("default", false));
+
+        // A call the phone labelled with the music's own name, and asked for a
+        // microphone on.
+        assert!(is_voice("media", true));
+        assert!(!is_navigation("media", true));
+        assert!(is_voice("default", true));
     }
 }

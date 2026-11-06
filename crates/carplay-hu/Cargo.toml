@@ -26,8 +26,11 @@ idevice = "0.1"
 
 tokio = { version = "1", features = ["full"] }
 
-# The phone's music arrives as AAC-LC and a prompt as Opus; the car's media and
-# TTS channels take PCM, so both are decoded on the way past.
+# The phone's music arrives as AAC-LC and its speech as Opus; the car's media
+# and TTS channels take PCM, so both are decoded on the way past. The microphone
+# goes back up the other way as Opus, which the same crate encodes: one codec
+# for both directions, and pure Rust, so a cross-compiled static binary needs no
+# C toolchain for it.
 symphonia = { version = "0.5", default-features = false, features = ["aac"] }
 rusty-opus = "1"
 

@@ -45,3 +45,20 @@ pub trait Delegate: Send + Sync {
 pub trait Location: Send + Sync {
     fn fix(&self, nmea: &str);
 }
+
+/// The car's microphone, on its way to the phone.
+///
+/// One direction only, and synchronous: the samples arrive on the session's own
+/// reader, which must not be held up by an encoder or by a socket. What the
+/// phone asked for — a coding, a rate, a packet size — is not this side's to
+/// know; it was told at the stream's SETUP.
+///
+/// Whether the phone is listening is not asked here. The car records whenever
+/// the voice channel is open, which is what the phone whose messages it copies
+/// does: the microphone is the other half of that channel, not a separate
+/// question.
+pub trait Voice: Send + Sync {
+    /// One block of the car's microphone, 16 kHz mono signed 16-bit
+    /// little-endian, exactly as the VR channel carried it.
+    fn mic(&self, pcm: &[u8]);
+}
