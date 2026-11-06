@@ -35,12 +35,13 @@ CP2CL_INSTALL_STAGING = NO
 # The credentials the program reads at runtime, out of the directory it also
 # writes its own state to. They are not in dist/ — that is the binaries and the
 # images — and not in the binary either, so they come straight from the checkout,
-# by the names the program asks for them: one of the three is the CarLife app's
-# key, the other two are the MFi pair, and the public half beside them stays
-# behind because only the test that checks the pair reads it.
+# by the names the program asks for them: the MFi pair. The CarLife key is not
+# one of them any more — the binary carries it, put there at build time from
+# `CARLIFE_PRIVATE_KEY` — and its public half is a test fixture, written into the
+# test itself rather than read from here.
 CP2CL_CREDENTIALS = $(BR2_EXTERNAL_CP2CL_PATH)/../authentication
 CP2CL_CREDENTIAL_FILES = \
-	$(addprefix $(CP2CL_CREDENTIALS)/,identity.pk8 certificate.p7b carlife_md_rsa_private.pem)
+	$(addprefix $(CP2CL_CREDENTIALS)/,identity.pk8 certificate.p7b)
 
 define CP2CL_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/$(CP2CL_APP) $(TARGET_DIR)/usr/bin/cp2cl

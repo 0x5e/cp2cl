@@ -350,6 +350,9 @@ async fn main() -> Result<()> {
     };
 
     tracing::info!("main.bridge.carlife_up carplay_side=waiting");
+    // Read once, here rather than in the task below: there is one key, and every
+    // session the car gets is answered with it.
+    let carlife_auth = carlife_signer();
     // In the background, because the two sides are each other's condition: this
     // task is what opens the gate, and the watcher below is the only thing that
     // acts on it. Waiting for it to return here would leave nobody to answer the
@@ -376,7 +379,7 @@ async fn main() -> Result<()> {
             report: reported,
             location: car.clone(),
         };
-        let outcome = carlife_md::Md::new(&settings, &ports, replug_requested)
+        let outcome = carlife_md::Md::new(&settings, &ports, replug_requested, carlife_auth)
             .serve()
             .await;
         if let Err(e) = outcome {
@@ -437,4 +440,79 @@ fn mfi_signer() -> Result<Box<dyn AuthCoprocessor + Send>> {
         cert.len()
     );
     Ok(Box::new(signer))
+}
+
+/// The CarLife key the car's challenge is answered with.
+///
+/// Not a credential of ours: it is the CarLife app's own private key, extracted
+/// from `com.baidu.carlife`, and the car accepts answers made with it because
+/// Baidu made the matching public half. The build hands it over in
+/// `CARLIFE_PRIVATE_KEY` — a PEM block, or the bare Base64 the app's own constant
+/// is — and what the program keeps is the parsed key rather than the text.
+///
+/// `None` is a build that was given none, which leaves the car unauthenticated
+/// rather than failed: the challenge is skipped, the head unit asks again in half
+/// a minute, and the streams run either way. Said once, here.
+fn carlife_signer() -> Option<carlife_md::Signer> {
+    let Some(pem) = option_env!("CARLIFE_PRIVATE_KEY")
+        .map(str::trim)
+        .filter(|pem| !pem.is_empty())
+    else {
+        tracing::warn!(
+            "carlife.auth.key_absent env=CARLIFE_PRIVATE_KEY consequence=carlife_auth_skipped"
+        );
+        return None;
+    };
+    carlife_md::Signer::from_pem(pem)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine as _;
+    use rsa::pkcs1v15::Pkcs1v15Sign;
+    use rsa::pkcs8::DecodePublicKey;
+
+    /// The public half of the CarLife key, as the extraction report printed it.
+    ///
+    /// Not a secret: the car holds the same one, and it is what an answer is
+    /// checked with. Kept here rather than read from `authentication/`, so the
+    /// pair is verified in a checkout that carries no extracted files — the
+    /// private half comes from the build, the public half from this constant.
+    const CARLIFE_PUBLIC_PEM: &str = "\
+-----BEGIN PUBLIC KEY-----
+MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC86AUdyKOcMUB/iDMtHpFBOdLP
+WThDziP8t20sF0mRKlNBIAxlUZxQWIa/DEhJL9kx05+RyrFDN4B3d66UIURtia3G
+hWPoiBCbNornl73ynfFKk1BUDma3O8Qs9Z6YOCkXrGOFQBDfltfXs/w7CogkuS2s
+ZsBPOOMVom04I7KWPQIDAQAB
+-----END PUBLIC KEY-----
+";
+
+    /// The two halves the car will be answered with and checks with, when this
+    /// build has one: the key it was given, and the public half the extraction
+    /// report printed, including whether the two are really one pair.
+    ///
+    /// A build without the key asserts nothing, because running without one is a
+    /// supported way to run.
+    #[test]
+    fn the_key_the_build_was_given_is_one_the_car_accepts() {
+        let Some(signer) = carlife_signer() else {
+            return;
+        };
+
+        // The challenge the extraction report verified its own round trip with.
+        let challenge = "1234567890_1.0.0";
+        let answer = signer.answer(challenge).expect("the challenge is answered");
+        let sealed = BASE64.decode(answer).expect("the answer is Base64");
+
+        let key = rsa::RsaPublicKey::from_public_key_pem(CARLIFE_PUBLIC_PEM)
+            .expect("a public key this reads");
+        key.verify(
+            Pkcs1v15Sign::new_unprefixed(),
+            challenge.as_bytes(),
+            &sealed,
+        )
+        .expect("the half the car holds accepts the answer");
+    }
 }

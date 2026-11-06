@@ -20,6 +20,6 @@ mod names;
 mod ports;
 mod proto;
 
-pub use carlife::Md;
+pub use carlife::{Md, Signer};
 pub use ports::Ports;
 pub use proto::{CarGps, MAX_ARTWORK};

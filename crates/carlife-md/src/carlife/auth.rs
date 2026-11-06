@@ -11,10 +11,10 @@
 //! to talk to it; a car sends a string and takes it back only if it has been
 //! through that private key. Answering is therefore a matter of holding the key,
 //! which is the app's own, extracted from the APK, because Baidu does not hand
-//! that half out. It is a file the firmware installs in `crate::config::DATA_DIR`
-//! and `Signer` puts the challenge through it. A machine that has none skips the
-//! challenge instead: the head unit is left unauthenticated, asks again every half
-//! minute, and the streams run either way.
+//! that half out. It reaches this crate already parsed: the program reads the
+//! key and hands over a `Signer`, which puts the challenge through it. A program
+//! built without one skips the challenge instead: the head unit is left
+//! unauthenticated, asks again every half minute, and the streams run either way.
 //!
 //! The phone's half has no secret in it: the car sends its channel number along
 //! with its statistics, an app accepts it when it looks like one of the numbers
@@ -30,17 +30,6 @@ use rsa::pkcs1v15::Pkcs1v15Sign;
 use rsa::pkcs8::DecodePrivateKey;
 use rsa::traits::PublicKeyParts;
 use rsa::RsaPrivateKey;
-
-use crate::machine::Machine;
-
-/// The credential the phone's CarLife key is read from.
-///
-/// Not a credential of ours: it is the CarLife app's own private key, extracted
-/// from the app, and the car accepts answers made with it because Baidu made the
-/// matching public half. Like the MFi pair, the name is fixed rather than
-/// configured: what it is called is not the operator's business, and it is a name
-/// inside the data directory rather than a path.
-pub(crate) const KEY_FILE: &str = "carlife_md_rsa_private.pem";
 
 /// The CarLife version this device answers challenges as.
 ///
@@ -62,33 +51,17 @@ pub struct Signer {
 }
 
 impl Signer {
-    /// The key the data directory was given, when it was given one.
+    /// Reads the key out of `pem`, the text the program holds.
     ///
-    /// The firmware installs it there beside the identity the program writes, so
-    /// a board without one is a board whose build had no key to install. `None`
-    /// is said out loud and leaves the CarLife side unable to answer a challenge:
-    /// a supported way to run, so the line is a warning and the session goes on.
-    pub fn load(settings: &Machine) -> Option<Self> {
-        let path = settings.data_file(KEY_FILE);
-        match std::fs::read_to_string(&path) {
-            Ok(pem) => Self::from_pem(&pem),
-            Err(e) => {
-                tracing::warn!(
-                    "carlife.auth.key_missing file={} err={e:#} consequence=carlife_auth_skipped",
-                    path.display()
-                );
-                None
-            }
-        }
-    }
-
-    /// Reads the key out of `pem`, the text of `KEY_FILE` as it was installed.
+    /// A PEM block, as the extracted file holds it, or the bare Base64 of the
+    /// DER, which is the shape the app's own constant has and the one the build
+    /// is handed when it is pasted in rather than read from a file.
     ///
     /// `None` is a key this cannot read, which is said out loud and leaves the
     /// CarLife side unable to answer a challenge.
     pub fn from_pem(pem: &str) -> Option<Self> {
-        let Some(der) = pem_body(pem) else {
-            tracing::warn!("carlife.auth.key_unreadable reason=no_pem");
+        let Some(der) = pem_body(pem).or_else(|| BASE64.decode(pem.trim()).ok()) else {
+            tracing::warn!("carlife.auth.key_unreadable reason=no_pem_or_base64");
             return None;
         };
         // Either shape of private key file will do: the PKCS#8 one a key
@@ -236,7 +209,6 @@ mod tests {
     use rsa::pkcs1::EncodeRsaPrivateKey;
     use rsa::pkcs8::EncodePrivateKey;
     use rsa::BigUint;
-    use rsa::RsaPublicKey;
 
     /// A key for the tests to work with, made here rather than dropped into the
     /// repository: what they test is the road a challenge travels, not any
@@ -337,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn a_key_file_is_read_in_either_of_the_two_shapes_it_comes_in() {
+    fn a_key_is_read_in_the_shapes_it_comes_in() {
         let key = a_key();
         let pkcs8 = key.to_pkcs8_der().expect("pkcs8").as_bytes().to_vec();
         let pkcs1 = key.to_pkcs1_der().expect("pkcs1").as_bytes().to_vec();
@@ -348,46 +320,17 @@ mod tests {
                 BASE64.encode(der)
             )
         };
-        assert_eq!(pem_body(&pem(&pkcs8, "PRIVATE KEY")), Some(pkcs8));
+        assert_eq!(pem_body(&pem(&pkcs8, "PRIVATE KEY")), Some(pkcs8.clone()));
         assert_eq!(pem_body(&pem(&pkcs1, "RSA PRIVATE KEY")), Some(pkcs1));
+
+        // The shape the build is handed when the key is pasted in rather than
+        // read from a file: the DER, Base64, with no envelope around it.
+        let bare = BASE64.encode(&pkcs8);
+        assert_eq!(pem_body(&bare), None);
+        assert!(Signer::from_pem(&bare).is_some(), "bare Base64 is a key too");
 
         // Anything that is not a PEM block is not one, rather than a panic.
         assert_eq!(pem_body("no key here"), None);
         assert_eq!(pem_body("-----BEGIN PRIVATE KEY-----\nnot base64!\n-----END"), None);
-    }
-
-    /// The two halves the car will be answered with and checks with, when this
-    /// machine has them: this is where the protocol leaves the fixtures behind and
-    /// meets the material under `authentication/`, including whether the file
-    /// extracted from the app and the public half the report printed are really
-    /// one pair.
-    ///
-    /// A machine without them asserts nothing, because running without a key is a
-    /// supported way to run.
-    #[test]
-    fn the_key_dropped_in_for_a_car_is_one_the_car_accepts() {
-        use rsa::pkcs8::DecodePublicKey;
-
-        let dir = std::path::Path::new("authentication");
-        let private = dir.join("carlife_md_rsa_private.pem");
-        let public = dir.join("carlife_md_rsa_public.pem");
-        if !private.is_file() || !public.is_file() {
-            return;
-        }
-
-        let pem = std::fs::read_to_string(&private).expect("the key is readable");
-        let signer = Signer::from_pem(&pem).expect("a key this can read");
-        // The challenge the extraction report verified its own round trip with.
-        let challenge = "1234567890_1.0.0";
-        let answer = signer.answer(challenge).expect("the challenge is answered");
-        let sealed = BASE64.decode(answer).expect("the answer is Base64");
-
-        let key = RsaPublicKey::read_public_key_pem_file(&public).expect("a public key this reads");
-        key.verify(
-            Pkcs1v15Sign::new_unprefixed(),
-            challenge.as_bytes(),
-            &sealed,
-        )
-        .expect("the half the car holds accepts the answer");
     }
 }

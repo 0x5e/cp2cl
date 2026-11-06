@@ -7,9 +7,10 @@ Cargo.lock.orig
 guide/shots/
 guide/.tmp/
 
-# Credentials — private keys, never commit these. The cp2cl package installs them
-# into the firmware's /etc/cp2cl/ and the program reads them there, so a clone
-# without them builds and runs, just without authentication.
+# Credentials — private keys, never commit these. The cp2cl package installs the
+# MFi pair into the firmware's /etc/cp2cl/ and the program reads them there; the
+# CarLife key is put into the binary at build time from `CARLIFE_PRIVATE_KEY`.
+# A clone without any of them builds and runs, just without authentication.
 authentication/
 *.pk8
 *.p7b

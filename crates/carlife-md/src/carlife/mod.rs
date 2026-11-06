@@ -22,4 +22,5 @@ mod aio;
 pub(crate) mod gadget;
 pub(crate) mod usb;
 
+pub use auth::Signer;
 pub use gadget::Md;

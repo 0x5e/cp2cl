@@ -72,6 +72,14 @@ pub struct Md<'a> {
     settings: &'a Machine,
     ports: &'a Ports<'a>,
     replug: mpsc::Receiver<()>,
+    /// The key the car's challenge is answered with, parsed by the program.
+    ///
+    /// Once rather than per session: it is one key, and a car plugged out and
+    /// back in finds what the session before it had. `None` is a program built
+    /// without one, which leaves the car unauthenticated rather than failed —
+    /// the challenge is skipped, the head unit asks again in half a minute, and
+    /// the streams run either way.
+    auth: Option<auth::Signer>,
 }
 
 impl<'a> Md<'a> {
@@ -79,11 +87,13 @@ impl<'a> Md<'a> {
         settings: &'a Machine,
         ports: &'a Ports<'a>,
         replug: mpsc::Receiver<()>,
+        auth: Option<auth::Signer>,
     ) -> Self {
         Self {
             settings,
             ports,
             replug,
+            auth,
         }
     }
 
@@ -98,6 +108,7 @@ impl<'a> Md<'a> {
             settings,
             ports,
             mut replug,
+            auth,
         } = self;
         let identity = desc::Identity::phone(&settings.name, &settings.vendor);
     let (usb, endpoints) = Usb::open(&identity)?;
@@ -116,18 +127,6 @@ impl<'a> Md<'a> {
     describe_identity(&ports.report, &identity);
 
     tracing::info!("usb.waiting_for_host");
-
-    // The key the car's challenge is answered with, read out of the data
-    // directory the firmware installs it in. Once rather than per session: it is
-    // one key, and a car plugged out and back in finds what the session before it
-    // had.
-    //
-    // Without it the car is left unauthenticated rather than failed: the
-    // challenge is skipped, the head unit asks again in half a minute and is
-    // skipped again, and the streams run either way. The key is Baidu's and not
-    // every build is going to install it, so this is said once here and never
-    // again.
-    let auth = auth::Signer::load(settings);
 
     let (events_tx, mut events_rx) = mpsc::channel(4);
     // Kept back from the task below, which owns the device: what the controller

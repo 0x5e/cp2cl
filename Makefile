@@ -38,8 +38,13 @@ TARGET    := armv7-unknown-linux-musleabihf
 CMAKE_TF  := /opt/armv7-toolchain.cmake
 endif
 
+# The CarLife key is handed to the compiler rather than to the program: it is
+# written into the binary at build time, out of the environment, so what is set
+# in the calling shell is what the build carries. Unset, the build produces a
+# binary without one, which is a supported way to run — the car is left
+# unauthenticated and the streams run either way.
 RUN    := docker run --rm -u "$$(id -u):$$(id -g)" \
-            -e CMAKE_TOOLCHAIN_FILE=$(CMAKE_TF) \
+            -e CMAKE_TOOLCHAIN_FILE=$(CMAKE_TF) -e CARLIFE_PRIVATE_KEY \
             -v "$(CURDIR)":/work -v cp2cl-cargo:/cargo $(IMAGE)
 
 # Buildroot is not in this repository; it is a container the image is built in,
