@@ -160,11 +160,24 @@ BR_FINGERPRINT := { echo $(BR_VERSION); cat /build/.config; \
 BR_MODULES := /build/build/uwe5622-*
 
 BR_EMPTY := rm -rf /build/target $(BR_MODULES) && rm -f /build/build/*/.stamp_target_installed
+
+# Emptying the target directory reinstalls every package out of its build
+# directory, and a build directory carries the options it was configured with.
+# A package whose options changed in `.config` therefore has to be configured
+# and built again as well, or it puts back the binary it was built to have: an
+# image was flashed with `BR2_PACKAGE_BLUEZ5_UTILS_MONITOR` set, bluetoothctl in
+# it, and no btmon, because bluez5_utils had been configured without the monitor
+# two weeks earlier. Buildroot has no way to say which packages the change was
+# about, so this is a list — add a package to it when a change of its options
+# has to reach the card.
+BR_RECONF := rm -f /build/build/bluez5_utils-*/.stamp_configured \
+	/build/build/bluez5_utils-*/.stamp_built
+
 ifeq ($(FRESH),1)
-BR_FRESH := $(BR_EMPTY)
+BR_FRESH := $(BR_EMPTY) && $(BR_RECONF)
 else
 BR_FRESH := $(BR_FINGERPRINT) && { cmp -s /build/.target-fingerprint.now /build/.target-fingerprint \
-	|| { $(BR_EMPTY) && mv /build/.target-fingerprint.now /build/.target-fingerprint; }; }
+	|| { $(BR_EMPTY) && $(BR_RECONF) && mv /build/.target-fingerprint.now /build/.target-fingerprint; }; }
 endif
 
 # The one package whose source changes on every build. A `local` site is rsynced
