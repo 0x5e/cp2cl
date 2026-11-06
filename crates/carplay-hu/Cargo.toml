@@ -30,6 +30,10 @@ tokio = { version = "1", features = ["full"] }
 # TTS channels take PCM, so both are decoded on the way past.
 symphonia = { version = "0.5", default-features = false, features = ["aac"] }
 rusty-opus = "1"
+# And the microphone goes back up as Opus, which is the one thing on this side
+# that has to be encoded. Pure Rust, so a cross-compiled static binary needs no
+# C toolchain for it.
+opus-pure = "0.2"
 
 # AirPlay's control and media are sealed with ChaCha20-Poly1305 over keys from
 # an X25519 + Ed25519 handshake.

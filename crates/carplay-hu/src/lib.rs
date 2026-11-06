@@ -41,7 +41,7 @@ use tokio::sync::{broadcast, watch, Mutex};
 use crate::admission::Admission;
 use crate::airplay::clock::SyncedClock;
 use crate::airplay::pairing::Pairings;
-use crate::airplay::{AudioClock, MicSink};
+use crate::airplay::AudioClock;
 use crate::link::{Delegate, Panel};
 use crate::machine::Machine;
 use crate::report::Report;
@@ -52,6 +52,7 @@ use crate::sink::{AudioCodec, StreamSink};
 // the page repeats.
 pub use crate::airplay::Hu;
 pub use crate::airplay::event::Events;
+pub use crate::airplay::MicSink;
 pub use crate::airplay::screen::CODEC;
 pub use crate::airplay::Geometry;
 pub use crate::wireless::unpair_all;

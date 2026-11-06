@@ -1,16 +1,17 @@
 //! The queues towards the car, and their sending halves.
 //!
-//! Four queues: pictures, music, a navigation prompt, and what the phone is
-//! playing. A session takes its receiving halves and gives them back when it
-//! ends, so a car unplugged and plugged back in finds them where it left them.
-//! Between sessions nothing drains them, and the senders drop rather than wait.
+//! Five queues: pictures, music, a navigation prompt, the voice channel, and
+//! what the phone is playing. A session takes its receiving halves and gives
+//! them back when it ends, so a car unplugged and plugged back in finds them
+//! where it left them. Between sessions nothing drains them, and the senders
+//! drop rather than wait.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::{mpsc, watch};
 
-use crate::media::{Media, Navi};
+use crate::media::{Media, Navi, Voice};
 use crate::now_playing::NowPlaying;
 
 /// How many items may wait for the car. Bounded and dropped past, so a session
@@ -24,6 +25,8 @@ pub struct Outlet {
     media_rx: Mutex<Option<mpsc::Receiver<Media>>>,
     navi_tx: mpsc::Sender<Navi>,
     navi_rx: Mutex<Option<mpsc::Receiver<Navi>>>,
+    voice_tx: mpsc::Sender<Voice>,
+    voice_rx: Mutex<Option<mpsc::Receiver<Voice>>>,
     playing_tx: mpsc::Sender<NowPlaying>,
     playing_rx: Mutex<Option<mpsc::Receiver<NowPlaying>>>,
     /// Whether the phone's screen stream is open, which decides what the car is
@@ -37,6 +40,7 @@ impl Outlet {
         let (video_tx, video_rx) = mpsc::channel(BACKLOG);
         let (media_tx, media_rx) = mpsc::channel(BACKLOG);
         let (navi_tx, navi_rx) = mpsc::channel(BACKLOG);
+        let (voice_tx, voice_rx) = mpsc::channel(BACKLOG);
         let (playing_tx, playing_rx) = mpsc::channel(BACKLOG);
         let (stream_tx, stream_rx) = watch::channel(false);
         Self {
@@ -46,6 +50,8 @@ impl Outlet {
             media_rx: Mutex::new(Some(media_rx)),
             navi_tx,
             navi_rx: Mutex::new(Some(navi_rx)),
+            voice_tx,
+            voice_rx: Mutex::new(Some(voice_rx)),
             playing_tx,
             playing_rx: Mutex::new(Some(playing_rx)),
             stream_tx,
@@ -59,6 +65,7 @@ impl Outlet {
             video: self.video_tx.clone(),
             media: self.media_tx.clone(),
             navi: self.navi_tx.clone(),
+            voice: self.voice_tx.clone(),
             playing: self.playing_tx.clone(),
             stream: self.stream_tx.clone(),
             no_video_reader: AtomicBool::new(false),
@@ -67,6 +74,8 @@ impl Outlet {
             media_behind: AtomicBool::new(false),
             no_navi_reader: AtomicBool::new(false),
             navi_behind: AtomicBool::new(false),
+            no_voice_reader: AtomicBool::new(false),
+            voice_behind: AtomicBool::new(false),
             playing_dropped: AtomicBool::new(false),
         })
     }
@@ -107,6 +116,16 @@ impl Outlet {
         }
     }
 
+    pub fn take_voice(&self) -> Option<mpsc::Receiver<Voice>> {
+        Some(emptied(self.voice_rx.lock().ok()?.take()?))
+    }
+
+    pub fn return_voice(&self, rx: mpsc::Receiver<Voice>) {
+        if let Ok(mut guard) = self.voice_rx.lock() {
+            *guard = Some(rx);
+        }
+    }
+
     pub fn take_playing(&self) -> Option<mpsc::Receiver<NowPlaying>> {
         Some(emptied(self.playing_rx.lock().ok()?.take()?))
     }
@@ -134,6 +153,7 @@ pub struct Sink {
     video: mpsc::Sender<Vec<u8>>,
     media: mpsc::Sender<Media>,
     navi: mpsc::Sender<Navi>,
+    voice: mpsc::Sender<Voice>,
     playing: mpsc::Sender<NowPlaying>,
     stream: watch::Sender<bool>,
     /// Each of these is said once. A stream that keeps arriving with nowhere to
@@ -144,6 +164,8 @@ pub struct Sink {
     media_behind: AtomicBool,
     no_navi_reader: AtomicBool,
     navi_behind: AtomicBool,
+    no_voice_reader: AtomicBool,
+    voice_behind: AtomicBool,
     playing_dropped: AtomicBool,
 }
 
@@ -198,6 +220,16 @@ impl Sink {
             "navi",
             &self.no_navi_reader,
             &self.navi_behind,
+        );
+    }
+
+    pub fn voice(&self, item: Voice) {
+        Self::send(
+            &self.voice,
+            item,
+            "voice",
+            &self.no_voice_reader,
+            &self.voice_behind,
         );
     }
 

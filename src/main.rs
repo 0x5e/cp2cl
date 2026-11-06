@@ -359,6 +359,10 @@ async fn main() -> Result<()> {
     // gate it opens.
     let car = hooks.clone();
     let alone = gateway.clone();
+    // The car's microphone is the one thing that travels the other way, and the
+    // CarPlay half owns what to do with it: what coding the phone asked for was
+    // decided at the stream's SETUP, which is on that side of the bridge.
+    let microphone = Arc::new(Microphone(phone.mic.clone()));
     // The car's own input goes the way everything else does, so the session gets
     // the same sink the CarPlay side fills in.
     let reported = status.carlife().clone();
@@ -378,6 +382,7 @@ async fn main() -> Result<()> {
             outlet,
             report: reported,
             location: car.clone(),
+            voice: microphone,
         };
         let outcome = carlife_md::Md::new(&settings, &ports, replug_requested, carlife_auth)
             .serve()
@@ -397,6 +402,19 @@ async fn main() -> Result<()> {
     // — until one of them has one.
     phone.run().await;
     Ok(())
+}
+
+/// The car's microphone, as the CarLife half asks for it.
+///
+/// Nothing is converted here: the CarPlay half knows what the phone asked for
+/// and owns the socket it goes out on, and this is the one object both halves
+/// name it by.
+struct Microphone(Arc<carplay_hu::MicSink>);
+
+impl carlife_md::link::Voice for Microphone {
+    fn mic(&self, pcm: &[u8]) {
+        self.0.send_pcm(pcm);
+    }
 }
 
 /// The two halves of the MFi identity, by the names the firmware installs them
