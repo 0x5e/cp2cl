@@ -24,7 +24,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use opus_pure::{Application, OpusEncoder, MAX_PACKET_BYTES};
+use rusty_opus::{Application, OpusEncoder};
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
@@ -55,6 +55,11 @@ const WIRED_SPEECH_RATE: u32 = 24_000;
 /// The duration of one Opus packet. Fixed rather than taken from the phone:
 /// `framesPerPacket` counts codec frames, and one frame of speech is 20 ms.
 const OPUS_FRAME_MS: u32 = 20;
+
+/// The most one Opus frame may be: 1275 bytes of payload, plus the table of
+/// contents the encoder puts in front of it (RFC 6716 §3.2.1). One frame is one
+/// packet here, so this is the whole of what the encoder can write.
+const MAX_OPUS_PACKET: usize = 1_276;
 
 /// Which family the captured audio is in. The phone decides by transport rather
 /// than by preference — PCM over the cable, Opus over Wi-Fi — and the capture
@@ -299,7 +304,7 @@ impl Coder {
             pending: Vec::with_capacity(config.samples_per_packet as usize),
             rate,
             resampler: Upsampler::default(),
-            packet: vec![0u8; MAX_PACKET_BYTES],
+            packet: vec![0u8; MAX_OPUS_PACKET],
         })
     }
 
@@ -320,13 +325,21 @@ impl Coder {
         while self.pending.len() >= want {
             let frame: Vec<i16> = self.pending.drain(..want).collect();
             match self.encoder.as_mut() {
-                Some(encoder) => match encoder.encode_s16(&frame, want, &mut self.packet) {
-                    Ok(n) => out.push(self.packet[..n].to_vec()),
-                    Err(e) => {
-                        tracing::warn!("carplay.mic.encode_failed err={e}");
-                        return out;
+                Some(encoder) => {
+                    // The encoder takes its input on the -1..1 scale the
+                    // decoder gives back, so whole-scale stays whole-scale.
+                    let input: Vec<f32> = frame
+                        .iter()
+                        .map(|sample| f32::from(*sample) / f32::from(i16::MAX))
+                        .collect();
+                    match encoder.encode(&input, want, &mut self.packet) {
+                        Ok(n) => out.push(self.packet[..n].to_vec()),
+                        Err(e) => {
+                            tracing::warn!("carplay.mic.encode_failed err={e}");
+                            return out;
+                        }
                     }
-                },
+                }
                 // Big-endian: the phone's PCM is in the same order as the
                 // downlink's, which is also what a wired session arrives in.
                 None => {
@@ -763,5 +776,50 @@ mod tests {
         assert_eq!(first[0].len(), 480 * 2);
         let second = coder.packets(&block, &config);
         assert_eq!(second.len(), 2, "the 288 held over, and one more");
+    }
+
+    /// The uplink is coded by the same crate that decodes the downlink, so a
+    /// packet it produces has to be one that crate reads back: two packets of a
+    /// half-scale tone, 960 samples each, and audible rather than silent.
+    ///
+    /// This is the whole of what the swap of encoder buys — the encoder and the
+    /// decoder are one implementation, and this says they agree.
+    #[test]
+    fn an_opus_packet_is_one_the_decoder_reads_back() {
+        let config = MicConfig::from_codec(
+            AudioCodec::Opus {
+                rate: 48_000,
+                channels: 1,
+            },
+            0,
+        );
+        assert_eq!(config.samples_per_packet, 960);
+        let mut coder = Coder::new(&config).expect("Opus is mono at 48 kHz");
+
+        // 640 samples of 16 kHz is 1 920 of 48 kHz: exactly two packets.
+        let mut block = Vec::with_capacity(1_280);
+        for i in 0..640 {
+            let t = i as f32 / MIC_RATE as f32;
+            let tone = 0.5 * f32::from(i16::MAX) * (2.0 * std::f32::consts::PI * 1_000.0 * t).sin();
+            block.extend_from_slice(&saturate(tone).to_le_bytes());
+        }
+        let packets = coder.packets(&block, &config);
+        assert_eq!(packets.len(), 2);
+
+        let mut decoder =
+            rusty_opus::OpusDecoder::new(OPUS_RATE as i32, 1).expect("the decoder the downlink uses");
+        let mut samples = vec![0.0f32; 5_760];
+        let mut peak = 0.0f32;
+        for packet in &packets {
+            assert!(packet.len() <= MAX_OPUS_PACKET);
+            let written = decoder
+                .decode(packet, 5_760, &mut samples)
+                .expect("a packet this crate wrote");
+            assert_eq!(written, 960);
+            peak = samples[..written]
+                .iter()
+                .fold(peak, |loudest, sample| loudest.max(sample.abs()));
+        }
+        assert!(peak > 0.3, "the tone came back at {peak}");
     }
 }
