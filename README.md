@@ -100,6 +100,7 @@ MFi证书（`certificate.p7b`）、密钥（`identity.pk8`）文件可以在构�
 CarLife车机 - macOS版：[CarLifePort](https://github.com/0x5e/CarLifePort)
 
 ## 已知问题
+- 初次无线CarPlay配对可能会超时（约15秒），等超时后第二次才能成功配上，暂未找到原因。
 - 方向盘右侧方向键无法完整支持。无论按上下还是左右，MBUX NTG6.0车机都只会发送`KEYCODE_SELECTOR_NEXT`/`KEYCODE_SELECTOR_PREVIOUS`，无法辨别，只能按照滚轮“前/后”进行映射。
 
 ## 来源与许可
