@@ -352,6 +352,10 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
             let asked_to_stop = *stopping.borrow_and_update();
             let plugged = !present.borrow_and_update().is_empty();
             if asked_to_stop {
+                // Said out loud because this is the one thing the program waits
+                // for before it can leave: a stop that ends here and a stop that
+                // ends somewhere below look the same from outside otherwise.
+                tracing::info!("usb.watch_stopped reason=asked_to_stop");
                 return;
             }
             // The cable looks for a phone when the slot is free or its own, and
@@ -439,32 +443,44 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
         // The cable going away is not something the session itself can tell:
         // it is ended from outside, and this is what does the telling.
         let unplugged = watch_unplug(present.clone(), phone.id.clone(), hu.shutdown.clone());
-        match attach(
-            &cfg,
-            auth.clone(),
-            &phone,
-            airplay_port,
-            &accessory_key,
-            &restart,
-            &mut shutdown,
-            &hu.admission,
-            &panel,
-            &status,
-            &vehicle,
-        )
-        .await
-        {
-            Ok(_) => {}
-            Err(e) => tracing::warn!(
-                "carplay.attach_failed phone={} err={e}",
-                short(&phone.id)
-            ),
-        }
+        // Raced against the ask, because this is the one turn that cannot
+        // answer it: before `run_bringup` the steps are the phone's own USB
+        // configuration and carkit, which listen for nothing, and after it the
+        // teardown waits for a driver task to notice it was aborted. A stop
+        // that arrives in either leaves the session behind rather than waiting
+        // for a phone that is not talking — the claim goes back below either
+        // way, and the program leaves.
+        let attached = tokio::select! {
+            attached = attach(
+                &cfg,
+                auth.clone(),
+                &phone,
+                airplay_port,
+                &accessory_key,
+                &restart,
+                &mut shutdown,
+                &hu.admission,
+                &panel,
+                &status,
+                &vehicle,
+            ) => Some(attached),
+            _ = stopping.changed() => None,
+        };
         unplugged.abort();
         // The session is over, whatever ended it: the claim goes back and
         // both links are free to wait for the next phone.
         drop(claim);
         status.phone_gone();
+        let Some(attached) = attached else {
+            tracing::info!("usb.watch_stopped reason=stopped_in_session");
+            return;
+        };
+        if let Err(e) = attached {
+            tracing::warn!(
+                "carplay.attach_failed phone={} err={e}",
+                short(&phone.id)
+            );
+        }
         // A phone still on the cable after its session ended — a restart, or a
         // link that would not come up — is served again, but not in a tight
         // loop. One that has left is waited for by the top of this loop.

@@ -26,11 +26,26 @@ case "$1" in
 		echo "ok"
 		;;
 	stop)
+		# `-K` delivers one signal and returns: whether the program ends is
+		# its own to decide, and the program answers that signal by ending both
+		# halves itself and leaving — half a second at the outside. So this
+		# waits, and only reaches for the kill when the program did not even
+		# manage that: a kill leaves the lights and the Bluetooth controllers
+		# where they are.
 		start-stop-daemon -K -q -p /run/cp2cl.pid
+		n=0
+		while kill -0 "$(cat /run/cp2cl.pid 2>/dev/null)" 2>/dev/null \
+			&& [ "$n" -lt 5 ]; do
+			sleep 1
+			n=$((n + 1))
+		done
+		if kill -0 "$(cat /run/cp2cl.pid 2>/dev/null)" 2>/dev/null; then
+			killall -9 cp2cl 2>/dev/null
+		fi
+		rm -f /run/cp2cl.pid
 		;;
 	restart|reload)
 		"$0" stop
-		sleep 1
 		"$0" start
 		;;
 	*)

@@ -12,9 +12,11 @@
 //! Nothing here decides *when* anything happens. The parts of the bridge that
 //! learn something send it as one of three facts — whether the radios are up,
 //! whether the car is talking to us, and how far a phone got — and the five
-//! states are read off those facts, highest first. That is what keeps a caller
-//! from having to know what the one above it says: a phone that connects while
-//! the car is still missing does not have to be careful about it.
+//! states above `NotRunning` are read off those facts, highest first. That is
+//! what keeps a caller from having to know what the one above it says: a phone
+//! that connects while the car is still missing does not have to be careful
+//! about it. `NotRunning` is not among them: no fact can say the program has
+//! gone, so the way out says it.
 //!
 //! The red one means something about *this program* rather than about the
 //! board: the device tree lights it with `default-state = "on"`. It beats while
@@ -25,7 +27,6 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::signal::unix::{signal, Signal, SignalKind};
 use tokio::sync::watch;
 
 /// Where the kernel lists the board's lights.
@@ -89,6 +90,11 @@ fn find(color: Color) -> Option<PathBuf> {
 /// sees can be read without a log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
+    /// There is no program: the state the board is left in on the way out, and
+    /// the one it is found in before the first run. Green out, red on, which is
+    /// what the device tree gives the power light with `default-state = "on"`.
+    /// Not read off the facts below — nothing is left to report it.
+    NotRunning,
     /// Nothing for a phone to come back to: the interface, the controller or
     /// the access point is missing. Green out, red beating.
     Init,
@@ -105,6 +111,7 @@ pub enum Phase {
 impl Phase {
     fn name(self) -> &'static str {
         match self {
+            Phase::NotRunning => "not_running",
             Phase::Init => "init",
             Phase::Waiting => "waiting",
             Phase::Standby => "standby",
@@ -119,7 +126,7 @@ impl Phase {
     /// share the slow beat are told apart by the red one.
     fn look(self) -> Look {
         match self {
-            Phase::Init => Look::Steady(false),
+            Phase::NotRunning | Phase::Init => Look::Steady(false),
             Phase::Waiting | Phase::Standby => Look::Blink { on: 500, off: 500 },
             Phase::Connecting => Look::Blink { on: 200, off: 200 },
             Phase::Linked => Look::Steady(true),
@@ -127,9 +134,11 @@ impl Phase {
     }
 
     /// What the red one says while this phase holds: a beat until there is a
-    /// car to hand a phone's media to, and out once there is.
+    /// car to hand a phone's media to, out once there is — and lit steady when
+    /// there is no program, because that is how the board comes up.
     fn power(self) -> Look {
         match self {
+            Phase::NotRunning => Look::Steady(true),
             Phase::Init | Phase::Waiting => Look::Blink { on: 500, off: 500 },
             Phase::Standby | Phase::Connecting | Phase::Linked => Look::Steady(false),
         }
@@ -265,9 +274,9 @@ impl Signals {
 /// This is the only place that writes them, because a sysfs write blocks and
 /// none of the places that report a fact is one to wait in.
 pub async fn run(mut facts: watch::Receiver<Facts>, lights: Option<Arc<Lights>>) {
-    // The device `lights` already holds when the red one was found: opening it a
-    // second time would be one scan and one line of log too many. A board with no
-    // red light has no `lights` at all, and that is the case this asks again for.
+    // The device `lights` already holds when it was taken: opening it a second
+    // time would be one scan and one line of log too many. A board with neither
+    // light has no `lights` at all, and that is the case this asks again for.
     let green = match &lights {
         Some(lights) => lights.status.clone(),
         None => Led::open(Color::Green),
@@ -277,19 +286,27 @@ pub async fn run(mut facts: watch::Receiver<Facts>, lights: Option<Arc<Lights>>)
         let wanted = facts.borrow_and_update().phase();
         if shown != Some(wanted) {
             shown = Some(wanted);
-            // Both are written before the line, so what it says is what the
-            // board shows rather than what was asked of it.
-            let green = paint(green.as_ref(), "green", wanted.look());
-            let red = match &lights {
-                Some(lights) => paint(Some(&lights.power), "red", wanted.power()),
-                None => "absent",
-            };
-            tracing::info!("led.phase phase={} green={green} red={red}", wanted.name());
+            display(
+                green.as_ref(),
+                lights.as_deref().and_then(Lights::power),
+                wanted,
+            );
         }
         if facts.changed().await.is_err() {
             return;
         }
     }
+}
+
+/// Writes one phase to both lights and names what they show — the whole of what
+/// the board is told, so that a state the program runs into and the one it leaves
+/// behind are said the same way.
+fn display(green: Option<&Led>, red: Option<&Led>, phase: Phase) {
+    // Both are written before the line, so what it says is what the board shows
+    // rather than what was asked of it.
+    let green = paint(green, "green", phase.look());
+    let red = paint(red, "red", phase.power());
+    tracing::info!("led.phase phase={} green={green} red={red}", phase.name());
 }
 
 /// Writes one light and names what it shows: the look that was asked for,
@@ -317,76 +334,52 @@ fn paint(led: Option<&Led>, light: &str, look: Look) -> &'static str {
 ///
 /// Held by `main` rather than spawned: the drop is what puts them back, and a
 /// drop at the end of `main` is the one moment every ordinary way out passes
-/// through. Panics abort straight past it (`panic = "abort"`), and a signal
-/// skips it too, which is what `stopper` and the hook in `main` are for.
+/// through. Panics abort straight past it (`panic = "abort"`), which is what the
+/// hook in `main` is for; a signal skips it too, and `main` puts them back by
+/// hand on the way out.
 pub struct Lights {
-    power: Led,
+    power: Option<Led>,
     status: Option<Led>,
 }
 
 impl Lights {
     /// Takes the lights. Nothing is written until `run` has a state to show,
     /// because the state is what decides both of them.
+    ///
+    /// Either one alone is enough: a board with only a status light has the same
+    /// exit to get right, and taking two as one object is what used to leave it
+    /// blinking — the red one missing meant there was nothing to put back.
     pub fn take() -> Option<Self> {
-        let power = Led::open(Color::Red)?;
+        let power = Led::open(Color::Red);
         let status = Led::open(Color::Green);
+        if power.is_none() && status.is_none() {
+            return None;
+        }
         Some(Self { power, status })
     }
 
-    /// Puts them back, which is what "the program is gone" looks like. There is
-    /// nobody left to tell if this fails: it is the last thing that happens.
+    /// The power light, when this image has one.
+    fn power(&self) -> Option<&Led> {
+        self.power.as_ref()
+    }
+
+    /// Leaves the board in the one phase no fact reports: the program is not
+    /// running. Green out, red on, both of them off the kernel's timer.
+    ///
+    /// Said through the same line as every other phase, because it is the last
+    /// thing the program does and the one thing nobody can ask about afterwards:
+    /// a write that did not take leaves the board blinking at whoever finds it,
+    /// and `led.phase phase=not_running` is the only record of what was asked
+    /// for. The caller stops the light task first — a phase painted after this
+    /// would be the one left on the board.
     pub fn restore(&self) {
-        if let Some(status) = &self.status {
-            let _ = status.level(false);
-        }
-        let _ = self.power.level(true);
+        display(self.status.as_ref(), self.power(), Phase::NotRunning);
     }
 }
 
 impl Drop for Lights {
     fn drop(&mut self) {
         self.restore();
-    }
-}
-
-/// Puts the power light back when a signal stops the program, which is the way
-/// out that skips `Drop`. What a process does when one arrives without a handler
-/// is end, and the light would stay out.
-///
-/// The wireless watcher catches SIGTERM to put the Bluetooth controllers back,
-/// and that path ends by returning through `main` — where the light goes back on
-/// anyway. Handling the signal here as well would cut that short, so the three
-/// signals that have no other handler are taken.
-pub async fn stopper(lights: Arc<Lights>) {
-    let mut int = arm(SignalKind::interrupt(), "int");
-    let mut hup = arm(SignalKind::hangup(), "hup");
-    let mut quit = arm(SignalKind::quit(), "quit");
-
-    tokio::select! {
-        () = raised(&mut int) => tracing::info!("main.stopped signal=int"),
-        () = raised(&mut hup) => tracing::info!("main.stopped signal=hup"),
-        () = raised(&mut quit) => tracing::info!("main.stopped signal=quit"),
-    }
-    lights.restore();
-    std::process::exit(0);
-}
-
-/// One signal the stopper listens for. Not being able to ask for it is a reason
-/// to carry on with the others rather than to stop listening.
-fn arm(kind: SignalKind, name: &str) -> Option<Signal> {
-    signal(kind)
-        .inspect_err(|e| tracing::warn!("led.signal_unavailable kind={name} err={e}"))
-        .ok()
-}
-
-/// Waits for a signal that was asked for. One that was not is a future that is
-/// never ready, which is what keeps its arm of the `select!` quiet.
-async fn raised(signal: &mut Option<Signal>) {
-    match signal {
-        Some(armed) => {
-            let _ = armed.recv().await;
-        }
-        None => std::future::pending().await,
     }
 }
 
@@ -496,6 +489,11 @@ mod tests {
         for phase in [Phase::Standby, Phase::Connecting, Phase::Linked] {
             assert!(matches!(phase.power(), Look::Steady(false)));
         }
+        // The state the board is left in: green out and red on, which is what it
+        // comes up with. A typo here would be a board blinking after the program
+        // has gone, and nothing left to ask about it.
+        assert!(matches!(Phase::NotRunning.look(), Look::Steady(false)));
+        assert!(matches!(Phase::NotRunning.power(), Look::Steady(true)));
     }
 
     /// Two device trees, two spellings, one rule: the colour is a whole

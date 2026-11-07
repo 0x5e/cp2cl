@@ -58,7 +58,9 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
     // Kept rather than swallowed: the light's first two states are the same
     // question asked from across a room, and they have to answer it with what
     // was actually found rather than with "the loop did not hang".
-    let radios = wait_for_radios(&cfg).await;
+    let Some(radios) = wait_for_radios(&cfg, &mut stopping).await else {
+        return;
+    };
     // Said as soon as the radios have answered, rather than only when the
     // service is published: a wired session needs neither radio, and holding
     // the light in its first state until a wireless one is offered would be a
@@ -88,13 +90,11 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
 
     // The channel never closes while a round holds the connection that owns the
     // profiles, so being told to stop is the one way out of the loops below —
-    // and the moment the controllers have to be put back. Made once rather than
-    // per round; without the handler the default action still ends the process,
-    // only without the putting back.
-    let mut stop = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .inspect_err(|e| tracing::warn!("main.signal_handler_missing err={e} consequence=no_restore"))
-        .ok();
-
+    // and the moment the controllers have to be put back. What tells us is the
+    // program, which takes the signal once for the whole process; a handler
+    // installed in a loop like this one would only be noticed while the loop is
+    // sitting on a `select!`, and a run waiting for a car or inside a session is
+    // not.
     loop {
         // Nothing is published while the car has no session. The cable owning
         // the slot is not a reason to take the service down: what a phone
@@ -109,7 +109,11 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
         // the network a phone is told to join may not be on air yet. It is named
         // in the start session either way, and a phone that is paged before its
         // network is there has nothing to come back to.
-        let ap = wait_for_access_point().await;
+        let Some(ap) = wait_for_access_point(&mut stopping).await else {
+            // Asked to stop while the network was coming up. Nothing is
+            // published yet, so there is nothing to put back either.
+            return;
+        };
 
         // That wait can last ten seconds, and the car's session can end
         // inside it. Publishing a service then is a phone called back for a
@@ -213,24 +217,10 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
             // The car's session ending is checked between sessions and never
             // inside one: `run_session` has tasks of its own, and dropping it
             // half way leaves them behind.
-            let next = match &mut stop {
-                Some(sig) => tokio::select! {
-                    next = incoming.recv() => next,
-                    _ = sig.recv() => {
-                        // The wired watcher has no signal handler of its own:
-                        // these two are what end it and everything it is in.
-                        let _ = hu.stopping.send(true);
-                        let _ = hu.shutdown.send(());
-                        None
-                    },
-                    _ = wait_car_down(&mut gate) => None,
-                    _ = stopping.changed() => None,
-                },
-                None => tokio::select! {
-                    next = incoming.recv() => next,
-                    _ = wait_car_down(&mut gate) => None,
-                    _ = stopping.changed() => None,
-                },
+            let next = tokio::select! {
+                next = incoming.recv() => next,
+                _ = wait_car_down(&mut gate) => None,
+                _ = stopping.changed() => None,
             };
             paging.abort();
             let Some(IncomingConn { fd, peer_mac }) = next else {
@@ -447,8 +437,10 @@ const BLUEZ: &str = "org.bluez";
 /// the line `main.radios_incomplete` rather than taking them down with it.
 ///
 /// Answers whether all three were found, because the caller has to tell a run
-/// that waited for them from one that went on without them.
-async fn wait_for_radios(cfg: &Machine) -> bool {
+/// that waited for them from one that went on without them — and `None` when
+/// the program was asked to stop while it was waiting, which is the one answer
+/// that is not about the radios.
+async fn wait_for_radios(cfg: &Machine, stopping: &mut watch::Receiver<bool>) -> Option<bool> {
     let started = Instant::now();
     // The bus is a handshake, so it is had once and kept: what is asked of it
     // afterwards is a question about a name, not about the bus itself.
@@ -468,7 +460,7 @@ async fn wait_for_radios(cfg: &Machine) -> bool {
             let after_ms = started.elapsed().as_millis();
             tracing::info!("wifi.ready iface={} after_ms={after_ms}", cfg.wifi_iface);
             tracing::info!("bt.ready adapter={} after_ms={after_ms}", cfg.bt_adapter);
-            return true;
+            return Some(true);
         }
         // Once per change rather than once per poll: the first round says what
         // the boot has not got round to yet, and the next says what is left.
@@ -481,9 +473,21 @@ async fn wait_for_radios(cfg: &Machine) -> bool {
                 "main.radios_incomplete after_ms={} missing={missing} consequence=wireless_will_fail",
                 started.elapsed().as_millis()
             );
-            return false;
+            return Some(false);
         }
-        sleep(RADIOS_POLL).await;
+        // Waited on rather than slept through: a stop that arrives while the
+        // boot is still loading modules is one the wireless half has nothing to
+        // say about, and twenty seconds of silence is a stop that looks ignored.
+        tokio::select! {
+            () = sleep(RADIOS_POLL) => {}
+            _ = stopping.changed() => {
+                tracing::info!(
+                    "main.radios_wait_stopped after_ms={}",
+                    started.elapsed().as_millis()
+                );
+                return None;
+            }
+        }
     }
 }
 
@@ -539,8 +543,9 @@ const AP_POLL: Duration = Duration::from_millis(200);
 ///
 /// Answers whether the file was found: the interface is there long before the
 /// daemon is, and a phone told to join a network that is not on air is the
-/// difference between the light's first two states.
-async fn wait_for_access_point() -> bool {
+/// difference between the light's first two states. `None` when the program was
+/// asked to stop inside this wait: a round that is dropped rather than published.
+async fn wait_for_access_point(stopping: &mut watch::Receiver<bool>) -> Option<bool> {
     let started = Instant::now();
     let mut said = false;
     loop {
@@ -549,7 +554,7 @@ async fn wait_for_access_point() -> bool {
                 "wifi.ap_ready after_ms={}",
                 started.elapsed().as_millis()
             );
-            return true;
+            return Some(true);
         }
         if !said {
             tracing::info!("wifi.ap_waiting pid_file={AP_PID}");
@@ -560,8 +565,19 @@ async fn wait_for_access_point() -> bool {
                 "wifi.ap_absent after_ms={} consequence=phone_told_a_network_that_is_not_on_air",
                 started.elapsed().as_millis()
             );
-            return false;
+            return Some(false);
         }
-        sleep(AP_POLL).await;
+        // Same as the radio wait: ten seconds of not answering a stop is ten
+        // seconds of a stop that looks ignored.
+        tokio::select! {
+            () = sleep(AP_POLL) => {}
+            _ = stopping.changed() => {
+                tracing::info!(
+                    "wifi.ap_wait_stopped after_ms={}",
+                    started.elapsed().as_millis()
+                );
+                return None;
+            }
+        }
     }
 }

@@ -36,6 +36,7 @@ use iap2_mfi::{AuthCoprocessor, FileCoprocessor, NoCoprocessor};
 use livi_runtime::mfi_async::SharedCoprocessor;
 use livi_runtime::vehicle::Vehicle;
 use tokio::net::TcpListener;
+use tokio::signal::unix::{signal, Signal, SignalKind};
 use tokio::sync::{mpsc, watch, Notify};
 use tracing_subscriber::prelude::*;
 
@@ -122,7 +123,8 @@ async fn main() -> Result<()> {
     // The red light is the program's own state: out while the green one shows a
     // phase, back when the bridge has nothing to show and when there is no
     // program at all. Two ways out skip the drop that would put it back, a panic
-    // (`panic = "abort"`) and a signal; both are handled here.
+    // (`panic = "abort"`) and a signal; the first is the hook below, and the
+    // second is handled where the signals are taken, at the end of `main`.
     let lights = led::Lights::take().map(Arc::new);
     if let Some(lights) = &lights {
         let lights = lights.clone();
@@ -133,21 +135,11 @@ async fn main() -> Result<()> {
         }));
     }
     let (led, facts) = led::Signals::new();
-    tokio::spawn(led::run(facts, lights.clone()));
+    // Kept so that a stop can end it before the lights are put back: a state
+    // painted after that would be the one left on the board, and a stop is not
+    // the moment to find out which of the two wrote last.
+    let painting = tokio::spawn(led::run(facts, lights.clone()));
     tokio::spawn(button::watch(cfg.bt_adapter.clone(), replug.clone()));
-    if let Some(lights) = &lights {
-        // The wireless watcher catches SIGTERM to put the Bluetooth
-        // controllers back, and that path ends by returning through here, where
-        // the lights go back anyway. Taking the same signal here as well would
-        // cut it short, so only the other three are taken — neither watcher has
-        // a handler for SIGINT, SIGHUP or SIGQUIT.
-        //
-        // Cloned rather than handed over: this `lights` stays in `main` to the
-        // end, so the drop that puts them back is the one on the way out of
-        // `main` and not whatever the runtime does with a task it is shutting
-        // down.
-        tokio::spawn(led::stopper(lights.clone()));
-    }
 
     // Everything the page shows is reported from wherever it is learned, and
     // nothing reads it back: see `web::status`. Started before anything else so
@@ -366,7 +358,9 @@ async fn main() -> Result<()> {
     // The car's own input goes the way everything else does, so the session gets
     // the same sink the CarPlay side fills in.
     let reported = status.carlife().clone();
-    tokio::spawn(async move {
+    // The handle is kept rather than dropped: a stop ends this half where it
+    // stands, and a task nobody holds is one that can only be waited for.
+    let carlife = tokio::spawn(async move {
         // Held in this task rather than in `main`: the ports are borrows of it,
         // and both have to outlive the loop that runs one session after another.
         let ports = carlife_md::Ports {
@@ -397,11 +391,82 @@ async fn main() -> Result<()> {
         }
     });
 
-    // The phone's half runs last and does not return: it accepts on the socket
-    // above, and both links wait for a phone — over the cable or over Bluetooth
-    // — until one of them has one.
-    phone.run().await;
+    // Every signal the program stops on is taken here, by the program, and none
+    // by either half or by the lights: what a signal means is that two halves
+    // have to end, so this is where they are ended rather than asked to notice.
+    //
+    // Nothing here waits for an answer: what a stop promises is that the process
+    // is gone, and a half that will not let go is a board that has to be
+    // unplugged. Both are told, they get one turn, the lights are put back, and
+    // the program leaves. The two channels are taken before `phone` is moved into
+    // its run, and are the whole of what the stop reaches them through.
+    let (stopping, shutdown) = (phone.stopping.clone(), phone.shutdown.clone());
+    let mut term = arm(SignalKind::terminate(), "term");
+    let mut int = arm(SignalKind::interrupt(), "int");
+    let mut hup = arm(SignalKind::hangup(), "hup");
+    let mut quit = arm(SignalKind::quit(), "quit");
+    let asked = async {
+        tokio::select! {
+            () = raised(&mut term) => "term",
+            () = raised(&mut int) => "int",
+            () = raised(&mut hup) => "hup",
+            () = raised(&mut quit) => "quit",
+        }
+    };
+
+    // How long the halves have to put back what they put back on their way out:
+    // the wireless one's controllers went back in seventy milliseconds on the
+    // board, and whatever is not done here is done again at the next start.
+    const TURN: std::time::Duration = std::time::Duration::from_millis(500);
+    // The phone's half runs last and does not return on its own: it accepts on
+    // the socket above, and both links wait for a phone — over the cable or over
+    // Bluetooth — until one of them has one, or until a signal ends everything.
+    tokio::select! {
+        () = phone.run() => tracing::info!("main.stopped reason=run_returned"),
+        signal = asked => {
+            tracing::info!("main.stopping signal={signal}");
+            // Both halves, each in the way it has: `stopping` ends the links'
+            // waits, `shutdown` a session already in progress — the same thing a
+            // takeover sends to end one — and the car's side is a task with
+            // nothing to unwind that is dropped where it stands.
+            let _ = stopping.send(true);
+            let _ = shutdown.send(());
+            carlife.abort();
+            tokio::time::sleep(TURN).await;
+            // Nothing paints after this: the task that holds the phases is
+            // ended first, so what `restore` writes is what stays.
+            painting.abort();
+            let _ = painting.await;
+            if let Some(lights) = &lights {
+                lights.restore();
+            }
+            tracing::info!("main.stopped reason=stop_requested");
+            std::process::exit(0);
+        }
+    }
     Ok(())
+}
+
+/// One signal the program stops on, or why there is none.
+///
+/// Not being able to ask for one is a reason to carry on with the others rather
+/// than to stop listening: the remaining ones still end the run.
+fn arm(kind: SignalKind, name: &str) -> Option<Signal> {
+    signal(kind)
+        .inspect_err(|e| tracing::warn!("main.signal_handler_missing signal={name} err={e}"))
+        .ok()
+}
+
+/// Waits for a signal that was asked for. One that was not is a future that is
+/// never ready, which is what keeps its arm of the `select!` quiet — and what
+/// keeps a signal that could not be taken from reading as one that arrived.
+async fn raised(signal: &mut Option<Signal>) {
+    match signal {
+        Some(armed) => {
+            let _ = armed.recv().await;
+        }
+        None => std::future::pending().await,
+    }
 }
 
 /// The car's microphone, as the CarLife half asks for it.
