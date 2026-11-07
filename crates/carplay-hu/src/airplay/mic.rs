@@ -1,17 +1,21 @@
 //! The microphone uplink: what was captured at this end, on its way to the phone.
 //!
 //! CarPlay has no microphone stream of its own. The phone asks for one by
-//! naming a *send* port in the SETUP of its main audio stream (type 100) and
-//! labelling that stream `telephony` or `speechRecognition`; audio then travels
-//! the other way over UDP, sealed with the mirror of the key the phone seals its
-//! own audio with. Nothing here decodes: whoever captures encodes, and the phone
+//! naming a *send* port in the SETUP of an audio stream; audio then travels the
+//! other way over UDP, sealed with the mirror of the key the phone seals its own
+//! audio with. Nothing here decodes: whoever captures encodes, and the phone
 //! says what it will take, which is exactly how the downlink works.
+//!
+//! The port is the whole of the signal. It is the only inbound stream that names
+//! one — for every other one it is we who do — so neither the stream's type nor
+//! the name it is labelled with is asked: a call and an assistant have been seen
+//! on more than one type, and a wired call has arrived labelled `media`.
 //!
 //! The capture side is the CarLife half's: its VR channel carries the car's
 //! microphone at 16 kHz mono, and `send_pcm` is where that arrives. What the
 //! phone asked for is not what the car produces — a wireless session wants Opus
 //! at 48 kHz, a wired one the PCM it negotiated, which for a stream that runs
-//! both ways is 24 kHz — so the conversions the uplink needs, one of two
+//! both ways has been 24 kHz — so the conversions the uplink needs, one of two
 //! resamples and sometimes an Opus encoder, live here beside the sealing rather
 //! than anywhere upstream.
 //!
@@ -72,7 +76,6 @@ pub enum MicCodec {
 
 impl MicCodec {
     /// The name the capture path knows it by.
-    #[allow(dead_code)]
     pub fn name(self) -> &'static str {
         match self {
             Self::Lpcm => "lpcm",
@@ -89,10 +92,9 @@ pub struct MicConfig {
     pub sample_rate: u32,
     pub channels: u16,
     /// How many samples one packet carries: the phone's `framesPerPacket` turned
-    /// into a duration, or 20 ms when it did not say.
+    /// into a duration, or 20 ms when it did not say. Per channel, which is what
+    /// the RTP timestamp counts.
     pub samples_per_packet: u32,
-    /// Opus only. The low-latency tiers the reference implementations pick.
-    pub bitrate: Option<u32>,
 }
 
 impl MicConfig {
@@ -131,7 +133,6 @@ impl MicConfig {
             sample_rate,
             channels,
             samples_per_packet,
-            bitrate: (mic == MicCodec::Opus).then_some(OPUS_BITRATE),
         }
     }
 
@@ -269,14 +270,17 @@ impl Coder {
         // The car's microphone is 16 kHz mono and cannot be made into anything
         // else that is not one of these. Opus codes at 48 kHz whatever the
         // stream was described as; the PCM of a wired session is sent back at
-        // the rate the phone named, which is 16 or 24 kHz in practice.
-        let rate = match (config.codec, config.sample_rate, config.channels) {
-            (MicCodec::Opus, _, 1) => Some(Rate::Triple),
-            (MicCodec::Lpcm, MIC_RATE, 1) => Some(Rate::Same),
-            (MicCodec::Lpcm, WIRED_SPEECH_RATE, 1) => Some(Rate::ThreeHalves),
+        // the rate the phone named, which has been 24 kHz mono and 48 kHz stereo.
+        // A phone that asked for two channels is given the one in both: a
+        // microphone is one channel, and that is how a hands-free call is
+        // carried anyway.
+        let rate = match (config.codec, config.sample_rate) {
+            (MicCodec::Opus, _) | (MicCodec::Lpcm, OPUS_RATE) => Some(Rate::Triple),
+            (MicCodec::Lpcm, MIC_RATE) => Some(Rate::Same),
+            (MicCodec::Lpcm, WIRED_SPEECH_RATE) => Some(Rate::ThreeHalves),
             _ => None,
         };
-        let Some(rate) = rate else {
+        let Some(rate) = rate.filter(|_| matches!(config.channels, 1 | 2)) else {
             tracing::warn!(
                 "carplay.mic.coding_unsupported codec={:?} rate_hz={} channels={} \
                  consequence=uplink_silent",
@@ -290,7 +294,7 @@ impl Coder {
             MicCodec::Lpcm => None,
             MicCodec::Opus => match OpusEncoder::new(OPUS_RATE as i32, 1, Application::Voip) {
                 Ok(mut encoder) => {
-                    encoder.bitrate_bps = config.bitrate.unwrap_or(96_000) as i32;
+                    encoder.bitrate_bps = OPUS_BITRATE as i32;
                     Some(encoder)
                 }
                 Err(e) => {
@@ -299,12 +303,19 @@ impl Coder {
                 }
             },
         };
+        // Only Opus writes through this, and a wired session has nothing to put
+        // in it.
+        let packet = if encoder.is_some() {
+            vec![0u8; MAX_OPUS_PACKET]
+        } else {
+            Vec::new()
+        };
         Some(Self {
             encoder,
             pending: Vec::with_capacity(config.samples_per_packet as usize),
             rate,
             resampler: Upsampler::default(),
-            packet: vec![0u8; MAX_OPUS_PACKET],
+            packet,
         })
     }
 
@@ -341,11 +352,16 @@ impl Coder {
                     }
                 }
                 // Big-endian: the phone's PCM is in the same order as the
-                // downlink's, which is also what a wired session arrives in.
+                // downlink's, which is also what a wired session arrives in. The
+                // one channel the car produced is written once per channel the
+                // phone asked for.
                 None => {
-                    let mut bytes = Vec::with_capacity(want * 2);
+                    let channels = usize::from(config.channels.max(1));
+                    let mut bytes = Vec::with_capacity(want * 2 * channels);
                     for sample in &frame {
-                        bytes.extend_from_slice(&sample.to_be_bytes());
+                        for _ in 0..channels {
+                            bytes.extend_from_slice(&sample.to_be_bytes());
+                        }
                     }
                     out.push(bytes);
                 }
@@ -610,7 +626,6 @@ mod tests {
         let pcm = MicConfig::from_codec(AudioCodec::Pcm { rate: 16_000, channels: 1 }, 0);
         assert_eq!(pcm.samples_per_packet, 320);
         assert_eq!(pcm.channels, 1);
-        assert_eq!(pcm.bitrate, None);
 
         // 480 samples at 48 kHz is 10 ms, which is what the phone asked for.
         let told = MicConfig::from_codec(AudioCodec::Pcm { rate: 48_000, channels: 2 }, 480);
@@ -640,7 +655,6 @@ mod tests {
             assert_eq!(opus.channels, 1, "{named}");
             assert_eq!(opus.sample_rate, OPUS_RATE, "{named}");
             assert_eq!(opus.samples_per_packet, 960, "{named}");
-            assert_eq!(opus.bitrate, Some(96_000), "{named}");
         }
     }
 
@@ -746,19 +760,56 @@ mod tests {
     /// Anything the phone asks for that the car's microphone cannot be made
     /// into is refused before the car is told to record, rather than feeding it
     /// a stream that would go nowhere. The wired session's 24 kHz is one of the
-    /// two it can.
+    /// three it can, in either channel count — a call has been negotiated at
+    /// 48 kHz stereo, and refusing that is a microphone the phone never hears.
     #[test]
     fn a_rate_nothing_here_can_produce_is_refused() {
         let odd = MicConfig::from_codec(AudioCodec::Pcm { rate: 44_100, channels: 2 }, 0);
         assert!(Coder::new(&odd).is_none());
-        for rate in [MIC_RATE, WIRED_SPEECH_RATE] {
-            let wired = MicConfig::from_codec(AudioCodec::Pcm { rate, channels: 1 }, 0);
-            assert!(Coder::new(&wired).is_some(), "{rate}");
+        for rate in [MIC_RATE, WIRED_SPEECH_RATE, OPUS_RATE] {
+            for channels in [1, 2] {
+                let wired = MicConfig::from_codec(AudioCodec::Pcm { rate, channels }, 0);
+                assert!(Coder::new(&wired).is_some(), "{rate} / {channels}");
+            }
         }
-        let stereo = MicConfig::from_codec(AudioCodec::Pcm { rate: 24_000, channels: 2 }, 0);
-        assert!(Coder::new(&stereo).is_none(), "the car is a mono microphone");
+        let three = MicConfig::from_codec(AudioCodec::Pcm { rate: 16_000, channels: 3 }, 0);
+        assert!(Coder::new(&three).is_none(), "there is no third channel");
         let opus = MicConfig::from_codec(AudioCodec::Opus { rate: 48_000, channels: 1 }, 0);
         assert!(Coder::new(&opus).is_some());
+    }
+
+    /// A phone that asked for two channels is given the one the car produced in
+    /// both: the packets are twice the bytes, and the two halves say the same
+    /// thing — a call carried on the right channel only would be heard on one
+    /// side of the car.
+    #[test]
+    fn a_stereo_uplink_carries_the_one_channel_twice() {
+        let stereo =
+            MicConfig::from_codec(AudioCodec::Pcm { rate: WIRED_SPEECH_RATE, channels: 2 }, 0);
+        assert_eq!(stereo.channels, 2);
+        assert_eq!(stereo.samples_per_packet, 480);
+        let mut coder = Coder::new(&stereo).expect("24 kHz stereo is a wired call");
+
+        // 480 input samples of 16 kHz become 720 of 24 kHz, which is one packet
+        // of 480 plus 240 held over.
+        let block: Vec<u8> = (0..480)
+            .flat_map(|i| saturate(0.5 * f32::from(i16::MAX) * ((i as f32) * 0.01).sin()).to_le_bytes())
+            .collect();
+        let packets = coder.packets(&block, &stereo);
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].len(), 480 * 2 * 2, "frames of two channels");
+
+        let pairs: Vec<(i16, i16)> = packets[0]
+            .chunks_exact(4)
+            .map(|four| {
+                (
+                    i16::from_be_bytes([four[0], four[1]]),
+                    i16::from_be_bytes([four[2], four[3]]),
+                )
+            })
+            .collect();
+        assert_eq!(pairs.len(), 480);
+        assert!(pairs.iter().all(|(left, right)| left == right));
     }
 
     /// A 24 kHz uplink is three samples for every two, so a block of 512 gives

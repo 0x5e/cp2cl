@@ -1900,9 +1900,11 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
     async fn send_voice(&mut self, item: Voice) -> Result<()> {
         match item {
             Voice::Format { rate, channels } => {
-                // A second format for a player already open in it is the same
-                // player announced twice.
-                if self.voice_format == Some((rate, channels)) {
+                // The same format for a player that is already open in it is one
+                // announced twice. A player that was closed is not that: the
+                // recording ends with it, so the next request has to ask for it
+                // again — the phone's own app announces every one of them.
+                if self.voice_open && self.voice_format == Some((rate, channels)) {
                     return Ok(());
                 }
                 // A player open at another format is put down first, for the
@@ -3544,6 +3546,57 @@ mod tests {
                 no_location(),
             )
         };
+        run(device, &cfg, None, &ports)
+            .await
+            .expect("the session ends cleanly");
+        car.await.unwrap();
+    }
+
+    /// Every request is announced, including one that arrives in the format the
+    /// last one used. The recording ends with the player, so a request that says
+    /// nothing is one the car never records for — and Siri, waiting for the car's
+    /// microphone, then waits for ever, with nothing in the log to say so.
+    #[tokio::test]
+    async fn a_second_request_in_the_same_format_starts_the_recording_again() {
+        let cfg = Machine::default();
+        let (device, pipe) = tokio::io::duplex(64 * 1024);
+
+        let outlet = Arc::new(Outlet::new());
+        let sink = outlet.sink();
+
+        let car = tokio::spawn(async move {
+            let mut car = Car { pipe };
+            car.introduce("20062100").await;
+
+            // Two requests at one format, one after the other — which is what a
+            // driver pressing the voice key twice is.
+            for round in 0..2 {
+                sink.voice(Voice::Format {
+                    rate: 16_000,
+                    channels: 1,
+                });
+                car.expect(MIC_RECOG_START).await;
+                car.expect(VR_MODULE_STATUS).await;
+                car.expect(MODULE_STATUS).await;
+                let init = car.expect(VR_INIT).await;
+                assert_eq!(init.body, proto::media_init(16_000, 1), "round {round}");
+
+                sink.voice(Voice::Ended);
+                car.expect(VR_STOP).await;
+                car.expect(MIC_RECORD_END).await;
+                car.expect(VR_MODULE_STATUS).await;
+                car.expect(MODULE_STATUS).await;
+            }
+        });
+
+        let watched = Watched::default();
+        let ports = ports(
+            outlet.clone(),
+            &watched,
+            home(),
+            Arc::new(Report::new()),
+            no_location(),
+        );
         run(device, &cfg, None, &ports)
             .await
             .expect("the session ends cleanly");

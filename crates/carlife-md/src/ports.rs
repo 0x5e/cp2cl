@@ -31,8 +31,7 @@ pub struct Ports<'a> {
     pub report: Arc<Report>,
     /// Where the car's position goes, for the phone to read.
     pub location: Arc<dyn Location>,
-    /// Where the car's microphone goes, and whether the phone is listening for
-    /// it. The VR channel is the only one that runs both ways, so this is the
-    /// only audio the car produces.
+    /// Where the car's microphone goes. The VR channel is the only one that runs
+    /// both ways, so this is the only audio the car produces.
     pub voice: Arc<dyn Voice>,
 }

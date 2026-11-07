@@ -1280,11 +1280,10 @@ impl Session {
             _ => {}
         }
         // A phone that has stopped sending us a stream is not listening for a
-        // microphone on it either. Which stream that is, the sink decides: it is
-        // whichever one named the port the uplink goes to.
-        if matches!(stream_type, 100 | 101 | 102) {
-            self.mic.close(connection_id).await;
-        }
+        // microphone on it either. Which stream that was, the sink decides: it is
+        // whichever one named the port the uplink goes to, and any other teardown
+        // closes nothing.
+        self.mic.close(connection_id).await;
     }
 
     /// The media-clock reply. Silence here is what made the phone stop sending
@@ -1622,11 +1621,6 @@ impl Session {
                             ..Audio::default()
                         });
                     });
-                    // MainAudio is bidirectional, and this is how the phone says
-                    // so: a send port in its own SETUP, alongside an audio type
-                    // that has someone talking at the other end. It is the only
-                    // inbound stream that names a port — for every other one it
-                    // is we who do.
                     // An audio stream that has someone talking at the other end
                     // is the one that can be set up bidirectionally, and the way
                     // the phone says so is a send port in its own SETUP. It is

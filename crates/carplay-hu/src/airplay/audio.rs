@@ -230,7 +230,11 @@ impl AudioReceiver {
 /// phone negotiated, and anything this does not know how to narrow is left as it
 /// arrived rather than announced as something it is not.
 pub fn delivered(codec: AudioCodec, name: &str, two_way: bool) -> AudioCodec {
-    if !(sink::is_navigation(name, two_way) || sink::is_voice(name, two_way)) {
+    // The music is the only stream the car is given as it arrives — and a stream
+    // that named a port for a microphone is not the music, whatever it is
+    // labelled. Everything else is speech, `is_navigation` being what is left
+    // over once the music and the voice streams are taken out.
+    if sink::is_media(name) && !sink::is_voice(name, two_way) {
         return codec;
     }
     let speech = AudioCodec::Pcm {
@@ -239,18 +243,10 @@ pub fn delivered(codec: AudioCodec, name: &str, two_way: bool) -> AudioCodec {
     };
     match codec {
         AudioCodec::Opus { .. } => speech,
-        // Every rate a wired speech stream has been seen at, mono or stereo.
-        // `Narrow` is the other half of this decision and is built from the same
-        // two numbers.
-        AudioCodec::Pcm {
-            rate: WIRED_SPEECH_RATE | OPUS_RATE,
-            channels: 1 | 2,
-        } => speech,
-        // Already at the car's rate and in stereo: only the mix is left to do.
-        AudioCodec::Pcm {
-            rate: SPEECH_RATE,
-            channels: 2,
-        } => speech,
+        // The rates and channel counts a wired speech stream has been seen at.
+        // `Narrow::covers` is the same question asked by the half that does the
+        // converting, so the announcement and the samples cannot disagree.
+        AudioCodec::Pcm { rate, channels } if Narrow::covers(rate, channels) => speech,
         _ => codec,
     }
 }
@@ -451,6 +447,17 @@ enum Narrow {
 }
 
 impl Narrow {
+    /// Whether a speech stream at this rate and channel count is one the car's
+    /// channel can be given. Asked here as well as by `delivered`, so that what
+    /// the car is told and what it is handed are decided once.
+    fn covers(rate: u32, channels: u16) -> bool {
+        matches!(
+            (rate, channels),
+            (WIRED_SPEECH_RATE | OPUS_RATE, 1 | 2) | (SPEECH_RATE, 2)
+        )
+    }
+
+    /// Only ever built for a rate `covers` says yes to.
     fn new(rate: u32) -> Self {
         match rate {
             SPEECH_RATE => Self::Same,
