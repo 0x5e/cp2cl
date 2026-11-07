@@ -5,10 +5,11 @@
 
 MTD=/dev/mtdblock0
 MOUNT=/persist
-STATE=$MOUNT/cp2cl
-CARD=/etc/cp2cl
 LOG=/var/log
-FILES="config.json pairings.json"
+# Both lists are the paths everything else uses, and the volume keeps each at
+# the same path under /persist.
+FILES="/etc/cp2cl/config.json /etc/cp2cl/pairings.json"
+DIRS="/var/lib/bluetooth /var/lib/lockdown"
 
 log() {
 	echo "spiflash: $*"
@@ -25,8 +26,55 @@ formatted() {
 	return 2
 }
 
-# The files stay on the volume; /etc/cp2cl holds a link to each. One that will
-# not move stays on the card with no link, because `ln -sfn` would remove it.
+# A file that moves onto the volume and leaves a link behind: one the program
+# wrote on the card goes over, one on neither side starts as `{}`.
+adopt_file() {
+	card=$1
+	store=$MOUNT$card
+	mkdir -p "${store%/*}" || { log "${store%/*} could not be made"; return 1; }
+
+	if [ ! -L "$card" ] && [ -f "$card" ]; then
+		mv "$card" "$store" || { log "$card would not move to $store"; return 1; }
+	elif [ ! -f "$store" ]; then
+		printf '{}\n' > "$store" || { log "$store could not be written"; return 1; }
+	fi
+
+	ln -sfn "$store" "$card" && log "$card -> $store"
+}
+
+# A directory that moves onto the volume the same way. One that will not empty
+# stays on the card with no link, because a link would hide what is in it.
+adopt_dir() {
+	card=$1
+	store=$MOUNT$card
+	mkdir -p -m 0700 "$store" || { log "$store could not be made"; return 1; }
+
+	if [ -d "$card" ] && [ ! -L "$card" ]; then
+		if [ -n "$(ls -A "$card" 2>/dev/null)" ]; then
+			for p in "$card"/*; do
+				[ -e "$p" ] || continue
+				mv "$p" "$store"/ || { log "$p would not move to $store"; return 1; }
+			done
+		fi
+		rmdir "$card" 2>/dev/null || { log "$card would not empty, left on the card"; return 1; }
+	fi
+
+	ln -sfn "$store" "$card" && log "$card -> $store"
+}
+
+# Nothing is mounted, so a link would name nothing. Remove the link, not what it
+# points at, and let the writer use its own path on the card again.
+unlink() {
+	for f in $FILES; do
+		[ -L "$f" ] && rm -f "$f"
+	done
+	for d in $DIRS; do
+		[ -L "$d" ] || continue
+		rm -f "$d"
+		mkdir -p -m 0700 "$d"
+	done
+}
+
 mount_all() {
 	if ! mount -t ext4 -o rw,noatime "$MTD" "$MOUNT"; then
 		log "$MTD would not mount on $MOUNT"
@@ -34,26 +82,13 @@ mount_all() {
 		return 1
 	fi
 
-	mkdir -p "$STATE"
 	for f in $FILES; do
-		if [ ! -L "$CARD/$f" ] && [ -f "$CARD/$f" ]; then
-			mv "$CARD/$f" "$STATE/$f" || {
-				log "$f would not move to $STATE, left on the card"
-				continue
-			}
-		fi
-		[ -f "$STATE/$f" ] || printf '{}\n' > "$STATE/$f"
-		ln -sfn "$STATE/$f" "$CARD/$f"
+		adopt_file "$f"
+	done
+	for d in $DIRS; do
+		adopt_dir "$d"
 	done
 	log "mounted $MTD on $MOUNT"
-}
-
-# Nothing is mounted, so a link would name nothing. Remove the link, not what it
-# points at, and let the program write on the card as it did before.
-unlink() {
-	for f in $FILES; do
-		[ -L "$CARD/$f" ] && rm -f "$CARD/$f"
-	done
 }
 
 start() {
