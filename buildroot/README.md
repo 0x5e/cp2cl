@@ -163,7 +163,8 @@ the core; none is loaded on this chip.
     /etc/hostname             S12firstboot, first boot only
     /etc/hosts                127.0.1.1, first boot only
     /etc/hostapd/*.conf       ssid=, first boot only
-    /etc/cp2cl/pairings.json
+    /persist/cp2cl/*          config.json and pairings.json, linked into
+                              /etc/cp2cl; real files there on a board with none
     /dev/usb-ffs/carlife
     /sys/devices/platform/soc/1c19000.usb/musb-hdrc.2.auto/mode    peripheral
     /run/cp2cl.pid
@@ -322,6 +323,8 @@ Same program, different plumbing, and one part of it outside mainline. What
 differs from the NanoPi:
 
     storage         microSD on mmc0 = mmcblk0, the same two-partition card
+    persist         16 MiB SPI NOR on spi0, all one MTD device: `S13spiflash`
+                    formats it ext4 once (detached) and mounts it at /persist
     USB             port 0 (PHY0, musb) is the socket that also powers the
                     board, and its device tree says `dr_mode = "peripheral"`:
                     the head unit enumerates us there, with no `mode` file to

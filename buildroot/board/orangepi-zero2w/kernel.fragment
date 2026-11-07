@@ -1,5 +1,15 @@
 CONFIG_MMC_SUNXI=y
 
+# The 16 MiB SPI NOR on SPI0, as one whole-chip MTD device.
+CONFIG_MTD=y
+CONFIG_MTD_BLOCK=y
+CONFIG_MTD_SPI_NOR=y
+CONFIG_SPI=y
+CONFIG_SPI_SUN6I=y
+# spi0 asks for its DMA channels in probe and defers for ever when the provider
+# is a module nothing loads: arm64's defconfig has this one as =m.
+CONFIG_DMA_SUN6I=y
+
 CONFIG_PINCTRL_SUNXI=y
 CONFIG_PINCTRL_SUN50I_H616=y
 
@@ -22,7 +32,6 @@ CONFIG_BT_HCIUART_H4=y
 CONFIG_SUNXI_ADDR_MGT=m
 
 # CONFIG_MEDIA_SUPPORT is not set
-# CONFIG_MTD is not set
 # CONFIG_ETHERNET is not set
 # CONFIG_WLAN_VENDOR_ATH is not set
 # CONFIG_WLAN_VENDOR_INTEL is not set

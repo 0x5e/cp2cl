@@ -1,0 +1,94 @@
+#!/bin/sh
+#
+# The 16 MiB SPI NOR at /persist. A first mke2fs takes about a minute, so it
+# runs detached: the boot does not wait, and the program starts without it.
+
+MTD=/dev/mtdblock0
+MOUNT=/persist
+STATE=$MOUNT/cp2cl
+CARD=/etc/cp2cl
+LOG=/var/log
+FILES="config.json pairings.json"
+
+log() {
+	echo "spiflash: $*"
+	[ -w "$LOG" ] && echo "spiflash: $*" >> "$LOG/boot.log"
+}
+
+# 0 ext4, 1 something else, 2 unreadable.
+formatted() {
+	magic=$(dd if="$MTD" bs=1 skip=1080 count=2 2>/dev/null | od -An -tx1 | tr -d ' \n')
+	case "$magic" in
+	53ef) return 0 ;;
+	????) return 1 ;;
+	esac
+	return 2
+}
+
+# The files stay on the volume; /etc/cp2cl holds a link to each. One that will
+# not move stays on the card with no link, because `ln -sfn` would remove it.
+mount_all() {
+	if ! mount -t ext4 -o rw,noatime "$MTD" "$MOUNT"; then
+		log "$MTD would not mount on $MOUNT"
+		unlink
+		return 1
+	fi
+
+	mkdir -p "$STATE"
+	for f in $FILES; do
+		if [ ! -L "$CARD/$f" ] && [ -f "$CARD/$f" ]; then
+			mv "$CARD/$f" "$STATE/$f" || {
+				log "$f would not move to $STATE, left on the card"
+				continue
+			}
+		fi
+		[ -f "$STATE/$f" ] || printf '{}\n' > "$STATE/$f"
+		ln -sfn "$STATE/$f" "$CARD/$f"
+	done
+	log "mounted $MTD on $MOUNT"
+}
+
+# Nothing is mounted, so a link would name nothing. Remove the link, not what it
+# points at, and let the program write on the card as it did before.
+unlink() {
+	for f in $FILES; do
+		[ -L "$CARD/$f" ] && rm -f "$CARD/$f"
+	done
+}
+
+start() {
+	[ -b "$MTD" ] || { log "no $MTD, /proc/mtd is empty"; return 0; }
+
+	mkdir -p "$MOUNT"
+
+	formatted
+	case $? in
+	0) mount_all ;;
+	1)
+		# Out of the boot's way. The program runs with the files on the card
+		# until this finishes, and writes through the links afterwards.
+		log "$MTD carries no ext4, formatting detached"
+		(
+			mke2fs -q -t ext4 -b 4096 -L persist -m 0 "$MTD" || {
+				log "mke2fs failed on $MTD"
+				exit 1
+			}
+			mount_all
+		) </dev/null >/dev/null 2>&1 &
+		;;
+	*)
+		log "$MTD unreadable, left alone"
+		unlink
+		return 1
+		;;
+	esac
+}
+
+case "$1" in
+	start) start ;;
+	stop|restart|reload) ;;
+	*)
+		echo "Usage: $0 {start}"
+		exit 1
+		;;
+esac
