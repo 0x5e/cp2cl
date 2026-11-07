@@ -1,5 +1,5 @@
-//! `/etc/cp2cl/config.json`: everything the operator tunes, read once at startup
-//! and written back when the page saves a screen. What the file holds is
+//! `config.json`: everything the operator tunes, read once at startup and written
+//! back when the page saves a screen. What the file holds is
 //! [`crate::config::Config`], and this is the reading and writing of it.
 //!
 //! Every field may be absent, and an absent one is the default: a machine with
@@ -103,7 +103,8 @@ pub fn log_filter() -> LevelFilter {
     load().log_level
 }
 
-/// The file, replaced in one step.
+/// The file, written where it stands: in place rather than beside and renamed,
+/// which is what lets it be a link onto the board's volume.
 pub fn save(config: &Config) -> std::io::Result<()> {
     let path = path();
     if let Some(dir) = path.parent() {
@@ -111,10 +112,7 @@ pub fn save(config: &Config) -> std::io::Result<()> {
     }
     let mut text = serde_json::to_string_pretty(&json(config))?;
     text.push('\n');
-    // Beside it rather than in `/tmp`: a rename across filesystems is a copy.
-    let staged = path.with_extension("json.tmp");
-    std::fs::write(&staged, text)?;
-    std::fs::rename(&staged, &path)
+    std::fs::write(&path, text)
 }
 
 /// The file with the page's screen in it. The page edits a size and a rate and

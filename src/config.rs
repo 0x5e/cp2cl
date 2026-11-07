@@ -1,4 +1,4 @@
-//! Everything the operator can tune, read once from `/etc/cp2cl/config.json`.
+//! Everything the operator can tune, read once from `config.json`.
 //!
 //! Nothing here is required: the defaults are enough for both links — the cable
 //! and Bluetooth — to wait for a phone and hand what it sends to whatever head
@@ -15,18 +15,10 @@ use std::path::{Path, PathBuf};
 
 use tracing::level_filters::LevelFilter;
 
-/// Where the program keeps what it has to remember — the identity it presents to
-/// the phone now, its settings once there are any — and where it reads the
-/// credentials the firmware installs beside them.
+/// What the program reads and writes: the credentials the firmware installs, and
+/// the two files a board with a volume links onto it.
 ///
-/// `/etc/cp2cl` rather than a home directory: this board has no user with one,
-/// and `/etc` is on the writable root, so what lands here outlives the boot — a
-/// new identity every ignition reads as a new accessory to the phone.
-///
-/// The credentials are files here rather than bytes in the binary, and this is
-/// the only place the path is written down: everything that reads them asks for
-/// one by name with `data_file`, and the firmware installs them into this same
-/// directory — see `buildroot/package/cp2cl`.
+/// `/etc/cp2cl` rather than a home directory: this board has no user with one.
 pub const DATA_DIR: &str = "/etc/cp2cl";
 
 /// One of the files that live in `DATA_DIR`, by its bare name.
@@ -107,8 +99,8 @@ fn vendor_from_compatible(raw: &[u8]) -> Option<String> {
 /// Everything the operator can tune, and nothing that is not a choice.
 ///
 /// The field names are the file's: a field is `log_level`, `wifi_iface`,
-/// `bt_adapter` or `addr` in `/etc/cp2cl/config.json`, and absent from it is
-/// what `Default` says.
+/// `bt_adapter` or `addr` in `config.json`, and absent from it is what `Default`
+/// says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// The interface the access point runs on: whose link-local address the
