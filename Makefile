@@ -260,25 +260,6 @@ else
 # needs; the image is a tree, a toolchain and a kernel on every build.
 all: app firmware
 
-# The submodule is the upstream tag, so whatever this board needs that the tag
-# does not carry arrives as a patch in vendor/patches/, applied into the
-# submodule's worktree. `--check --reverse` first: a second `make` finds them
-# already on and does nothing, and one that no longer applies stops the build
-# instead of quietly building a tree without it.
-PATCHES := $(sort $(wildcard vendor/patches/*.patch))
-
-patched:
-	@for p in $(PATCHES); do \
-	  if git -C vendor/LIVI apply --check --reverse "$(CURDIR)/$$p" 2>/dev/null; then \
-	    :; \
-	  elif git -C vendor/LIVI apply "$(CURDIR)/$$p"; then \
-	    echo "patched $$p"; \
-	  else \
-	    echo "$$p no longer applies to vendor/LIVI" >&2; \
-	    exit 1; \
-	  fi; \
-	done
-
 test: patched
 	$(RUN) cargo test --workspace
 
@@ -345,6 +326,31 @@ app: patched
 	mkdir -p $(DIST)/app
 	install -m 0755 target/$(TARGET)/release/cp2cl $(APP)
 endif
+
+# The submodule is the upstream tag, so whatever this tree needs that the tag
+# does not carry arrives as a patch in vendor/patches/, applied into the
+# submodule's worktree. `--check --reverse` first: a second `make` finds them
+# already on and does nothing, and one that no longer applies stops the build
+# instead of quietly building a tree without it.
+#
+# Outside the board branch, like `app` below: the patches are what the program
+# compiles against, and a program is built for an architecture, not a board.
+# Inside it, this rule did not exist for `make app` at all — and `.PHONY` above
+# made that a dependency make called satisfied, so the compile went ahead on an
+# unpatched tree.
+PATCHES := $(sort $(wildcard vendor/patches/*.patch))
+
+patched:
+	@for p in $(PATCHES); do \
+	  if git -C vendor/LIVI apply --check --reverse "$(CURDIR)/$$p" 2>/dev/null; then \
+	    :; \
+	  elif git -C vendor/LIVI apply "$(CURDIR)/$$p"; then \
+	    echo "patched $$p"; \
+	  else \
+	    echo "$$p no longer applies to vendor/LIVI" >&2; \
+	    exit 1; \
+	  fi; \
+	done
 
 # Both images a build runs in, and neither belongs to a board: they are built
 # once per machine, and again only when `docker/` changes. Nothing depends on
