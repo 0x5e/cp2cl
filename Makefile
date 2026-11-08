@@ -6,15 +6,25 @@
 # the cargo cache, so only the first build downloads anything.
 IMAGE  := cp2cl-builder
 
-# Which firmware to build: `nanopi-duo2`, `orangepi-zero2w`,
-# `msm8916-ufi001c`, or `all` for every board in turn. It decides the Rust
-# target — the NanoPi Duo2 is armv7 hard-float, the other two are aarch64 — and
-# the Buildroot defconfig a build starts from.
+# Which image to build: `nanopi-duo2`, `orangepi-zero2w`, `msm8916-ufi001c`,
+# or `all` for every board in turn. It decides the Buildroot defconfig a build
+# starts from.
 BOARDS := nanopi-duo2 orangepi-zero2w msm8916-ufi001c
 BOARD  ?= all
 
+# Which program to build: `aarch64`, `armv7`, or `all` for both in turn. A
+# program is the architecture's, not the board's — the Zero 2W and the UFI001C
+# run the same binary — so `make app` decides on this rather than on BOARD, and
+# a board that was named sets it to its own instead of being asked twice.
+ARCHS := aarch64 armv7
+ARCH  ?= all
+
 ifeq ($(filter $(BOARD),$(BOARDS) all),)
 $(error BOARD is '$(BOARD)'; it is one of: $(BOARDS) all)
+endif
+
+ifeq ($(filter $(ARCH),$(ARCHS) all),)
+$(error ARCH is '$(ARCH)'; it is one of: $(ARCHS) all)
 endif
 
 # The underscore spelling: Buildroot names its defconfigs with one, and the build
@@ -23,20 +33,36 @@ endif
 # built again from an empty download cache.
 BOARD_CFG := $(subst -,_,$(BOARD))
 
-# The architecture is the board's, not the build's: written out per board, and
-# not as "whatever is not the odd one out is armv7", which was a rule that held
-# only while there were two boards.
+# The architecture a board runs is written out per board, and not as "whatever
+# is not the odd one out is armv7", which was a rule that held only while there
+# were two boards.
 BOARD_ARCH_nanopi-duo2     := armv7
 BOARD_ARCH_orangepi-zero2w := aarch64
 BOARD_ARCH_msm8916-ufi001c := aarch64
 
-ifeq ($(BOARD_ARCH_$(BOARD)),aarch64)
-TARGET    := aarch64-unknown-linux-musl
-CMAKE_TF  := /opt/aarch64-toolchain.cmake
-else
-TARGET    := armv7-unknown-linux-musleabihf
-CMAKE_TF  := /opt/armv7-toolchain.cmake
+# A named board carries one architecture, so that is the one being built — the
+# image of a board holding the other board's program is an image that does not
+# run. So `make firmware BOARD=...` needs only the board, and naming both is
+# allowed only when they agree.
+ifneq ($(filter $(BOARD),$(BOARDS)),)
+ifneq ($(ARCH),all)
+ifneq ($(ARCH),$(BOARD_ARCH_$(BOARD)))
+$(error ARCH is '$(ARCH)' but $(BOARD) is $(BOARD_ARCH_$(BOARD)))
 endif
+endif
+ARCH := $(BOARD_ARCH_$(BOARD))
+endif
+
+# The target belongs to the architecture alone, so `make app ARCH=aarch64` and
+# `make firmware BOARD=orangepi-zero2w` name the same compiler. Empty while the
+# architecture is still `all`: only the rule that recurses on it runs then, and
+# that rule hands every build one.
+TARGET_aarch64   := aarch64-unknown-linux-musl
+TARGET_armv7     := armv7-unknown-linux-musleabihf
+CMAKE_TF_aarch64 := /opt/aarch64-toolchain.cmake
+CMAKE_TF_armv7   := /opt/armv7-toolchain.cmake
+TARGET   := $(TARGET_$(ARCH))
+CMAKE_TF := $(CMAKE_TF_$(ARCH))
 
 # The CarLife key is handed to the compiler rather than to the program: it is
 # written into the binary at build time, out of the environment, so what is set
@@ -218,8 +244,12 @@ BR_RELEASE := { [ -e /build/.br-$(BR_VERSION) ] || { \
 # rather than a rule that builds both in one pass, because the Rust target and
 # the build volume are read once, when this makefile is, and one pass over two
 # boards would carry the first board's values into the second.
+#
+# `app` is not in this list: a program belongs to an architecture, and two
+# boards run the same one. It recurses on ARCH below instead, so `make app`
+# builds each architecture once rather than each board's program.
 ifeq ($(BOARD),all)
-all app test firmware:
+all test firmware:
 	@for b in $(BOARDS); do \
 		$(MAKE) --no-print-directory BOARD=$$b $@ || exit 1; \
 	done
@@ -248,15 +278,6 @@ patched:
 	    exit 1; \
 	  fi; \
 	done
-
-# The program, statically linked, staged as dist/app/cp2cl-<os>-<arch>, where
-# buildroot/package/cp2cl reads it from. Nothing else from the checkout is
-# staged: a `local` site over the repository root would drag target/ through
-# rsync on every build.
-app: patched
-	$(RUN) cargo build --release --target $(TARGET)
-	mkdir -p $(DIST)/app
-	install -m 0755 target/$(TARGET)/release/cp2cl $(APP)
 
 test: patched
 	$(RUN) cargo test --workspace
@@ -307,6 +328,26 @@ firmware: app buildroot-image
 		$(BR_IMAGE) sh -c 'cat /build/images/$(PACKED) > /out/firmware/$(notdir $(FW))'
 	@echo "image: $(FW)"
 
+endif
+
+# The program, statically linked, staged as dist/app/cp2cl-<os>-<arch>, where
+# buildroot/package/cp2cl reads it from. Nothing else from the checkout is
+# staged: a `local` site over the repository root would drag target/ through
+# rsync on every build.
+#
+# Two architectures are two targets and two products, and one make would carry
+# the first one's values into the second — so `ARCH=all`, the default, is each
+# of them in turn.
+ifeq ($(ARCH),all)
+app:
+	@for a in $(ARCHS); do \
+		$(MAKE) --no-print-directory ARCH=$$a app || exit 1; \
+	done
+else
+app: patched
+	$(RUN) cargo build --release --target $(TARGET)
+	mkdir -p $(DIST)/app
+	install -m 0755 target/$(TARGET)/release/cp2cl $(APP)
 endif
 
 # Once per machine, and again only when the Dockerfile changes.

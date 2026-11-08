@@ -1,0 +1,159 @@
+# Every push builds the program and every board's image; a tag that names a
+# version also publishes them as a release.
+#
+# The two builds need credentials that are not in the tree, and the products
+# carry them — the MFi pair into the image's /etc/cp2cl/, the CarLife key into
+# the binary at compile time — which is what makes them worth building here at
+# all. They are repository secrets and they are read by this workflow only.
+name: build
+
+on:
+  push:
+    branches: [main, develop]
+    # `v*.*.*` and nothing looser: the tag is what `build.rs` names the build
+    # after, and what the release is titled. A tag that is not a version would
+    # publish an image called after it.
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+# A push and the tag on its own commit are two runs, and the tag's is the one
+# that is published: a later push cancels its branch's run, never a tag's.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+jobs:
+  # The program once per architecture: `make app` on its own builds both in
+  # turn, and one job each is the same two builds side by side instead.
+  app:
+    name: app ${{ matrix.arch }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [aarch64, armv7]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `build.rs` reads the tag on the commit and the commit itself, and
+          # says `-dirty` when the tree holds anything the commit does not. A
+          # shallow clone can answer neither.
+          fetch-depth: 0
+          submodules: recursive
+      - name: Credentials
+        env:
+          MFI_IDENTITY_PK8: ${{ secrets.MFI_IDENTITY_PK8 }}
+          MFI_CERTIFICATE_P7B: ${{ secrets.MFI_CERTIFICATE_P7B }}
+        run: |
+          umask 077
+          install -d -m 0700 authentication
+          printf '%s' "$MFI_IDENTITY_PK8" | base64 -d > authentication/identity.pk8
+          printf '%s' "$MFI_CERTIFICATE_P7B" | base64 -d > authentication/certificate.p7b
+          # `cp2cl.mk` installs whichever file is there and says nothing about
+          # the ones that are not, so a build without them succeeds and
+          # produces an image whose CarPlay half cannot authenticate.
+          test -s authentication/identity.pk8
+          test -s authentication/certificate.p7b
+      - name: Build
+        env:
+          # Read by `make` out of the environment and handed to the compiler by
+          # `option_env!`, so it is in the binary and not on the command line.
+          CARLIFE_PRIVATE_KEY: ${{ secrets.CARLIFE_PRIVATE_KEY }}
+        run: |
+          test -n "$CARLIFE_PRIVATE_KEY"
+          make app ARCH=${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ matrix.arch }}
+          path: dist/app/cp2cl-linux-${{ matrix.arch }}
+          if-no-files-found: error
+          # Without one, the archive is a directory holding a single file.
+          compression-level: 0
+
+  # One image per board, each on its own runner: the hosted one has about
+  # fourteen gigabytes free and a board's build is several gigabytes of tree,
+  # toolchain and kernel. They are not the same image under different names —
+  # aarch64 and armv7 are two targets, and the UFI001C is a partition rather
+  # than a card.
+  firmware:
+    name: firmware ${{ matrix.board }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        board: [nanopi-duo2, orangepi-zero2w, msm8916-ufi001c]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - name: Free disk space
+        # What the runner image carries and this build does not use. About
+        # twenty gigabytes, which is the difference between a build that
+        # finishes and one that stops halfway through the kernel with ENOSPC.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune -af
+          df -h /
+      - name: Credentials
+        env:
+          MFI_IDENTITY_PK8: ${{ secrets.MFI_IDENTITY_PK8 }}
+          MFI_CERTIFICATE_P7B: ${{ secrets.MFI_CERTIFICATE_P7B }}
+        run: |
+          umask 077
+          install -d -m 0700 authentication
+          printf '%s' "$MFI_IDENTITY_PK8" | base64 -d > authentication/identity.pk8
+          printf '%s' "$MFI_CERTIFICATE_P7B" | base64 -d > authentication/certificate.p7b
+          test -s authentication/identity.pk8
+          test -s authentication/certificate.p7b
+      - name: Build
+        env:
+          CARLIFE_PRIVATE_KEY: ${{ secrets.CARLIFE_PRIVATE_KEY }}
+        run: |
+          test -n "$CARLIFE_PRIVATE_KEY"
+          make firmware BOARD=${{ matrix.board }}
+      - uses: actions/upload-artifact@v4
+        with:
+          # The name carries the version, the commit and the board, and is
+          # read from the file rather than spelled again here.
+          name: firmware-${{ matrix.board }}
+          path: dist/firmware/*.img
+          if-no-files-found: error
+          compression-level: 0
+
+  # The tag's own run publishes what the two builds above produced, and nothing
+  # else: every board's image and both binaries, under the names they were
+  # built with.
+  release:
+    name: release ${{ github.ref_name }}
+    needs: [app, firmware]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: files
+          # The five artifacts hold files with five different names, so they
+          # go into one directory instead of five.
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l files
+          # A run re-run over a tag that already has a release replaces its
+          # assets rather than failing on the one that exists.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" files/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" files/* \
+              --title "$GITHUB_REF_NAME" --generate-notes
+          fi
