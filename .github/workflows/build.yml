@@ -58,6 +58,11 @@ jobs:
           # produces an image whose CarPlay half cannot authenticate.
           test -s authentication/identity.pk8
           test -s authentication/certificate.p7b
+      - name: Build the image
+        # Nothing in the makefile builds it as a dependency: it is built once
+        # per machine by hand, and a runner is a machine that has never built
+        # anything. `make app` runs in it and stops at once without it.
+        run: make image
       - name: Build
         env:
           # Read by `make` out of the environment and handed to the compiler by
@@ -74,11 +79,9 @@ jobs:
           # Without one, the archive is a directory holding a single file.
           compression-level: 0
 
-  # One image per board, each on its own runner: the hosted one has about
-  # fourteen gigabytes free and a board's build is several gigabytes of tree,
-  # toolchain and kernel. They are not the same image under different names —
-  # aarch64 and armv7 are two targets, and the UFI001C is a partition rather
-  # than a card.
+  # One image per board, each on its own runner: aarch64 and armv7 are two
+  # targets, and the UFI001C is a partition rather than a card, so no two of
+  # them are the same image under different names.
   firmware:
     name: firmware ${{ matrix.board }}
     runs-on: ubuntu-24.04
@@ -92,15 +95,6 @@ jobs:
         with:
           fetch-depth: 0
           submodules: recursive
-      - name: Free disk space
-        # What the runner image carries and this build does not use. About
-        # twenty gigabytes, which is the difference between a build that
-        # finishes and one that stops halfway through the kernel with ENOSPC.
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
-          sudo docker image prune -af
-          df -h /
       - name: Credentials
         env:
           MFI_IDENTITY_PK8: ${{ secrets.MFI_IDENTITY_PK8 }}
@@ -112,6 +106,10 @@ jobs:
           printf '%s' "$MFI_CERTIFICATE_P7B" | base64 -d > authentication/certificate.p7b
           test -s authentication/identity.pk8
           test -s authentication/certificate.p7b
+      - name: Build the program's image
+        # The one `make firmware` does not build for itself — the buildroot
+        # image is a dependency and this one is not. See the makefile.
+        run: make image
       - name: Build
         env:
           CARLIFE_PRIVATE_KEY: ${{ secrets.CARLIFE_PRIVATE_KEY }}

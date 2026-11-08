@@ -282,10 +282,6 @@ patched:
 test: patched
 	$(RUN) cargo test --workspace
 
-# Once per machine, and again only when `docker/Dockerfile` changes.
-image:
-	docker build -t $(IMAGE) docker/
-
 # One board, out of the names at the top of this file; the defconfig is
 # `configs/<board>_defconfig`, and BOARD=all builds each of them in turn.
 #
@@ -350,7 +346,13 @@ app: patched
 	install -m 0755 target/$(TARGET)/release/cp2cl $(APP)
 endif
 
-# Once per machine, and again only when the Dockerfile changes.
+# Both images a build runs in, and neither belongs to a board: they are built
+# once per machine, and again only when `docker/` changes. Nothing depends on
+# them, because a build that reached for `docker build` on every run would pay
+# for it on every run — a fresh machine, or a runner, asks for them first.
+image:
+	docker build -t $(IMAGE) docker/
+
 buildroot-image:
 	docker build -t $(BR_IMAGE) -f docker/buildroot.Dockerfile docker/
 
