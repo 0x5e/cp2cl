@@ -39,7 +39,7 @@ jobs:
       matrix:
         arch: [aarch64, armv7]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # `build.rs` reads the tag on the commit and the commit itself, and
           # says `-dirty` when the tree holds anything the commit does not. A
@@ -82,7 +82,7 @@ jobs:
         run: |
           test -n "$CARLIFE_PRIVATE_KEY"
           make app ARCH=${{ matrix.arch }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: app-${{ matrix.arch }}
           path: dist/app/cp2cl-linux-${{ matrix.arch }}
@@ -102,7 +102,7 @@ jobs:
       matrix:
         board: [nanopi-duo2, orangepi-zero2w, msm8916-ufi001c]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           submodules: recursive
@@ -122,7 +122,7 @@ jobs:
       # back into it around the build, which is what lets the cache between runs
       # hold them; the tree itself is thirteen gigabytes and is rebuilt.
       - name: Restore the download cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .buildroot-dl
           # An entry is written once and never rewritten, so the key names the
@@ -171,7 +171,7 @@ jobs:
             -e UID_GID="$(id -u):$(id -g)" cp2cl-buildroot \
             sh -c 'cp -a /build/dl/. /cache/ 2>/dev/null; chown -R "$UID_GID" /cache'
           du -sh .buildroot-dl
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           # The name carries the version, the commit and the board, and is
           # read from the file rather than spelled again here.
@@ -191,7 +191,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: files
           # The five artifacts hold files with five different names, so they
