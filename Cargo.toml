@@ -17,7 +17,7 @@ exclude = ["vendor"]
 resolver = "2"
 
 [workspace.package]
-version = "0.15.0"
+version = "0.16.0"
 
 # The LIVI crates come from the `vendor/LIVI` submodule, pinned to the
 # `feature/cp2cl-10.1` branch. LIVI's repository root is an app; its Rust lives
