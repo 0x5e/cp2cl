@@ -21,7 +21,10 @@ authentication/
 .workbuddy-ai/
 
 # The firmware image's inputs and outputs. The external tree under buildroot/ is
-# source and is tracked; what Buildroot downloads and builds is not.
+# source and is tracked; what Buildroot downloads and builds is not. The last one
+# is not a build product at all: it is where a runner stages the download cache
+# it carries between runs, and nothing on this machine writes there.
 buildroot/output/
 buildroot/dl/
+.buildroot-dl/
 dist/

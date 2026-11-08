@@ -106,16 +106,56 @@ jobs:
           printf '%s' "$MFI_CERTIFICATE_P7B" | base64 -d > authentication/certificate.p7b
           test -s authentication/identity.pk8
           test -s authentication/certificate.p7b
-      - name: Build the program's image
-        # The one `make firmware` does not build for itself — the buildroot
-        # image is a dependency and this one is not. See the makefile.
-        run: make image
+      # Buildroot's downloads live in the build volume on a machine, and a runner
+      # has no volume to keep anything in. They are carried out of the tree and
+      # back into it around the build, which is what lets the cache between runs
+      # hold them; the tree itself is thirteen gigabytes and is rebuilt.
+      - name: Restore the download cache
+        uses: actions/cache@v4
+        with:
+          path: .buildroot-dl
+          # An entry is written once and never rewritten, so the key names the
+          # run and the prefix finds the newest one. The prefix does not name a
+          # board: the three download nearly the same set of packages.
+          key: buildroot-dl-${{ matrix.board }}-${{ github.run_id }}
+          restore-keys: |
+            buildroot-dl-${{ matrix.board }}-
+            buildroot-dl-
+      - name: Build the images
+        # `make firmware` builds the buildroot image itself as a dependency; it
+        # is asked for here because the two steps below run inside it.
+        run: |
+          make image
+          make buildroot-image
+      - name: Fill the download cache
+        # Handed over to uid 1000, which is the uid the buildroot image creates
+        # for the build: a directory root made is one Buildroot cannot write to.
+        run: |
+          board='${{ matrix.board }}'
+          vol="cp2cl-buildroot-out-${board//-/_}"
+          mkdir -p .buildroot-dl
+          docker volume create "$vol" >/dev/null
+          docker run --rm -u 0:0 -v "$vol":/build -v "$PWD/.buildroot-dl":/cache \
+            cp2cl-buildroot sh -c 'mkdir -p /build/dl && cp -a /cache/. /build/dl/ \
+              && chown 1000:1000 /build/dl'
       - name: Build
         env:
           CARLIFE_PRIVATE_KEY: ${{ secrets.CARLIFE_PRIVATE_KEY }}
         run: |
           test -n "$CARLIFE_PRIVATE_KEY"
           make firmware BOARD=${{ matrix.board }}
+      - name: Keep the download cache
+        # `always`: a build that stopped halfway downloaded what it got to, and
+        # the next run should not fetch it again.
+        if: always()
+        run: |
+          board='${{ matrix.board }}'
+          vol="cp2cl-buildroot-out-${board//-/_}"
+          docker volume create "$vol" >/dev/null
+          docker run --rm -u 0:0 -v "$vol":/build -v "$PWD/.buildroot-dl":/cache \
+            -e UID_GID="$(id -u):$(id -g)" cp2cl-buildroot \
+            sh -c 'cp -a /build/dl/. /cache/ 2>/dev/null; chown -R "$UID_GID" /cache'
+          du -sh .buildroot-dl
       - uses: actions/upload-artifact@v4
         with:
           # The name carries the version, the commit and the board, and is
