@@ -94,6 +94,7 @@ MFi证书（`certificate.p7b`）、密钥（`identity.pk8`）文件可以在构�
 - orangepi-zero2w 3/3/12 ms
 
 结论：2.4GHz网卡延迟跳动过大，音乐界面勉强够用，导航页来回拖动延迟会越来越高。建议选择5GHz网卡的设备。
+
 设备选择建议参考：[DashPlay - 硬件与实测](https://github.com/yizhixiaoheigou/DashPlay/blob/main/README.md#硬件与实测)
 
 ## 调试工具
