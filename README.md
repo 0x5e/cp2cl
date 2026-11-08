@@ -4,6 +4,8 @@
 
 CarPlay转CarLife桥接服务，运行于Linux嵌入式设备。
 
+![preview](./screenshots/IMG_7155.png)
+
 ## 背景
 
 本项目主要用于**奔驰MBUX NTG6.0车机**，此车机CarPlay、Android Auto被限制到只能显示半个屏幕（1300x720），而CarLife支持全屏（1920x720）。
@@ -73,7 +75,7 @@ make all
 | `wifi_iface` | `wlan0` | Wi-Fi接口名称 |
 | `bt_adapter` | `hci0` | 蓝牙适配器名称 |
 | `addr` | `0.0.0.0:80` | Web后台监听地址与端口 |
-| `screen` | — | 屏幕自定义参数 |
+| `screen` | — | 屏幕自定义参数：`width`, `height`, `fps` |
 
 例子：
 ```json
