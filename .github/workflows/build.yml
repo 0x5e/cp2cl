@@ -66,6 +66,11 @@ jobs:
         # Built on a machine, not here: it needs musl.cc, which these runners
         # cannot reach. `make image` is that build, and the image is pushed to
         # the registry once per change of `docker/Dockerfile`.
+        #
+        # The package has to be readable with this job's `GITHUB_TOKEN`, which
+        # reaches only a public package or one granted access to this
+        # repository. Neither is true by default for one pushed with a personal
+        # token, and the answer is `denied` — not an empty pull.
         run: |
           docker pull ghcr.io/0x5e/cp2cl-builder:latest
           docker tag ghcr.io/0x5e/cp2cl-builder:latest cp2cl-builder
