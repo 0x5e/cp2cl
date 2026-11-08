@@ -349,7 +349,9 @@ endif
 # Both images a build runs in, and neither belongs to a board: they are built
 # once per machine, and again only when `docker/` changes. Nothing depends on
 # them, because a build that reached for `docker build` on every run would pay
-# for it on every run — a fresh machine, or a runner, asks for them first.
+# for it on every run. `cp2cl-builder` also needs musl.cc, which GitHub's
+# runners cannot reach — there it is pulled from the registry instead, and a
+# change to `docker/Dockerfile` has to be pushed again for them.
 image:
 	docker build -t $(IMAGE) docker/
 

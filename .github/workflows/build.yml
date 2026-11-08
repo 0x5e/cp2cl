@@ -24,6 +24,8 @@ concurrency:
 
 permissions:
   contents: read
+  # For the image the build runs in, which comes from the container registry.
+  packages: read
 
 jobs:
   # The program once per architecture: `make app` on its own builds both in
@@ -58,11 +60,15 @@ jobs:
           # produces an image whose CarPlay half cannot authenticate.
           test -s authentication/identity.pk8
           test -s authentication/certificate.p7b
-      - name: Build the image
-        # Nothing in the makefile builds it as a dependency: it is built once
-        # per machine by hand, and a runner is a machine that has never built
-        # anything. `make app` runs in it and stops at once without it.
-        run: make image
+      - name: Log in to the registry
+        run: echo "${{ github.token }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: The image the build runs in
+        # Built on a machine, not here: it needs musl.cc, which these runners
+        # cannot reach. `make image` is that build, and the image is pushed to
+        # the registry once per change of `docker/Dockerfile`.
+        run: |
+          docker pull ghcr.io/0x5e/cp2cl-builder:latest
+          docker tag ghcr.io/0x5e/cp2cl-builder:latest cp2cl-builder
       - name: Build
         env:
           # Read by `make` out of the environment and handed to the compiler by
@@ -121,11 +127,15 @@ jobs:
           restore-keys: |
             buildroot-dl-${{ matrix.board }}-
             buildroot-dl-
-      - name: Build the images
-        # `make firmware` builds the buildroot image itself as a dependency; it
-        # is asked for here because the two steps below run inside it.
+      - name: Log in to the registry
+        run: echo "${{ github.token }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: The images
+        # The program's comes from the registry — see the app job. The buildroot
+        # one is built: it fetches from GitHub and apt alone, and it is the
+        # makefile's own target, so `make firmware` would build it anyway.
         run: |
-          make image
+          docker pull ghcr.io/0x5e/cp2cl-builder:latest
+          docker tag ghcr.io/0x5e/cp2cl-builder:latest cp2cl-builder
           make buildroot-image
       - name: Fill the download cache
         # Handed over to uid 1000, which is the uid the buildroot image creates
