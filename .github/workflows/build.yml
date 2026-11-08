@@ -191,6 +191,13 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          # `gh release create --generate-notes` describes the range between
+          # this tag and the last one, and it reads that range out of a
+          # checkout: without one it fails with "not a git repository", and a
+          # shallow one knows neither the tags nor the commits between them.
+          fetch-depth: 0
       - uses: actions/download-artifact@v8
         with:
           path: files
