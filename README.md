@@ -1,5 +1,7 @@
 # cp2cl
 
+[![license](https://img.shields.io/github/license/0x5e/cp2cl)](LICENSE) [![build](https://github.com/0x5e/cp2cl/actions/workflows/build.yml/badge.svg)](https://github.com/0x5e/cp2cl/actions/workflows/build.yml) [![release](https://img.shields.io/github/v/release/0x5e/cp2cl)](https://github.com/0x5e/cp2cl/releases/latest) ![arch](https://img.shields.io/badge/arch-aarch64%20%7C%20armv7-informational)
+
 CarPlay转CarLife桥接服务，运行于Linux嵌入式设备。
 
 ## 背景
