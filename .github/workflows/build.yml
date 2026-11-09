@@ -10,18 +10,24 @@ name: build
 
 on:
   push:
-    branches: [main, develop]
+    # Every branch, by name pattern. Naming two branches made the same commit
+    # build twice when one push updated both of them; the commit is what a run
+    # is about, and the concurrency key below is the commit.
+    branches: ["**"]
     # `v*.*.*` and nothing looser: the tag is what `build.rs` names the build
     # after, and what the release is titled. A tag that is not a version would
-    # publish an image called after it.
+    # publish an image called after it. A tag push is matched by this and not by
+    # the branch pattern above.
     tags: ["v*.*.*"]
   workflow_dispatch:
 
-# A push and the tag on its own commit are two runs, and the tag's is the one
-# that is published: a later push cancels its branch's run, never a tag's.
+# Keyed by the commit rather than the branch: one push that moves two refs to
+# the same commit is one build, and the second run cancels the first instead of
+# repeating it. The tag is keyed apart — that is the run that publishes, and
+# cancelling it would cancel a release.
 concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  group: build-${{ github.ref_type }}-${{ github.sha }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' }}
 
 permissions:
   contents: read
