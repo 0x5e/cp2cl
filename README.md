@@ -16,7 +16,6 @@ CarPlay转CarLife桥接服务，运行于Linux嵌入式设备。
 - 纯视频流转发，无编解码
 - 支持有线/无线CarPlay
 - 后台管理页（状态、日志、设置）
-- 开机启动时间优化（30s降至约7s）
 
 ## 支持情况
 ### 软件完成度
@@ -39,10 +38,13 @@ CarPlay转CarLife桥接服务，运行于Linux嵌入式设备。
   - [x] 车速
 - [x] Web后台
 
-### 硬件适配列表（BuildRoot）
-- [x] 随身WiFi-UFI001C
-- [x] NanoPi-Duo2
+### 固件适配列表（BuildRoot）
+- [x] 随身WiFi-UFI001C（很卡，不推荐）
+- [x] NanoPi-Duo2（略卡，不推荐）
 - [x] OrangePi-Zero2W
+
+其他适合的设备参考：[DashPlay - 硬件](https://github.com/yizhixiaoheigou/DashPlay/blob/main/README.md#硬件)
+后续有时间我会尝试适配，欢迎小伙伴帮忙一起测试。
 
 ## 运行环境
 
@@ -53,8 +55,33 @@ CarPlay转CarLife桥接服务，运行于Linux嵌入式设备。
 - WiFi + BLE 网卡（可选，用于无线CarPlay）
 - 存储空间大于128MB
 
-## 构建
+## 使用方式
+### 使用固件（推荐）
+[Github Release](https://github.com/0x5e/cp2cl/releases)可下载对应固件或可执行文件。
+目前板子支持msm8916-ufi001c、nanopi-duo2、orangepi-zero2w。
+可执行文件支持armv7、aarch64。
 
+### 使用安装包（待完善）
+Ubuntu、Debian、OpenWrt安装包暂未提供。
+[Github Release](https://github.com/0x5e/cp2cl/releases)可下载armv7、aarch64可执行文件，需要自行准备启动脚本，安装相关依赖。
+
+依赖列表（待补充）：
+dbus, bluez, hostapd, dnsmasq-base, iw, kmod
+
+## 运行截图
+
+![guide](./screenshots/guide.png)
+![widget](./screenshots/IMG_7151.png)
+![apps](./screenshots/IMG_7155.png)
+
+<p align="left">
+  <img src="./screenshots/status1.png" width="30%" alt="status1">
+  <img src="./screenshots/status2.png" width="30%" alt="status2">
+</p>
+
+## 开发调试
+
+### 编译
 在项目根目录运行：
 
 ```shell
@@ -64,6 +91,10 @@ export CARLIFE_PRIVATE_KEY="MIICdwIBAD..........gHdvNpcqA="
 make all
 ```
 应用和固件产物位于`dist/`目录.
+
+### 调试工具
+
+CarLife车机 - macOS版：[CarLifePort](https://github.com/0x5e/CarLifePort)
 
 ## 配置
 
@@ -90,21 +121,6 @@ make all
 
 MFi证书（`certificate.p7b`）、密钥（`identity.pk8`）文件可以在构建前放置于项目`authentication/`目录下，或是运行前拷贝至配置文件目录。
 
-## 硬件测试数据
-
-以1920x720@30分辨率，停留在正在播放页面5分钟，AirPlay RTT 最小值/平均值/最大值数据如下：
-- msm8916-ufi001c 4/60/1059 ms
-- nanopi-duo2 3/14/183 ms
-- orangepi-zero2w 3/3/12 ms
-
-结论：2.4GHz网卡延迟跳动过大，音乐界面勉强够用，导航页来回拖动延迟会越来越高。建议选择5GHz网卡的设备。
-
-设备选择建议参考：[DashPlay - 硬件与实测](https://github.com/yizhixiaoheigou/DashPlay/blob/main/README.md#硬件与实测)
-
-## 调试工具
-
-CarLife车机 - macOS版：[CarLifePort](https://github.com/0x5e/CarLifePort)
-
 ## 已知问题
 - 初次无线CarPlay配对可能会超时（约15秒），等超时后第二次才能成功配上，暂未找到原因。
 - 方向盘右侧方向键无法完整支持。无论按上下还是左右，MBUX NTG6.0车机都只会发送`KEYCODE_SELECTOR_NEXT`/`KEYCODE_SELECTOR_PREVIOUS`，无法辨别，只能按照滚轮“前/后”进行映射。
@@ -113,6 +129,6 @@ CarLife车机 - macOS版：[CarLifePort](https://github.com/0x5e/CarLifePort)
 参考项目：
 - [LIVI](https://github.com/f-io/LIVI)
 - [MacPlay](https://github.com/Roylyl/MacPlay)
-- [PlayPort](https://github.com/youcci/playport)
+- [playport](https://github.com/youcci/playport)
 
 项目沿用GPL-3.0-or-later。
