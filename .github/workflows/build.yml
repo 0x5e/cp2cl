@@ -1,10 +1,11 @@
-# Every push builds the program and every board's image; a tag that names a
-# version also publishes them as a release.
+# A push builds the program; a tag that names a version builds the images as
+# well and publishes the lot as a release. A branch's run keeps nothing — what
+# it answers is whether the tree still compiles, and nothing it produces is
+# meant to be flashed.
 #
-# The two builds need credentials that are not in the tree, and the products
-# carry them — the MFi pair into the image's /etc/cp2cl/, the CarLife key into
-# the binary at compile time — which is what makes them worth building here at
-# all. They are repository secrets and they are read by this workflow only.
+# The products carry credentials that are not in the tree: the MFi pair into the
+# image's /etc/cp2cl/, the CarLife key into the binary at compile time. They are
+# repository secrets and they are read by this workflow only.
 name: build
 
 on:
@@ -30,6 +31,10 @@ permissions:
 jobs:
   # The program once per architecture: `make app` on its own builds both in
   # turn, and one job each is the same two builds side by side instead.
+  #
+  # The only job a branch's push has. It needs no MFi pair — the program never
+  # reads one, only the image carries it — so nothing but the CarLife key is
+  # handed to this job.
   app:
     name: app ${{ matrix.arch }}
     runs-on: ubuntu-24.04
@@ -46,20 +51,6 @@ jobs:
           # shallow clone can answer neither.
           fetch-depth: 0
           submodules: recursive
-      - name: Credentials
-        env:
-          MFI_IDENTITY_PK8: ${{ secrets.MFI_IDENTITY_PK8 }}
-          MFI_CERTIFICATE_P7B: ${{ secrets.MFI_CERTIFICATE_P7B }}
-        run: |
-          umask 077
-          install -d -m 0700 authentication
-          printf '%s' "$MFI_IDENTITY_PK8" | base64 -d > authentication/identity.pk8
-          printf '%s' "$MFI_CERTIFICATE_P7B" | base64 -d > authentication/certificate.p7b
-          # `cp2cl.mk` installs whichever file is there and says nothing about
-          # the ones that are not, so a build without them succeeds and
-          # produces an image whose CarPlay half cannot authenticate.
-          test -s authentication/identity.pk8
-          test -s authentication/certificate.p7b
       - name: Log in to the registry
         run: echo "${{ github.token }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
       - name: The image the build runs in
@@ -83,6 +74,9 @@ jobs:
           test -n "$CARLIFE_PRIVATE_KEY"
           make app ARCH=${{ matrix.arch }}
       - uses: actions/upload-artifact@v7
+        # Only a tag has anything to publish; a branch's binary was a check
+        # that the tree still compiles, and is left where it was built.
+        if: startsWith(github.ref, 'refs/tags/v')
         with:
           name: app-${{ matrix.arch }}
           path: dist/app/cp2cl-linux-${{ matrix.arch }}
@@ -93,8 +87,12 @@ jobs:
   # One image per board, each on its own runner: aarch64 and armv7 are two
   # targets, and the UFI001C is a partition rather than a card, so no two of
   # them are the same image under different names.
+  #
+  # Only on a tag. Three boards at a couple of hours each is what a release
+  # costs, and a branch's push does not ask for one.
   firmware:
     name: firmware ${{ matrix.board }}
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     strategy:
