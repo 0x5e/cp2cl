@@ -119,14 +119,17 @@ impl StreamSink for ClSink {
                     }
                 }
             }
-            StreamEvent::VideoFrame { data, .. } => {
+            StreamEvent::VideoFrame { data, keyframe } => {
                 let mut access_unit = self
                     .pending
                     .lock()
                     .map(|mut pending| std::mem::take(&mut *pending))
                     .unwrap_or_default();
                 access_unit.extend_from_slice(&data);
-                self.queues.video(access_unit);
+                // Whether a decoder can start here goes with the picture: the
+                // queue is what has to know it, when a picture arrives with no
+                // room left.
+                self.queues.video(access_unit, keyframe);
             }
             // Which of the car's channels a stream feeds is said once, when the
             // stream opens, by the name the phone gave it and by whether it
@@ -338,16 +341,16 @@ mod tests {
     fn a_session_takes_its_queues_empty() {
         let outlet = Outlet::new();
         let sink = sink(&outlet);
-        let rx = outlet.take_video().expect("nothing has taken it");
+        let _video = outlet.take_video().expect("nothing has taken it");
         sink.push(StreamEvent::VideoFrame {
             keyframe: true,
             data: vec![1, 2, 3],
         });
-        outlet.return_video(rx);
+        outlet.return_video();
 
-        let mut next = outlet.take_video().expect("nothing has taken it");
+        let next = outlet.take_video().expect("nothing has taken it");
         assert!(
-            next.try_recv().is_err(),
+            next.try_recv().is_none(),
             "the frame the last session left is not the next one's"
         );
     }

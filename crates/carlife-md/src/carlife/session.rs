@@ -35,6 +35,7 @@ use crate::link::Location;
 use crate::machine::Machine;
 use crate::media::{Media, Navi, Voice};
 use crate::now_playing::{NowPlaying, Track};
+use crate::outlet::{Frame, Video};
 use crate::ports::Ports;
 use crate::press::{Command, TouchContact, PHONE_DROP, PHONE_HOOK_SWITCH, PHONE_MUTE};
 use crate::report::{Geometry, Report, Statistic};
@@ -232,7 +233,12 @@ where
     // keyframe can be asked for at all. It is the sink's own state, watched
     // rather than copied: the stream opens and closes on the other side of the
     // bridge.
-    let (mut video, mut media, mut navi, mut voice, mut playing, phone_screen) =
+    //
+    // The keyframe requests are the video queue's: it drops a picture when it
+    // has no room for one, and what follows that picture cannot be decoded, so
+    // the phone is asked for a new starting point. Watched rather than read
+    // once, because the drops happen on the other side of the bridge too.
+    let (mut video, mut media, mut navi, mut voice, mut playing, phone_screen, mut keyframes) =
         match ports.outlet.take_video() {
             Some(rx) => (
                 Some(rx),
@@ -241,10 +247,11 @@ where
                 ports.outlet.take_voice(),
                 ports.outlet.take_playing(),
                 Some(ports.outlet.streaming()),
+                Some(ports.outlet.keyframe_requests()),
             ),
             None => {
                 tracing::warn!("carlife.video_source_taken action=heartbeat_only");
-                (None, None, None, None, None, None)
+                (None, None, None, None, None, None, None)
             }
         };
 
@@ -344,17 +351,18 @@ where
             // A picture from the CarPlay side, written straight through. It is
             // not put on the tick: the phone's encoder decides how often frames
             // come, and holding them back to a schedule of our own would only
-            // add delay.
-            access_unit = recv_video(&mut video) => match access_unit {
-                Some(access_unit) => {
-                    if let Err(e) = session.send_video(access_unit).await {
-                        break Err(e);
-                    }
+            // add delay. The queue it came from keeps the newest pictures and
+            // drops older ones to do it, so what arrives here is never stale.
+            frame = recv_video(&mut video) => {
+                if let Err(e) = session.send_video(frame).await {
+                    break Err(e);
                 }
-                // The CarPlay side has gone, taking its frames with it. The
-                // heartbeats are what is left to keep the channel alive.
-                None => video = None,
             },
+            // A picture the queue had no room for went, so the ones behind it
+            // cannot be decoded: the phone is asked to start again. The request
+            // is what turns a burst of drops into one, and it is skipped when
+            // there is no stream to ask on.
+            _ = keyframe_requested(&mut keyframes) => session.request_keyframe().await,
             // The phone's sound, on the media channel. Written as it arrives,
             // like the pictures and for the same reason: the phone is what
             // decides when it plays.
@@ -446,8 +454,8 @@ where
     };
 
     reading.abort();
-    if let Some(rx) = video {
-        ports.outlet.return_video(rx);
+    if video.is_some() {
+        ports.outlet.return_video();
     }
     if let Some(rx) = media {
         ports.outlet.return_media(rx);
@@ -584,12 +592,26 @@ fn listed(modules: &[i32]) -> String {
     out
 }
 
-/// The next access unit from the CarPlay side, or never if there is no CarPlay
+/// The next picture from the CarPlay side, or never if there is no CarPlay
 /// side. Waiting on a future that never resolves is what keeps the branch out of
 /// the way without a second code path in the loop.
-async fn recv_video(video: &mut Option<mpsc::Receiver<Vec<u8>>>) -> Option<Vec<u8>> {
+async fn recv_video(video: &mut Option<Arc<Video>>) -> Frame {
     match video {
-        Some(rx) => rx.recv().await,
+        Some(video) => video.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The same, for a request the video queue made when it had to drop a picture.
+/// The counter is watched rather than the drops: two in one burst are one
+/// request, and `request_keyframe` is what decides whether to act on it.
+async fn keyframe_requested(requests: &mut Option<watch::Receiver<u64>>) {
+    match requests {
+        Some(requests) => match requests.changed().await {
+            Ok(()) => {}
+            // Nothing is left to ask through, which is the end of the program.
+            Err(_) => std::future::pending().await,
+        },
         None => std::future::pending().await,
     }
 }
@@ -1708,19 +1730,19 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         }
     }
 
-    /// One access unit from the CarPlay side, on the video channel.
+    /// One picture from the CarPlay side, on the video channel.
     ///
     /// A frame that arrives before the car has started the encoder, or while it
     /// has it paused, is dropped rather than queued: the car is not expecting
     /// pictures then, and one held back would arrive attached to a timestamp
     /// measured from a start that has since been reset.
-    async fn send_video(&mut self, access_unit: Vec<u8>) -> Result<()> {
+    async fn send_video(&mut self, frame: Frame) -> Result<()> {
         let Some(started_at) = self.started_at else {
             return Ok(());
         };
         let timestamp_ms = started_at.elapsed().as_millis() as u32;
         self.channel_touched = Some(Instant::now());
-        self.send_frame(VIDEO_DATA, timestamp_ms, &access_unit).await
+        self.send_frame(VIDEO_DATA, timestamp_ms, &frame.data).await
     }
 
     /// Asks the phone to encode a keyframe now.
@@ -4709,7 +4731,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
             pushing_outlet
                 .sink()
-                .video(vec![0x00, 0x00, 0x00, 0x01, 0x41]);
+                .video(vec![0x00, 0x00, 0x00, 0x01, 0x41], true);
         });
 
         let watched = Watched::default();
@@ -4750,13 +4772,13 @@ mod tests {
             .expect("the session ends cleanly");
         car.await.unwrap();
 
-        // The next session after the car is plugged back in gets receivers that
+        // The next session after the car is plugged back in gets queues that
         // still work, which means the first ones were handed back rather than
         // dropped with the session.
-        let rx = outlet
+        outlet
             .take_video()
             .expect("the video channel was handed back");
-        outlet.return_video(rx);
+        outlet.return_video();
         let rx = outlet
             .take_media()
             .expect("the media channel was handed back");

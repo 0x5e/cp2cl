@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 
-use carlife_md::outlet::Outlet;
+use carlife_md::outlet::{Frame, Outlet};
 use carplay_hu::Geometry;
 
 /// Where the coded streams are, and what their names state:
@@ -80,7 +80,10 @@ pub async fn run(
 
         let showing = guide.as_mut().expect("checked just above");
         tokio::select! {
-            _ = tokio::time::sleep(period) => sink.video(showing.next()),
+            _ = tokio::time::sleep(period) => {
+                let frame = showing.next();
+                sink.video(frame.data, frame.keyframe);
+            }
             _ = waited(&mut session, &mut screen, &mut open) => {}
         }
     }
@@ -108,21 +111,25 @@ async fn waited(
 /// frame. Looping it is what keeps the picture up: a guide that ran out would
 /// leave the car with nothing to show.
 struct Guide {
-    units: Vec<Vec<u8>>,
+    units: Vec<Frame>,
     next: usize,
 }
 
 impl Guide {
     /// A guide that cycles through `units`. Nothing to show is no guide.
-    fn cycle(units: Vec<Vec<u8>>) -> Option<Self> {
+    fn cycle(units: Vec<Frame>) -> Option<Self> {
         (!units.is_empty()).then_some(Self { units, next: 0 })
     }
 
     /// The next frame, which is the first again once the file has run out.
-    fn next(&mut self) -> Vec<u8> {
-        let unit = self.units[self.next].clone();
+    fn next(&mut self) -> Frame {
+        let unit = &self.units[self.next];
+        let frame = Frame {
+            data: unit.data.clone(),
+            keyframe: unit.keyframe,
+        };
         self.next = (self.next + 1) % self.units.len();
-        unit
+        frame
     }
 }
 
@@ -179,7 +186,7 @@ fn stated(name: &str) -> Option<(u32, u32)> {
 ///
 /// Anything ahead of the first start code is dropped, and a stream with no start
 /// code in it has no access units.
-fn access_units(bytes: &[u8]) -> Vec<Vec<u8>> {
+fn access_units(bytes: &[u8]) -> Vec<Frame> {
     // Where each NAL begins and what kind it is; the type is the low five bits
     // of the byte after the start code, which is the whole of a NAL header.
     let mut nals: Vec<(usize, u8)> = Vec::new();
@@ -222,11 +229,22 @@ fn access_units(bytes: &[u8]) -> Vec<Vec<u8>> {
         }
     }
 
-    let mut bounds: Vec<usize> = starts.iter().map(|&index| nals[index].0).collect();
-    bounds.push(bytes.len());
-    bounds
-        .windows(2)
-        .map(|unit| bytes[unit[0]..unit[1]].to_vec())
+    starts
+        .iter()
+        .enumerate()
+        .map(|(index, &first)| {
+            let next = starts.get(index + 1).copied();
+            let end = next.map_or(bytes.len(), |next| nals[next].0);
+            // A picture carrying an IDR slice is one a decoder can start at,
+            // and the stream under `assets/guide/` opens with one.
+            let keyframe = nals[first..next.unwrap_or(nals.len())]
+                .iter()
+                .any(|&(_, kind)| kind == 5);
+            Frame {
+                data: bytes[nals[first].0..end].to_vec(),
+                keyframe,
+            }
+        })
         .collect()
 }
 
@@ -260,9 +278,19 @@ mod tests {
 
     #[test]
     fn the_file_starts_over_at_the_end() {
-        let mut guide = Guide::cycle(vec![b"one".to_vec(), b"two".to_vec()]).expect("two frames");
+        let frames = vec![
+            Frame {
+                data: b"one".to_vec(),
+                keyframe: true,
+            },
+            Frame {
+                data: b"two".to_vec(),
+                keyframe: false,
+            },
+        ];
+        let mut guide = Guide::cycle(frames).expect("two frames");
         for expected in [&b"one"[..], b"two", b"one", b"two"] {
-            assert_eq!(guide.next(), expected);
+            assert_eq!(guide.next().data, expected);
         }
     }
 
@@ -285,16 +313,19 @@ mod tests {
         let units = access_units(&stream);
         assert_eq!(units.len(), 3, "one unit per picture");
         assert_eq!(
-            units[0],
+            units[0].data,
             [0, 0, 0, 1, 0x67, 0, 0, 0, 1, 0x68, 0, 0, 0, 1, 0x65],
             "the first picture keeps the parameter sets in front of it"
         );
-        assert_eq!(units[1], [0, 0, 1, 0x41], "a picture on its own");
+        assert!(units[0].keyframe, "it is the one an IDR slice is in");
+        assert_eq!(units[1].data, [0, 0, 1, 0x41], "a picture on its own");
+        assert!(!units[1].keyframe);
         assert_eq!(
-            units[2],
+            units[2].data,
             [0, 0, 0, 1, 0x67, 0, 0, 0, 1, 0x68, 0, 0, 0, 1, 0x41],
             "a repeat of the parameter sets opens the unit, not closes it"
         );
+        assert!(!units[2].keyframe, "parameter sets are not a keyframe");
 
         // One picture in a file is one access unit; nothing in a file is none.
         assert_eq!(access_units(&[0, 0, 0, 1, 0x65, 0xaa]).len(), 1);
@@ -318,7 +349,7 @@ mod tests {
     #[tokio::test]
     async fn the_queue_is_fed_until_the_phone_has_a_picture_of_its_own() {
         let outlet = Arc::new(Outlet::new());
-        let mut video = outlet.take_video().expect("nothing has taken it");
+        let video = outlet.take_video().expect("nothing has taken it");
         let (session, session_rx) = watch::channel(true);
         let (screen, screen_rx) = watch::channel(Some(Geometry {
             width: 1280,
@@ -330,23 +361,23 @@ mod tests {
 
         // A keyframe first, then the pictures after it at the rate the car
         // named: one per frame's worth of time, not one per second.
-        let first = frame(&mut video).await;
+        let first = frame(&video).await;
         assert_eq!(opening(&first), 7, "a picture opens with its SPS");
 
         let asking = tokio::time::Instant::now();
-        let second = frame(&mut video).await;
+        let second = frame(&video).await;
         assert!(asking.elapsed() < Duration::from_millis(500));
         assert_eq!(opening(&second), 1, "a picture after the keyframe, not another");
 
         // The phone's own pictures are what the channel carries from now on.
         outlet.sink().stream(true);
-        while video.try_recv().is_ok() {}
+        while video.try_recv().is_some() {}
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(video.try_recv().is_err(), "the guide has stood down");
+        assert!(video.try_recv().is_none(), "the guide has stood down");
 
         // And it is back once the stream closes again.
         outlet.sink().stream(false);
-        let again = frame(&mut video).await;
+        let again = frame(&video).await;
         assert!(matches!(opening(&again), 1 | 5 | 7), "a picture of the guide");
 
         task.abort();
@@ -355,11 +386,11 @@ mod tests {
 
     /// The next frame on the queue, which arrives within a frame's worth of
     /// time given the rate the test names.
-    async fn frame(video: &mut tokio::sync::mpsc::Receiver<Vec<u8>>) -> Vec<u8> {
+    async fn frame(video: &carlife_md::outlet::Video) -> Vec<u8> {
         tokio::time::timeout(Duration::from_secs(1), video.recv())
             .await
             .expect("a frame in time")
-            .expect("a frame")
+            .data
     }
 
     /// The kind of the first NAL in a picture, whatever length its start code is.
