@@ -10,6 +10,7 @@
 //! * this program, which owns the board — its settings, its lights, its page —
 //!   and is what the two halves know of each other.
 
+mod ap;
 mod artwork;
 mod assets;
 mod button;
@@ -257,6 +258,12 @@ async fn main() -> Result<()> {
         bt_address: config::bt_address(&cfg.bt_adapter),
         data_dir: data_dir.clone(),
     });
+
+    // What the access point says about the phones on it: associated, handshake
+    // done, gone. Nothing acts on it — it is what puts the phone's arrival on
+    // Wi-Fi in the same timeline as everything else, and that stretch is the
+    // longest one in a session's first seconds with no other line in it.
+    tokio::spawn(ap::run(cfg.wifi_iface.clone()));
 
     // Whether the CarPlay half is open for the phone at all. It starts shut and
     // the car's session is the only thing that opens it: nothing is published
