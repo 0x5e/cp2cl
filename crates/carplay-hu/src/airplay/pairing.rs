@@ -108,13 +108,24 @@ impl Pairings {
         std::fs::create_dir_all(dir)?;
         let path = dir.join("pairings.json");
 
+        // Why a store was not used is what tells the two failures apart: one
+        // that was never written is a first boot or a lost volume, and one that
+        // was written and could not be read is damage. Both cost the phone a
+        // pairing, because the identity they take with them is the one the
+        // phone knows this accessory by.
+        let mut reason = "absent";
         if let Ok(text) = std::fs::read_to_string(&path) {
+            reason = "unusable";
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
                 let id = v["accessory_id"].as_str().unwrap_or("").to_string();
                 if let Some(seed) = v["seed"].as_str().and_then(|s| hex::decode(s).ok()) {
                     if seed.len() == 32 && !id.is_empty() {
                         let mut arr = [0u8; 32];
                         arr.copy_from_slice(&seed);
+                        tracing::info!(
+                            "carplay.pairings state=loaded path={} accessory_id={id}",
+                            path.display()
+                        );
                         return Ok(Self {
                             path,
                             accessory_id: id,
@@ -134,6 +145,14 @@ impl Pairings {
             accessory_id: acc,
             identity,
         };
+        // A new identity is a different accessory as far as every phone that
+        // has paired with this one is concerned, so this is the line that
+        // explains a phone going through pair-setup when it should not have to.
+        tracing::info!(
+            "carplay.pairings state=created reason={reason} path={} accessory_id={}",
+            s.path.display(),
+            s.accessory_id
+        );
         s.save()?;
         Ok(s)
     }
@@ -383,8 +402,11 @@ impl PairSetup {
         let sealed = seal(&sub_key, &nonce_label("PS-Msg06"), &inner, &[])
             .map_err(|_| String::from("could not seal PS-Msg06"))?;
         tracing::info!(
-            "carplay.pairing.setup step=5 result=paired controller={:?}",
-            String::from_utf8_lossy(&tlv_get(&sub, TYPE_IDENTIFIER).unwrap_or_default())
+            "carplay.pairing.setup step=5 result=paired controller={:?} controller_len={} \
+             accessory={}",
+            String::from_utf8_lossy(&tlv_get(&sub, TYPE_IDENTIFIER).unwrap_or_default()),
+            ctrl_id.len(),
+            pairings.accessory_id
         );
         Ok(tlv_encode(&vec![
             (TYPE_STATE, vec![6]),
@@ -518,7 +540,6 @@ impl PairVerify {
                 ]))
             }
             3 => {
-                tracing::info!("carplay.pairing.verify step=3 result=verified");
                 let eph = self.eph.as_ref().ok_or("M3 before M1")?;
                 let shared: [u8; 32] = self.shared.ok_or("no shared secret")?.shared;
                 let _ = eph;
@@ -533,7 +554,21 @@ impl PairVerify {
                     .map_err(|_| String::from("could not open PV-Msg03"))?;
                 let sub = tlv_parse(&plain);
                 let ctrl_id = tlv_get(&sub, TYPE_IDENTIFIER).ok_or("M3 without identifier")?;
-                let _ = ctrl_id;
+                // Said rather than checked: what arrived is not verified, and
+                // there is no stored controller key to verify it against. The
+                // three fields are what any later decision needs — the id is
+                // whether the same controller comes back every session, and
+                // `ltpk` is whether the phone even sends a key that could be
+                // checked. A false there is why verifying would first need the
+                // controller pairing written down at pair-setup time.
+                tracing::info!(
+                    "carplay.pairing.verify step=3 result=verified controller={:?} id_len={} \
+                     signed={} ltpk={}",
+                    String::from_utf8_lossy(&ctrl_id),
+                    ctrl_id.len(),
+                    tlv_get(&sub, TYPE_SIGNATURE).is_some(),
+                    tlv_get(&sub, TYPE_PUBLIC_KEY).is_some()
+                );
 
                 self.verified = true;
                 Ok(tlv_encode(&vec![(TYPE_STATE, vec![4])]))
