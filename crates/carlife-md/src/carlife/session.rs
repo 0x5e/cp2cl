@@ -2048,8 +2048,8 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // it: a file transfer names no song, so there is no later
                 // moment at which the two could be told apart, and a new song
                 // that arrives without a picture would otherwise wear the last
-                // one's. It goes down here, and the song goes out with the
-                // placeholder until its own cover arrives.
+                // one's. It goes down here, and the song goes out without a
+                // cover until its own arrives.
                 let started = update.duration_s.is_some();
                 let before = self.track.clone();
                 self.track.merge(update);
@@ -2131,13 +2131,14 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
                 // A file transfer that carried nothing is the phone saying this
                 // song has no picture. It is not ignored: it takes the place of
                 // the cover that is held — which is what puts the last song's
-                // down — and the message that follows carries the placeholder
-                // instead, as a phone with a cover to draw would have sent one.
+                // down — and the message that follows carries the field empty,
+                // which is what the phone sends for a song it has no picture
+                // for.
                 if self.art.as_deref() == Some(image.as_slice()) {
                     return Ok(());
                 }
                 if image.is_empty() {
-                    tracing::debug!("carlife.media_cover_empty action=send_placeholder");
+                    tracing::debug!("carlife.media_cover_empty action=send_empty");
                 }
                 self.art = Some(image);
                 // The page draws it as soon as it is here rather than when the
@@ -2199,18 +2200,14 @@ impl<W: AsyncWrite + Unpin> Session<'_, W> {
         self.status.artwork_changed(self.cover().to_vec());
     }
 
-    /// The cover for the song: the phone's, or the built-in placeholder when the
-    /// phone sent none.
+    /// The cover for the song: what the phone sent, and nothing when it sent
+    /// none.
     ///
-    /// A song whose app has no cover is not a song without a picture on the
-    /// panel: a field with nothing in it is not a cover, so the program's
-    /// placeholder goes out instead. A cover the phone sent has already been
-    /// made to fit by the program; the placeholder is small and fixed.
+    /// A song whose app has no cover goes out with the field present and empty,
+    /// which is what the phone itself sends in that case. A cover the phone sent
+    /// has already been made to fit by the program.
     fn cover(&self) -> &[u8] {
-        match self.art.as_deref() {
-            Some(art) if !art.is_empty() => art,
-            _ => self.ports.placeholder,
-        }
+        self.art.as_deref().unwrap_or_default()
     }
 
     /// The whole of what is known about the song, as the car's one message.
@@ -2501,11 +2498,6 @@ mod tests {
         }
     }
 
-    /// What a test hands over as the picture for a song whose app sent none.
-    /// Which picture it is belongs to the program, so this is one of its own
-    /// rather than a file out of the program's asset directory.
-    const PLACEHOLDER: &[u8] = b"\x89PNG a placeholder";
-
     /// Where nothing is pressed.
     struct NoKeys;
 
@@ -2554,8 +2546,8 @@ mod tests {
         }
     }
 
-    /// The ports a test runs with: nobody presses anything, the host is
-    /// `watched`, and the only picture is the placeholder.
+    /// The ports a test runs with: nobody presses anything and the host is
+    /// `watched`.
     fn ports<'a>(
         outlet: Arc<Outlet>,
         watched: &'a Watched,
@@ -2566,7 +2558,6 @@ mod tests {
         Ports {
             input: Arc::new(NoKeys),
             delegate: watched,
-            placeholder: PLACEHOLDER,
             home,
             outlet,
             report,
@@ -2575,9 +2566,10 @@ mod tests {
         }
     }
 
-    /// The cover the panel is given for a song whose app sent none.
-    fn placeholder() -> &'static [u8] {
-        PLACEHOLDER
+    /// What the panel is given for a song whose app sent no cover: the field is
+    /// there and it is empty, which is what the phone sends in that case.
+    fn no_cover() -> &'static [u8] {
+        b""
     }
 
     /// A bridge with nothing coming down it: heartbeats only, which is what a
@@ -3713,7 +3705,7 @@ mod tests {
                         song: Some("Reeperbahn".into()),
                         ..Track::default()
                     },
-                    placeholder()
+                    no_cover()
                 )
             );
 
@@ -3732,7 +3724,7 @@ mod tests {
                         artist: Some("Hamburg".into()),
                         ..Track::default()
                     },
-                    placeholder()
+                    no_cover()
                 )
             );
 
@@ -3978,7 +3970,7 @@ mod tests {
 
     /// A file transfer that carried nothing is the phone saying the song has no
     /// picture. It is kept as the cover that is held, so the one before it goes
-    /// down with it — and the message that follows carries the placeholder,
+    /// down with it — and the message that follows carries the field empty,
     /// which is what a phone with no cover of its own sends.
     #[tokio::test]
     async fn an_empty_cover_puts_the_last_one_down() {
@@ -4009,7 +4001,7 @@ mod tests {
             // And the phone saying there is none takes it back.
             sink.playing(NowPlaying::Artwork(Vec::new()));
             let told = car.expect(MEDIA_INFO).await;
-            assert_eq!(told.body, rebuilt(&told.body, &song, placeholder()));
+            assert_eq!(told.body, rebuilt(&told.body, &song, no_cover()));
         });
 
         let watched = Watched::default();
@@ -4027,8 +4019,8 @@ mod tests {
 
     /// A length is what says a song has started, and the cover that is held
     /// belongs to the one before it. A file transfer names no song, so the new
-    /// one is sent with the placeholder rather than wearing the last one's — and
-    /// the page is given the same picture the car is.
+    /// one is sent with no cover rather than wearing the last one's — and the
+    /// page is given the same nothing the car is.
     #[tokio::test]
     async fn a_song_with_a_length_puts_the_last_cover_down() {
         let cfg = Machine::default();
@@ -4065,11 +4057,10 @@ mod tests {
             // The next song announces itself with its length.
             sink.playing(NowPlaying::Track(next.clone()));
             let told = car.expect(MEDIA_INFO).await;
-            assert_eq!(told.body, rebuilt(&told.body, &next, placeholder()));
-            assert_eq!(
-                page.artwork().expect("the page has one").bytes.as_slice(),
-                placeholder(),
-                "and the page is given the placeholder"
+            assert_eq!(told.body, rebuilt(&told.body, &next, no_cover()));
+            assert!(
+                page.artwork().is_none(),
+                "and the page is given nothing to draw"
             );
 
             // Its own picture then goes out with it, as any cover does.
@@ -4126,7 +4117,7 @@ mod tests {
                         song: Some("Reeperbahn".into()),
                         ..Track::default()
                     },
-                    placeholder()
+                    no_cover()
                 )
             );
         });
@@ -4175,7 +4166,7 @@ mod tests {
                         song: Some("Reeperbahn".into()),
                         ..Track::default()
                     },
-                    placeholder()
+                    no_cover()
                 )
             );
 
@@ -4194,7 +4185,7 @@ mod tests {
                         artist: Some("Hamburg".into()),
                         ..Track::default()
                     },
-                    placeholder()
+                    no_cover()
                 )
             );
 
@@ -4214,7 +4205,7 @@ mod tests {
                         album: Some("Stadt".into()),
                         ..Track::default()
                     },
-                    placeholder()
+                    no_cover()
                 )
             );
         });
@@ -4255,7 +4246,7 @@ mod tests {
             sink.playing(NowPlaying::Artwork(vec![0xff; proto::MAX_ARTWORK + 1]));
             sink.playing(NowPlaying::Track(track.clone()));
             let told = car.expect(MEDIA_INFO).await;
-            assert_eq!(told.body, rebuilt(&told.body, &track, placeholder()));
+            assert_eq!(told.body, rebuilt(&told.body, &track, no_cover()));
 
             // And one that fits exactly is the car's to draw.
             let fits = vec![0x89; proto::MAX_ARTWORK];

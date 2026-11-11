@@ -373,12 +373,6 @@ async fn main() -> Result<()> {
         let ports = carlife_md::Ports {
             input: car.clone(),
             delegate: &*car,
-            // The car's media message carries a cover whether or not the phone
-            // sent one, and a blank is not what a phone sends: this is what the
-            // panel is shown instead — two beamed notes on a dark field, cut out
-            // of the phone's own screen where it draws the same thing.
-            placeholder: assets::get("icons/iv_music_pic.png")
-                .expect("the placeholder is built in"),
             home: home.clone(),
             outlet,
             report: reported,

@@ -323,10 +323,10 @@ pub const MAX_ARTWORK: usize = 30 * 1024;
 ///
 /// `duration` is in seconds, which is the unit the guide gives it, and
 /// `albumArt` is the cover as the phone transferred it — a file, not a bitmap
-/// this side drew. A song whose app sent none carries the picture the program
-/// named for it (`Ports::placeholder`), so there is always a picture: a body
-/// that names no cover and a body that draws a blank one look the same on the
-/// panel, and neither is what a phone sends.
+/// this side drew. A song whose app sent none carries the field with nothing in
+/// it, which is the body the phone itself sends when it has no picture for the
+/// song: the field is required, so it is present either way, and an empty one is
+/// a blank panel rather than a body the car drops.
 pub fn media_info(track: &Track, album_art: &[u8], source: &str) -> Vec<u8> {
     let mut out = Vec::new();
     put_required_str(&mut out, 1, source);
