@@ -169,6 +169,14 @@ pub(super) async fn run(
                         refused.remove(&mac);
                     }
                     Answer::Unanswered => {}
+                    // BlueZ was not refusing the phone, it was answering from
+                    // an attempt it still held. Taken down here so the next
+                    // round is a fresh one rather than another answer from the
+                    // same leftover.
+                    Answer::Lingering => {
+                        tracing::debug!("bt.page_cleared mac={mac} action=disconnect");
+                        let _ = disconnect(&conn, &path).await;
+                    }
                     Answer::Refused => {
                         let count = refused.entry(mac.clone()).or_insert(0);
                         *count += 1;
@@ -203,13 +211,15 @@ pub(super) async fn run(
     }
 }
 
-/// What a page came to. The three are apart because only one of them is worth
+/// What a page came to. The kinds are apart because only one of them is worth
 /// counting: a phone that is out of range times out, and giving up on it after
 /// three rounds would be giving up on a phone that was merely not there.
 enum Answer {
     Answered,
     /// The phone refused the link: it has no pairing for us any more.
     Refused,
+    /// The attempt ended with BlueZ still holding it — see `lingering`.
+    Lingering,
     Unanswered,
 }
 
@@ -234,6 +244,8 @@ async fn call(conn: &Connection, path: &str, mac: &str) -> Answer {
             );
             if refused(&e) {
                 Answer::Refused
+            } else if lingering(&e) {
+                Answer::Lingering
             } else {
                 Answer::Unanswered
             }
@@ -256,6 +268,24 @@ async fn call(conn: &Connection, path: &str, mac: &str) -> Answer {
 /// from one that is a room away.
 fn refused(e: &zbus::Error) -> bool {
     e.to_string().contains("br-connection-refused")
+}
+
+/// Whether BlueZ's error says the attempt ended with something still held,
+/// rather than with nothing on the other end.
+///
+/// The two names are from BlueZ's own error table. `br-connection-canceled` is
+/// an attempt that was given up on; `br-connection-already-connected` is EALREADY
+/// and its stated meaning is that the profile or the link is already there — so
+/// neither is a phone that missed a page, and neither leaves the next round a
+/// clean one. A page that times out is not one of these: nothing was ever up,
+/// and there is nothing to take down.
+///
+/// Left alone, they are what a boot can spend half a minute on: one page is
+/// cancelled, and every round after it is answered from the attempt that is
+/// still held instead of being a page at all.
+fn lingering(e: &zbus::Error) -> bool {
+    let text = e.to_string();
+    text.contains("br-connection-already-connected") || text.contains("br-connection-canceled")
 }
 
 /// One page: the link, and the phone's iAP2 service on top of it.
