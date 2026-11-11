@@ -392,6 +392,10 @@ pub async fn serve(self: &Arc<Self>) {
     // to declare the phone gone once a newer one is talking to it. See
     // `Wakeup::Silent`.
     let newest = Arc::new(AtomicU64::new(0));
+    // Said once per opening, because what it marks is a change of state and not
+    // the wait for a phone: a listener that never came up and a phone that never
+    // came look the same from here otherwise, and the two are nothing alike.
+    let mut listening = false;
     loop {
         if !*gate.borrow() {
             tracing::info!("carplay.airplay.held reason=car_session_not_up");
@@ -399,6 +403,10 @@ pub async fn serve(self: &Arc<Self>) {
                 return;
             }
             continue;
+        }
+        if !listening {
+            listening = true;
+            tracing::info!("carplay.airplay.listening");
         }
         tokio::select! {
             accepted = listener.accept() => {
@@ -500,6 +508,7 @@ pub async fn serve(self: &Arc<Self>) {
                     return;
                 }
                 if !*gate.borrow() {
+                    listening = false;
                     tracing::info!("carplay.airplay.closed reason=car_session_ended");
                     let _ = self.shutdown.send(());
                 }

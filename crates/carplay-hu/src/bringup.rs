@@ -28,6 +28,13 @@ const NOW_PLAYING: u16 = 0x5001;
 /// its own other links, its Bluetooth address and the serial its cable carries.
 const TRANSPORT_IDENTIFIER: u16 = 0x4E0E;
 
+/// iAP2's `CarPlayAvailability`: the phone asking where to run CarPlay. It is
+/// what LIVI's bringup answers with `CarPlayStartSession`, and it is the last
+/// thing between the Wi-Fi credentials going out and the phone having an
+/// address to connect to — so when it arrives is the one fact that says whether
+/// a slow start is the phone thinking or this side answering late.
+const CARPLAY_AVAILABLE: u16 = 0x4300;
+
 /// Why a bringup ended, which is what says whether to start another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Ended {
@@ -199,6 +206,21 @@ pub(crate) async fn run_bringup(
                     );
                     slot.learn_serial(side, &serial);
                 }
+            }
+            // The phone asking to be told where CarPlay runs. Saying when it
+            // asked is the whole of this arm: the answer is LIVI's, and the
+            // line for it (`iap2.carplay_start_sent`) comes from a different
+            // task, so without this the two cannot be told apart from one slow
+            // step.
+            Some(BringupEvent::Incoming {
+                msg_id: CARPLAY_AVAILABLE,
+                frame,
+            }) => {
+                tracing::info!(
+                    "carplay.iap2.carplay_available peer={peer} transport={transport} \
+                     bytes={}",
+                    frame.len()
+                );
             }
             Some(_) => {}
             // The bringup task ended without saying so, which only happens when
