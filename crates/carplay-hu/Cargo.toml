@@ -17,6 +17,12 @@ livi-runtime = { path = "../../vendor/LIVI/native/crates/livi-runtime" }
 livi-wifi = { path = "../../vendor/LIVI/native/crates/livi-wifi" }
 # Paging a paired phone is one BlueZ D-Bus call.
 zbus = { version = "5", default-features = false, features = ["tokio"] }
+# Reading a zbus signal stream: `MessageStream` is a `Stream` and has no method
+# of its own that yields the next message.
+futures-util = { version = "0.3", default-features = false, features = [
+    "std",
+    "async-await",
+] }
 # The cable is watched through the kernel's own hotplug events rather than asked
 # about once a second. `AF_NETLINK` is not in std, and `rustix` is the crate
 # `nusb` itself opens that socket with.

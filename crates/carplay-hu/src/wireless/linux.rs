@@ -17,7 +17,7 @@ use tokio::sync::watch;
 use tokio::time::sleep;
 
 use super::{
-    ap_channel, is_24ghz, page, parse_mac, power, radios_present, ready, run_session, short,
+    acl, ap_channel, is_24ghz, page, parse_mac, power, radios_present, ready, run_session, short,
 };
 use crate::admission::Side;
 use crate::machine::Machine;
@@ -198,6 +198,14 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
             ))
         });
 
+        // When the phone's link comes up, from BlueZ's own signal. The page asks
+        // the same question, but a round is due every five seconds and is late
+        // by the length of the call it was waiting on, so its answer is a range
+        // rather than a moment — and a moment is what says whether the phone
+        // woke at all. It lives as long as the connection the profiles are
+        // registered on, because that is what the signal is about.
+        let link = tokio::spawn(acl::watch(conn.clone()));
+
         // The peer of the last channel this round refused, so a phone that
         // keeps knocking while the cable serves it says so once rather than a
         // line per knock.
@@ -326,6 +334,7 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
         if let Some(guard) = guard {
             guard.abort();
         }
+        link.abort();
         livi_runtime::bt::let_go(&conn, &cfg.bt_adapter, &held).await;
         // A signal ends the run. A round that ended for any other reason — the
         // car went away and came back before the controllers were restored — is

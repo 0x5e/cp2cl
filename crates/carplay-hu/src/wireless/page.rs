@@ -216,13 +216,22 @@ enum Answer {
 /// Wakes one phone, or asks one that is already on the link for its iAP2 service
 /// again, and says what came of it.
 async fn call(conn: &Connection, path: &str, mac: &str) -> Answer {
+    // How long the phone took to answer, which is the only thing that says when
+    // the call started: a round that ends in `bt.page_answered` reads the same
+    // whether it began a moment ago or was still hanging from the round before,
+    // and the two mean opposite things about the phone.
+    let started = Instant::now();
+    let elapsed = || started.elapsed().as_millis();
     match tokio::time::timeout(ANSWER, page(conn, path)).await {
         Ok(Ok(())) => {
-            tracing::info!("bt.page_answered mac={mac}");
+            tracing::info!("bt.page_answered mac={mac} elapsed_ms={}", elapsed());
             Answer::Answered
         }
         Ok(Err(e)) => {
-            tracing::debug!("bt.page_unanswered mac={mac} err={e}");
+            tracing::debug!(
+                "bt.page_unanswered mac={mac} elapsed_ms={} err={e}",
+                elapsed()
+            );
             if refused(&e) {
                 Answer::Refused
             } else {
@@ -230,7 +239,10 @@ async fn call(conn: &Connection, path: &str, mac: &str) -> Answer {
             }
         }
         Err(_) => {
-            tracing::debug!("bt.page_deferred mac={mac} reason=timeout");
+            tracing::debug!(
+                "bt.page_deferred mac={mac} elapsed_ms={} reason=timeout",
+                elapsed()
+            );
             Answer::Unanswered
         }
     }
@@ -401,7 +413,7 @@ fn flag(properties: &HashMap<String, OwnedValue>, key: &str) -> bool {
 }
 
 /// `dev_AA_BB_CC_DD_EE_FF` → `AA:BB:CC:DD:EE:FF`, for a log line.
-fn mac(tail: &str) -> String {
+pub(super) fn mac(tail: &str) -> String {
     tail.strip_prefix("dev_").unwrap_or(tail).replace('_', ":").to_uppercase()
 }
 

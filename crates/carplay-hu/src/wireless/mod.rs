@@ -33,6 +33,7 @@ use crate::machine::Machine;
 use crate::report::Report;
 use crate::bringup::{run_bringup, Ended};
 
+mod acl;
 mod linux;
 mod page;
 mod power;
