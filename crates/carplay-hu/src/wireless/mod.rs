@@ -12,8 +12,8 @@
 //!   because the phone is about to hang up Bluetooth and come back over Wi-Fi.
 //!
 //! This module owns none of the pairing: the operator pairs the phone in the
-//! OS first. All we do is publish the service the phone looks for and accept
-//! the channel it opens.
+//! OS first. What we do is publish the service the phone looks for, and call
+//! the phone's own iAP2 service for the channel the session runs on.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,6 +34,7 @@ use crate::report::Report;
 use crate::bringup::{run_bringup, Ended};
 
 mod acl;
+mod dial;
 mod linux;
 mod page;
 mod power;

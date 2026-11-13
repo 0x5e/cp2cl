@@ -6,26 +6,35 @@
 //! without this the log stops at `bt.service_up` and stays there until
 //! someone taps the machine in the phone's Bluetooth settings.
 //!
-//! The page is the phone's own iAP2 service: BlueZ dials the channel the phone's
-//! service record names, and the socket comes back through the same profile
-//! callback an incoming connection does — see `linux`.
+//! The page is the phone's own iAP2 service: the channel the phone's service
+//! record names is dialled directly, and the socket that comes back is the one
+//! the session runs on — see `dial`.
 
 use std::collections::HashMap;
+use std::io;
+use std::os::fd::OwnedFd;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use livi_runtime::bt::IncomingConn;
+use tokio::sync::mpsc;
 use zbus::Connection;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue};
 
-use super::Handover;
+use super::{Handover, dial};
 use crate::admission::Side;
 
-/// What the iPhone advertises for its own side of iAP2. Connecting to it is what
-/// wakes the phone; the channel that follows is the one we take.
-const IAP_CLIENT_UUID: &str = "00000000-deca-fade-deca-deafdecacafe";
-
 /// Between two rounds of paging.
-const ROUND: Duration = Duration::from_secs(5);
+///
+/// How long this is decides how late the one attempt that gets through can be:
+/// the phone becomes answerable at a moment of its own, and the next round after
+/// it is the one that works, so up to this much is spent waiting for a round.
+/// A failed attempt costs 0.6–1.2 s when the phone is not answering yet — there
+/// is no link to set up and nothing to tear down — so the rest of a five-second
+/// round was idle: every success in the logs sat exactly on that grid after a
+/// four-second gap. Three seconds cuts that gap to two, and the cost is one more
+/// call per round to a phone that is already being called.
+const ROUND: Duration = Duration::from_secs(3);
 /// How long one phone is given to answer. Out of range nothing answers, and the
 /// next round is a moment away.
 const ANSWER: Duration = Duration::from_secs(15);
@@ -34,13 +43,12 @@ const ANSWER: Duration = Duration::from_secs(15);
 /// on its own: dropping it is what makes it page us again.
 const STALE_SECS: u64 = 10;
 const STALE: Duration = Duration::from_secs(STALE_SECS);
-/// How many times a phone may refuse a page in a row before its entry here is
-/// dropped. A phone refuses by having deleted its half of the pairing, and no
-/// number of further pages brings a link key back: the address stays paired on
-/// this side, so every round after that fails the same way and says nothing
-/// above debug. A phone that is merely away times out instead, which is a
-/// different error and is not counted here.
-const REFUSALS: u32 = 3;
+
+/// How many times a boot asks the kernel what it is holding for a phone whose
+/// call came back `EALREADY`. Three is enough to tell one stuck entry from a
+/// state that clears: the answer does not change while it lasts, and a boot that
+/// has been waiting a minute has already said everything there is to say.
+const BUSY_PROBES: u32 = 3;
 
 /// What a removal from BlueZ's tree came back as, at every step.
 type Failure = Box<dyn std::error::Error + Send + Sync>;
@@ -75,24 +83,28 @@ struct Phone {
 /// `car` is whether the car still has a CarLife session, which is what the phone
 /// is being called back for: a phone woken for a session nobody reads starts a
 /// CarPlay that goes nowhere, and leaves it on the car's screen to be dismissed.
+///
+/// `dialed` is where the channel goes when a call comes back with one. This task
+/// ends on that call: a channel is `linux`'s to serve, and a second round in
+/// here would only be a second channel.
 pub(super) async fn run(
     conn: Connection,
     adapter: String,
     handover: Arc<Handover>,
     mut slot: tokio::sync::watch::Receiver<Option<Side>>,
     car: tokio::sync::watch::Receiver<bool>,
-) {    // A page that took its time must not be followed by a burst of retries, which
+    dialed: mpsc::UnboundedSender<IncomingConn>,
+) {
+    // A page that took its time must not be followed by a burst of retries, which
     // is what a missed tick would otherwise produce.
     let mut round = tokio::time::interval(ROUND);
     round.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // When each phone was first seen on the link with no session on it.
     let mut waiting: HashMap<String, Instant> = HashMap::new();
-    // How many times each phone has refused a page in a row, since the pairing
-    // was last seen working. At `REFUSALS` the address is unpaired rather than
-    // called again, which is what takes it out of the list above.
-    let mut refused: HashMap<String, u32> = HashMap::new();
+    // How many of those probes have been made this boot — see `BUSY_PROBES`.
+    let mut probes: u32 = 0;
     // Which state the page is being held by, said once on the way in and
-    // once on the way out: five seconds apart, the lines would be the only
+    // once on the way out: every round apart, the lines would be the only
     // thing in the log for as long as the state lasts.
     let mut held: Option<&'static str> = None;
     // What the last round had to call. An empty list is the one state that
@@ -147,158 +159,101 @@ pub(super) async fn run(
         // A phone that left keeps no timer: one that comes back starts over.
         waiting.retain(|mac, _| phones.iter().any(|p| &p.mac == mac));
         let macs: Vec<String> = phones.iter().map(|p| p.mac.clone()).collect();
-        // Nor does it keep its refusals: the count is about this pairing, and
-        // one that is gone is not the one the next page is for.
-        refused.retain(|mac, _| macs.contains(mac));
         if to_call.as_ref() != Some(&macs) {
             tracing::info!("bt.paired_phones count={} macs={macs:?}", macs.len());
             to_call = Some(macs);
         }
         for Phone { path, mac, connected } in phones {
-            // A link is not a pairing. `Connected` goes up and down while the
-            // controller retries one that keeps failing — the same attempt a
-            // moment earlier reports `br-connection-already-connected` — and
-            // clearing the count here meant three refusals never became three
-            // in a row: every round that found the link up started from zero
-            // again and the phone was called for ever. Only a page the phone
-            // answered says the pairing works.
-            if !connected {
+            // A link with nothing on it is a phone that will not open a channel
+            // on its own, and one left up is what the next call is answered
+            // from instead of being a page.
+            if connected {
+                let on_link = waiting.entry(mac.clone()).or_insert_with(Instant::now).elapsed();
+                if on_link >= STALE {
+                    waiting.remove(&mac);
+                    tracing::info!("bt.stale_peer mac={mac} idle_s={STALE_SECS} action=drop");
+                    let _ = tokio::time::timeout(ANSWER, disconnect(&conn, &path)).await;
+                    continue;
+                }
+            } else {
                 waiting.remove(&mac);
-                match call(&conn, &path, &mac).await {
-                    Answer::Answered => {
-                        refused.remove(&mac);
-                    }
-                    Answer::Unanswered => {}
-                    // BlueZ was not refusing the phone, it was answering from
-                    // an attempt it still held. Taken down here so the next
-                    // round is a fresh one rather than another answer from the
-                    // same leftover.
-                    Answer::Lingering => {
-                        tracing::debug!("bt.page_cleared mac={mac} action=disconnect");
-                        let _ = disconnect(&conn, &path).await;
-                    }
-                    Answer::Refused => {
-                        let count = refused.entry(mac.clone()).or_insert(0);
-                        *count += 1;
-                        let times = *count;
-                        if times >= REFUSALS {
-                            refused.remove(&mac);
-                            match unpair(&conn, &adapter, &path).await {
-                                Ok(()) => tracing::warn!(
-                                    "bt.page_given_up mac={mac} refused={times} action=unpaired"
-                                ),
-                                Err(e) => tracing::warn!(
-                                    "bt.page_given_up mac={mac} refused={times} \
-                                     action=unpair_failed err={e}"
-                                ),
-                            }
-                        }
+            }
+            match wake(&mac).await {
+                Ok(fd) => {
+                    // `linux` owns the channel from here: this task is dropped
+                    // on the way into it, and a call after this one would be a
+                    // second channel to the same phone.
+                    let _ = dialed.send(IncomingConn { fd, peer_mac: mac });
+                    return;
+                }
+                // `EALREADY`: the controller still has an attempt to this
+                // address open, so this round never reached the phone, and the
+                // rounds after it are answered from that same entry until it
+                // clears on its own — retrying is not what clears it. No link is
+                // up while it lasts, which is why nothing else in the log shows
+                // it; the kernel's connection table is the only place it can be
+                // seen, and it says whether the entry is ours at all.
+                Err(e) if busy(&e) => {
+                    if probes < BUSY_PROBES {
+                        probes += 1;
+                        tracing::info!("bt.dial_busy mac={mac} acl={}", dial::held(&mac));
                     }
                 }
-                continue;
+                // A phone that is away, or one whose record could not be read:
+                // the next round asks again.
+                Err(_) => {}
             }
-            let on_link = waiting.entry(mac.clone()).or_insert_with(Instant::now).elapsed();
-            if on_link < STALE {
-                // On the link but no channel yet: asking for the profile again is
-                // what LIVI does in the same state, and it costs one round trip.
-                let _ = call(&conn, &path, &mac).await;
-                continue;
-            }
-            waiting.remove(&mac);
-            tracing::info!("bt.stale_peer mac={mac} idle_s={STALE_SECS} action=drop");
-            let _ = tokio::time::timeout(ANSWER, disconnect(&conn, &path)).await;
         }
     }
 }
 
-/// What a page came to. The kinds are apart because only one of them is worth
-/// counting: a phone that is out of range times out, and giving up on it after
-/// three rounds would be giving up on a phone that was merely not there.
-enum Answer {
-    Answered,
-    /// The phone refused the link: it has no pairing for us any more.
-    Refused,
-    /// The attempt ended with BlueZ still holding it — see `lingering`.
-    Lingering,
-    Unanswered,
-}
-
-/// Wakes one phone, or asks one that is already on the link for its iAP2 service
-/// again, and says what came of it.
-async fn call(conn: &Connection, path: &str, mac: &str) -> Answer {
-    // How long the phone took to answer, which is the only thing that says when
-    // the call started: a round that ends in `bt.page_answered` reads the same
-    // whether it began a moment ago or was still hanging from the round before,
-    // and the two mean opposite things about the phone.
+/// Calls one phone and hands back the channel the call opened.
+///
+/// Off the runtime, because a call to a phone that is away is fifteen seconds of
+/// waiting and nothing else in this program is waiting on it.
+async fn wake(mac: &str) -> Result<OwnedFd, io::Error> {
     let started = Instant::now();
-    let elapsed = || started.elapsed().as_millis();
-    match tokio::time::timeout(ANSWER, page(conn, path)).await {
-        Ok(Ok(())) => {
-            tracing::info!("bt.page_answered mac={mac} elapsed_ms={}", elapsed());
-            Answer::Answered
+    let target = mac.to_string();
+    match tokio::task::spawn_blocking(move || dial::open(&target, ANSWER)).await {
+        Ok(Ok(dialed)) => {
+            tracing::info!(
+                "bt.dial_ok mac={mac} channel={} sdp_ms={} connect_ms={} elapsed_ms={}",
+                dialed.channel,
+                dialed.sdp.as_millis(),
+                dialed.connect.as_millis(),
+                started.elapsed().as_millis()
+            );
+            Ok(dialed.fd)
+        }
+        Ok(Err(e)) if e.kind() == io::ErrorKind::NotFound => {
+            // A board without `sdptool` is a board that cannot make this call
+            // at all, and one line per round is worth having at warn: nothing
+            // else in this path says so.
+            tracing::warn!("bt.dial_failed mac={mac} err={e} consequence=no_sdptool");
+            Err(e)
         }
         Ok(Err(e)) => {
             tracing::debug!(
-                "bt.page_unanswered mac={mac} elapsed_ms={} err={e}",
-                elapsed()
+                "bt.dial_failed mac={mac} elapsed_ms={} err={e}",
+                started.elapsed().as_millis()
             );
-            if refused(&e) {
-                Answer::Refused
-            } else if lingering(&e) {
-                Answer::Lingering
-            } else {
-                Answer::Unanswered
-            }
+            Err(e)
         }
-        Err(_) => {
-            tracing::debug!(
-                "bt.page_deferred mac={mac} elapsed_ms={} reason=timeout",
-                elapsed()
-            );
-            Answer::Unanswered
+        // The call was dropped with the task that ran it, which says nothing
+        // about the phone.
+        Err(e) => {
+            tracing::debug!("bt.dial_failed mac={mac} err={e}");
+            Err(io::Error::other(e))
         }
     }
 }
 
-/// Whether BlueZ's error says the phone refused the link rather than missed it.
+/// Whether the call was answered by the controller rather than by the phone.
 ///
-/// `br-connection-refused` is the name the kernel's `mgmt` layer gives the HCI
-/// status of the same meaning, and BlueZ puts it in the error it returns — so
-/// the string is the whole of what tells a phone that deleted its pairing apart
-/// from one that is a room away.
-fn refused(e: &zbus::Error) -> bool {
-    e.to_string().contains("br-connection-refused")
-}
-
-/// Whether BlueZ's error says the attempt ended with something still held,
-/// rather than with nothing on the other end.
-///
-/// The two names are from BlueZ's own error table. `br-connection-canceled` is
-/// an attempt that was given up on; `br-connection-already-connected` is EALREADY
-/// and its stated meaning is that the profile or the link is already there — so
-/// neither is a phone that missed a page, and neither leaves the next round a
-/// clean one. A page that times out is not one of these: nothing was ever up,
-/// and there is nothing to take down.
-///
-/// Left alone, they are what a boot can spend half a minute on: one page is
-/// cancelled, and every round after it is answered from the attempt that is
-/// still held instead of being a page at all.
-fn lingering(e: &zbus::Error) -> bool {
-    let text = e.to_string();
-    text.contains("br-connection-already-connected") || text.contains("br-connection-canceled")
-}
-
-/// One page: the link, and the phone's iAP2 service on top of it.
-async fn page(conn: &Connection, path: &str) -> Result<(), zbus::Error> {
-    conn.call_method(
-        Some("org.bluez"),
-        path,
-        Some("org.bluez.Device1"),
-        "ConnectProfile",
-        &(IAP_CLIENT_UUID,),
-    )
-    .await
-    .map(|_| ())
+/// `EALREADY` is `connect` saying an attempt to this address is already open.
+/// The phone was not asked anything at all.
+fn busy(e: &io::Error) -> bool {
+    e.to_string().contains("already in progress")
 }
 
 async fn disconnect(conn: &Connection, path: &str) -> Result<(), zbus::Error> {

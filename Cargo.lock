@@ -264,6 +264,7 @@ dependencies = [
  "iap2-usbmux",
  "iap2-wired",
  "idevice",
+ "libc 0.2.189",
  "livi-runtime",
  "livi-wifi",
  "num-bigint",

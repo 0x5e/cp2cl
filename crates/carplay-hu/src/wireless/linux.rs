@@ -1,10 +1,11 @@
-//! Linux: BlueZ publishes the service and hands us the phone's RFCOMM socket.
+//! Linux: BlueZ publishes the service and we call the phone's iAP2 service.
 //!
-//! This is LIVI's `livi_runtime::bt` doing all of it — registering the iAP
-//! server profile, the iAP client profile, the CarPlay profile, and an agent
-//! that answers the pairing prompt. All that is left for us is draining the
-//! channel of sockets it produces — and calling a paired phone back, since a
-//! phone never returns to an accessory on its own: see `page`.
+//! This is LIVI's `livi_runtime::bt` registering the profiles and the agent
+//! that answers the pairing prompt; what we do with it is call one paired phone
+//! back and run the session on the channel that call opens — see `dial` and
+//! `page`. A channel the phone opens itself is closed unused: it is the same
+//! channel arriving from the other end, and a phone that has one believes the
+//! accessory link is up.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -13,7 +14,7 @@ use std::time::{Duration, Instant};
 use iap2_link::LinkConfig;
 use livi_runtime::bt::{IncomingConn, Wireless};
 use livi_runtime::driver::spawn_link;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::time::sleep;
 
 use super::{
@@ -199,17 +200,22 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
         });
 
         // When the phone's link comes up, from BlueZ's own signal. The page asks
-        // the same question, but a round is due every five seconds and is late
+        // the same question, but a round is due every few seconds and is late
         // by the length of the call it was waiting on, so its answer is a range
         // rather than a moment — and a moment is what says whether the phone
         // woke at all. It lives as long as the connection the profiles are
         // registered on, because that is what the signal is about.
         let link = tokio::spawn(acl::watch(conn.clone()));
 
-        // The peer of the last channel this round refused, so a phone that
-        // keeps knocking while the cable serves it says so once rather than a
-        // line per knock.
+        // The peer of the last channel this round refused, so a phone that keeps
+        // knocking while we are calling it says so once rather than a line per
+        // knock — kept apart by which refusal it was, because both can happen
+        // to the same address.
+        let mut last_inbound: Option<String> = None;
         let mut last_refused: Option<String> = None;
+        // Where `page` hands over a channel it called for. The other source,
+        // `incoming`, is the channel BlueZ opens for the phone — refused below.
+        let (dialed_tx, mut dialed_rx) = mpsc::unbounded_channel();
         loop {
             // The page holds itself back when it has nothing to call for: a
             // phone that is already coming in does not need calling, one that
@@ -221,18 +227,46 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
                 handover.clone(),
                 slot.clone(),
                 gate.clone(),
+                dialed_tx.clone(),
             ));
             // The car's session ending is checked between sessions and never
             // inside one: `run_session` has tasks of its own, and dropping it
             // half way leaves them behind.
             let next = tokio::select! {
-                next = incoming.recv() => next,
+                next = incoming.recv() => next.map(Arrived::Inbound),
+                next = dialed_rx.recv() => next.map(Arrived::Dialed),
                 _ = wait_car_down(&mut gate) => None,
                 _ = stopping.changed() => None,
             };
             paging.abort();
-            let Some(IncomingConn { fd, peer_mac }) = next else {
+            let Some(arrived) = next else {
                 break;
+            };
+            let IncomingConn { fd, peer_mac } = match arrived {
+                Arrived::Dialed(conn) => conn,
+                // We call the phone, and a channel it opens is one it believes
+                // is up — the same belief that makes it refuse our own call.
+                // Closed here rather than served. The first from a peer is said
+                // at info and the rest at debug: a phone that keeps knocking
+                // while our own calls are refused is the one case where the
+                // count matters, and one line per knock is the only place it
+                // shows.
+                Arrived::Inbound(conn) => {
+                    drop(conn.fd);
+                    if last_inbound.as_deref() != Some(&conn.peer_mac) {
+                        tracing::info!(
+                            "bt.channel_refused peer={} reason=inbound",
+                            short(&conn.peer_mac)
+                        );
+                    } else {
+                        tracing::debug!(
+                            "bt.channel_refused peer={} reason=inbound again",
+                            short(&conn.peer_mac)
+                        );
+                    }
+                    last_inbound = Some(conn.peer_mac);
+                    continue;
+                }
             };
             let peer = short(&peer_mac);
             // The first link to see a phone takes the slot. A channel that
@@ -272,9 +306,9 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
             // Subscribed for this channel only: a shutdown sent while no
             // session was running must not end the next one before it starts.
             let mut shutdown = hu.shutdown.subscribe();
-            // Ending the session drops the descriptor, which is the only way a
-            // BlueZ channel ever closes; paging the phone again is what brings
-            // it back, and the loop above starts that over.
+            // Ending the session drops the descriptor, which is the only way
+            // the socket ever closes; calling the phone again is what brings it
+            // back, and the loop above starts that over.
             let ended = run_session(
                 &cfg,
                 auth.clone(),
@@ -351,6 +385,17 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
             cfg.bt_adapter
         );
     }
+}
+
+/// How a channel arrived at the round that was waiting for one.
+///
+/// The two are the same channel seen from opposite ends: we open ours, and a
+/// phone that opens one is one that will not take ours.
+enum Arrived {
+    /// The phone called us; closed here rather than served.
+    Inbound(IncomingConn),
+    /// `page` called the phone, and the phone answered.
+    Dialed(IncomingConn),
 }
 
 /// Waits until there is something to publish a service for: the car has a

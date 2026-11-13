@@ -27,6 +27,9 @@ futures-util = { version = "0.3", default-features = false, features = [
 # about once a second. `AF_NETLINK` is not in std, and `rustix` is the crate
 # `nusb` itself opens that socket with.
 rustix = { version = "1", features = ["net"] }
+# An RFCOMM socket is `AF_BLUETOOTH`, which `rustix` does not name for this
+# target and which has no wrapper in std.
+libc = "0.2"
 # Needed directly to name `idevice::ReadWrite` in our own function signatures.
 idevice = "0.1"
 

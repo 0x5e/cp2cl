@@ -2,9 +2,9 @@
 //!
 //! BlueZ keeps this as a property of its own — `Connected` on the device object
 //! — and the page reads it every round to decide whether to call. Reading it is
-//! not the same as knowing when it changed: a round is due every five seconds
+//! not the same as knowing when it changed: a round is due every few seconds
 //! and is late by the length of whatever call it was waiting on, so a value
-//! first seen at 24.1 s may have become true anywhere back to 19.6 s. That is
+//! first seen at 24.1 s may have become true anywhere back to 21.1 s. That is
 //! the question here, which is why it is a signal and not one more read of the
 //! same property.
 //!
