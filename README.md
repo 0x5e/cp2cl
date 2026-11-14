@@ -2,46 +2,33 @@
 
 [![license](https://img.shields.io/github/license/0x5e/cp2cl)](LICENSE) [![build](https://github.com/0x5e/cp2cl/actions/workflows/build.yml/badge.svg)](https://github.com/0x5e/cp2cl/actions/workflows/build.yml) [![release](https://img.shields.io/github/v/release/0x5e/cp2cl)](https://github.com/0x5e/cp2cl/releases/latest) ![arch](https://img.shields.io/badge/arch-aarch64%20%7C%20armv7-informational)
 
-CarPlay转CarLife桥接服务，运行于Linux嵌入式设备。
+CarPlay to CarLife. 让 iPhone CarPlay 能够连接到 CarLife 车机。运行于 Linux 嵌入式设备。
 
 ![preview](./screenshots/IMG_7155.png)
 
 ## 背景
 
-本项目主要用于**奔驰MBUX NTG6.0车机**，此车机CarPlay、Android Auto被限制到只能显示半个屏幕（1300x720），而CarLife支持全屏（1920x720）。
-其他车机未经测试。
+本项目主要用于**奔驰 MBUX NTG 6.0 车机**，通过转接 CarLife 通道实现 CarPlay 的全屏显示。其他车机未经测试。
+
+> NTG 6.0 的 CarLife 窗口能全屏显示，而 CarPlay 窗口只能显示一半。
 
 ## 特性
 
-- 纯视频流转发，无编解码
-- 支持有线/无线CarPlay
-- 后台管理页（状态、日志、设置）
+- 支持有线、无线 CarPlay
+- 视频流纯转发，无编解码环节，低性能开销
+- 支持所有音频流：媒体、导航、通话（双向）、Siri（双向）
+- 支持智能缩放显示，开启后可显示3个小组件
+- 支持仪表盘媒体信息显示（含封面）
+- 适配车机图标与名称
+- 后台管理页，可查看状态、日志、设置
 
-## 支持情况
-### 软件完成度
-- [x] 连接方式
-  - [x] 有线
-  - [x] 无线
-- [x] 视频流
-- [x] 音频流
-  - [x] 媒体
-  - [x] 导航
-  - [x] 通话（双向）
-  - [x] Siri（双向）
-- [x] 控制流
-  - [x] 触摸
-  - [x] 按键
-- [x] 仪表盘
-  - [x] 媒体信息（含封面）
-  - [x] 方向键切歌
-- [x] 车载数据
-  - [x] 车速
-- [x] Web后台
+## 硬件适配列表
 
-### 固件适配列表（BuildRoot）
+固件基于 Buildroot 2025.02 构建，开机启动时间相对 Ubuntu 30s，提升到 7s。
+
+- [x] OrangePi-Zero2W
 - [x] 随身WiFi-UFI001C（很卡，不推荐）
 - [x] NanoPi-Duo2（略卡，不推荐）
-- [x] OrangePi-Zero2W
 
 其他适合的设备参考：[DashPlay - 硬件](https://github.com/yizhixiaoheigou/DashPlay/blob/main/README.md#硬件)
 后续有时间我会尝试适配，欢迎小伙伴帮忙一起测试。
@@ -50,20 +37,18 @@ CarPlay转CarLife桥接服务，运行于Linux嵌入式设备。
 
 ### 硬件要求
 
-- 1个USB OTG口
-- 1个USB Host口（可选，用于有线CarPlay）
-- WiFi + BLE 网卡（可选，用于无线CarPlay）
-- 存储空间大于128MB
+- 1个 USB OTG 口
+- 1个 USB Host 口（可选，用于有线 CarPlay）
+- WiFi + BLE 网卡（可选，用于无线 CarPlay）
+- 存储空间大于 128MB
 
 ## 使用方式
-### 使用固件（推荐）
+### 使用固件
 [Github Release](https://github.com/0x5e/cp2cl/releases)可下载对应固件或可执行文件。
-目前板子支持msm8916-ufi001c、nanopi-duo2、orangepi-zero2w。
-可执行文件支持armv7、aarch64。
 
-### 使用安装包（待完善）
-Ubuntu、Debian、OpenWrt安装包暂未提供。
-[Github Release](https://github.com/0x5e/cp2cl/releases)可下载armv7、aarch64可执行文件，需要自行准备启动脚本，安装相关依赖。
+### 使用安装包（暂无）
+Ubuntu、Debian、OpenWrt 安装包暂未提供。
+[Github Release](https://github.com/0x5e/cp2cl/releases)可下载 armv7、aarch64 可执行文件，需要自行准备启动脚本，安装相关依赖。
 
 依赖列表（待补充）：
 dbus, bluez, hostapd, dnsmasq-base, iw, kmod
@@ -94,7 +79,7 @@ make all
 
 ### 调试工具
 
-CarLife车机 - macOS版：[CarLifePort](https://github.com/0x5e/CarLifePort)
+CarLife车机 - macOS 版：[CarLifePort](https://github.com/0x5e/CarLifePort)
 
 ## 配置
 
@@ -122,9 +107,9 @@ CarLife车机 - macOS版：[CarLifePort](https://github.com/0x5e/CarLifePort)
 MFi证书（`certificate.p7b`）、密钥（`identity.pk8`）文件可以在构建前放置于项目`authentication/`目录下，或是运行前拷贝至配置文件目录。
 
 ## 已知问题
-- 初次无线CarPlay配对可能会超时（约15秒），等超时后第二次才能成功配上，暂未找到原因。
-- 方向盘右侧方向键无法完整支持。无论按上下还是左右，MBUX NTG6.0车机都只会发送`KEYCODE_SELECTOR_NEXT`/`KEYCODE_SELECTOR_PREVIOUS`，无法辨别，只能按照滚轮“前/后”进行映射。
-- CarLife协议不支持夜间模式，因此CarPlay界面无法根据车外环境光自动变化浅色、深色模式。
+- 初次无线 CarPlay 配对可能会超时（约15秒），也可能会失败多次，原因暂不明。
+- 方向盘右侧方向键无法完整支持。无论按上下还是左右，MBUX NTG 6.0 车机都只会发送`KEYCODE_SELECTOR_NEXT`/`KEYCODE_SELECTOR_PREVIOUS`，无法辨别，只能按照滚轮“前/后”进行映射。
+- CarLife 协议不支持夜间模式，因此 CarPlay 界面无法根据车外环境光自动变化浅色、深色模式。
 
 ## 来源与许可
 参考项目：
@@ -132,4 +117,4 @@ MFi证书（`certificate.p7b`）、密钥（`identity.pk8`）文件可以在构�
 - [MacPlay](https://github.com/Roylyl/MacPlay)
 - [playport](https://github.com/youcci/playport)
 
-项目沿用GPL-3.0-or-later。
+项目沿用 GPL-3.0-or-later。
