@@ -1,73 +1,41 @@
 //! The status page: what the bridge is doing, read from a browser.
 //!
-//! The page is one file with no build step, and the server is three handlers.
-//! That is deliberate: this is a page for looking at a bridge that is already
-//! running, and everything it needs has to fit on a board that cannot reach the
-//! internet — so both the page and its stylesheet are compiled into the binary
-//! rather than fetched.
+//! The page is one file with no build step, and it has three tabs — 状态, 日志
+//! and 设置 — so there is one module per tab and this one is the shell they hang
+//! off: the router, the page itself, its stylesheet, and the channel table.
 //!
-//! Two paths do the work. `/` is the page, and `/api/status` is the one thing it
-//! reads: a single JSON document holding every part of the bridge, which the
-//! page polls. There is no push and no state on this side — the page asks, and
-//! the answer is whatever the bridge last reported. See `status` for who reports
-//! what, and `device` for the one part of it that nobody reports: the board's own
-//! CPU and memory, sampled on a task of its own.
+//! - [`status`] is the snapshot the page polls every two seconds, and the cover
+//!   picture it draws rather than reads.
+//! - [`log`] is the copy under `/var/log`, read forwards from where the page got
+//!   to.
+//! - [`settings`] is `config.json` seen from the page, and the buttons under
+//!   it that put the machine back to a known state.
 //!
-//! `/api/channels` is the channel table, asked for once when the page is opened.
-//! It is the same file `/info` takes its labels from, handed over as it is
-//! written: the page names a head unit's make from it, and a table compiled into
-//! the binary is not one a second copy in the page could keep up with.
-//!
-//! `/api/cover` is the one answer that is not JSON: the song's picture, which
-//! the page draws rather than reads. It is fetched by the name of the cover —
-//! a hash of the picture — so a page that has one keeps it and asks again only
-//! when the car has another, and an answer is only ever the picture that was
-//! asked for.
-//!
-//! `/api/log` is the other one: the copy of the log the program keeps under
-//! `/var/log`, asked for by how far the page has already read rather than in full.
-//! It is a file that is always being added to, so a page that wants to keep up
-//! with it has to say where it got to — see `log`. `/api/log/download` is the
-//! same copy as one file, for taking off the board.
-//!
-//! `/api/settings` is the one path that is written as well as read: the screen
-//! the page picks is `/etc/cp2cl/config.json`, and a `POST` replaces that file.
-//! The program reads it at the start of each session, so a save changes the next
-//! one.
-//!
-//! `/api/reset` is the page's copy of a three-second hold on the board's button:
-//! every phone unpaired, then one replug of the wired link. Both ask for it
-//! through `crate::reset`, so there is one implementation of it and not two.
+//! Everything is compiled into the binary rather than fetched: this is a page
+//! for looking at a bridge that is already running, and it has to work on a
+//! board that cannot reach the internet.
 //!
 //! `axum` is here for `axum::serve` and its router, which is less code than
 //! parsing a request line by hand and less to get wrong. It used to be here for
 //! a WebSocket too, and that half went with the browser client that needed it —
 //! see the changelog — so the only feature asked for is HTTP/1.1 over tokio.
 
-pub mod device;
-mod status;
+pub mod log;
+pub mod settings;
+pub mod status;
 
-// The parts of a report that are built by name rather than by assignment. The
-// rest of the answer is reached through `Status::with` and the two halves' own
-// reports.
+// The snapshot the page reads, built by name rather than by assignment.
 pub use status::Status;
 
-use std::path::Path;
 use std::sync::Arc;
 
-use axum::body::Bytes;
-use axum::extract::{Extension, RawQuery, State};
+use axum::extract::Extension;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use serde_json::json;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-
-use crate::logging;
-use crate::reset::Refusal;
 
 /// The page, and the stylesheet it names. Both live in `assets/web`, so they are
 /// built into the binary with everything else: there is nothing to install
@@ -79,24 +47,20 @@ const WEUI_NAME: &str = "web/vendor/weui.min.css";
 /// is named on the page without a second copy to keep in step.
 const CHANNELS_NAME: &str = "carlife_channel_map.json";
 
-/// One of those two, which is in the binary because `build.rs` put every file
-/// under `assets/` there. A name it does not have is a build that lost a file,
-/// and that is worth saying out loud rather than answering with nothing.
-fn embedded(name: &str) -> &'static str {
+/// One of those, which is in the binary because `build.rs` put every file under
+/// `assets/` there. A name it does not have is a build that lost a file, and
+/// that is worth saying out loud rather than answering with nothing.
+pub(crate) fn embedded(name: &str) -> &'static str {
     crate::assets::text(name).unwrap_or_else(|| panic!("assets/{name} is not in the binary"))
 }
 
 const HTML: &str = "text/html; charset=utf-8";
 const CSS: &str = "text/css; charset=utf-8";
-const JSON: &str = "application/json";
-const JPEG: &str = "image/jpeg";
-const PLAIN: &str = "text/plain; charset=utf-8";
+pub(crate) const JSON: &str = "application/json";
+pub(crate) const PLAIN: &str = "text/plain; charset=utf-8";
 
-/// A cover is fetched by the name of the cover, so an answer is good for as
-/// long as that name is — which is until the car is given another picture.
-const COVER_CACHE: &str = "public, max-age=31536000, immutable";
-
-/// Serves the page and its one endpoint, for as long as the program runs.
+/// Serves the page and the paths behind its three tabs, for as long as the
+/// program runs.
 ///
 /// The listener is bound by the caller, from the `addr` setting: a page is read
 /// by opening the board's address in a browser, and that address is a choice
@@ -104,7 +68,7 @@ const COVER_CACHE: &str = "public, max-age=31536000, immutable";
 ///
 /// `replug` is the channel the wired half is asked for one through, and
 /// `adapter` is the controller the pairings belong to — the two things a reset
-/// from the page needs. Both are the button's own: see `crate::reset`.
+/// from the page needs. Both are the button's own: see [`settings::reset`].
 ///
 /// Never returns while the bridge is up: `axum::serve` runs until the listener
 /// fails, and a failure there is worth a line rather than the end of the
@@ -120,14 +84,14 @@ pub async fn serve(
         .route("/", get(page))
         .route("/index.html", get(page))
         .route("/vendor/weui.min.css", get(stylesheet))
-        .route("/api/status", get(api))
+        .route("/api/status", get(status::api))
+        .route("/api/cover", get(status::cover))
         .route("/api/channels", get(channels))
-        .route("/api/cover", get(cover))
-        .route("/api/log", get(log))
-        .route("/api/log/download", get(download))
-        .route("/api/settings", get(settings).post(save))
-        .route("/api/restart", post(restart_service))
-        .route("/api/reset", post(factory_reset))
+        .route("/api/log", get(log::log))
+        .route("/api/log/download", get(log::download))
+        .route("/api/settings", get(settings::get).post(settings::save))
+        .route("/api/restart", post(settings::restart))
+        .route("/api/reset", post(settings::factory_reset))
         .fallback(not_found)
         .layer(Extension(replug))
         .layer(Extension(adapter))
@@ -145,22 +109,6 @@ async fn stylesheet() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, CSS)], embedded(WEUI_NAME))
 }
 
-/// The one endpoint the page reads.
-///
-/// Never cached: the whole point of it is that the answer is different a moment
-/// later, and a browser holding on to it would be showing the state of a bridge
-/// that has since moved on.
-async fn api(State(status): State<Arc<Status>>) -> Response {
-    (
-        [
-            (header::CONTENT_TYPE, JSON),
-            (header::CACHE_CONTROL, "no-store"),
-        ],
-        status.json().to_string(),
-    )
-        .into_response()
-}
-
 /// The channel table as the binary carries it: one entry per make, each with the
 /// channel numbers it answers on and, where there is one, the label the phone
 /// draws. Answered as it is written rather than as a table built here, so what a
@@ -172,84 +120,8 @@ async fn channels() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, JSON)], embedded(CHANNELS_NAME))
 }
 
-/// The screen the settings page picks, and the choices it picks from. Read out of
-/// the file rather than out of the running session: the file is what the page is
-/// editing and what the next run serves.
-async fn settings() -> Response {
-    json_answer(StatusCode::OK, crate::settings::answer())
-}
-
-/// The same file, written. A body that is not a size or a rate is a `400` rather
-/// than a file nobody can serve.
-async fn save(body: Bytes) -> Response {
-    let screen = match crate::settings::parse(&body) {
-        Ok(screen) => screen,
-        Err(e) => {
-            tracing::warn!("web.settings_refused err={e}");
-            return json_answer(StatusCode::BAD_REQUEST, json!({ "error": e }));
-        }
-    };
-    match crate::settings::save_screen(&screen) {
-        Ok(()) => {
-            tracing::info!("web.settings_saved screen={screen} effect=restart");
-            json_answer(StatusCode::OK, json!({ "ok": true }))
-        }
-        Err(e) => {
-            tracing::warn!("web.settings_save_failed err={e}");
-            json_answer(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                json!({ "error": format!("写入失败：{e}") }),
-            )
-        }
-    }
-}
-
-async fn restart_service(Extension(replug): Extension<mpsc::Sender<()>>) -> Response {
-    tracing::info!("web.restart_requested");
-    match replug.try_send(()) {
-        Ok(()) | Err(mpsc::error::TrySendError::Full(())) => {
-            json_answer(StatusCode::OK, json!({ "ok": true }))
-        }
-        Err(mpsc::error::TrySendError::Closed(())) => {
-            tracing::warn!("web.restart_refused err=carlife_half_not_running");
-            json_answer(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                json!({ "error": "CarLife 未在运行，无法重启" }),
-            )
-        }
-    }
-}
-
-/// The reset a held button does, asked for from the page.
-///
-/// Answers success or the reason it did not work, and nothing else: what the
-/// page has to say about it is one line either way.
-async fn factory_reset(
-    Extension(replug): Extension<mpsc::Sender<()>>,
-    Extension(adapter): Extension<String>,
-) -> Response {
-    tracing::info!("web.reset_requested");
-    match crate::reset::reset(&adapter, &replug, "web").await {
-        Ok(()) => json_answer(StatusCode::OK, json!({ "ok": true })),
-        Err(Refusal::Unpair(e)) => {
-            tracing::warn!("web.reset_failed err={e}");
-            json_answer(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                json!({ "error": format!("未能解除配对：{e}") }),
-            )
-        }
-        Err(Refusal::NotRunning) => {
-            tracing::warn!("web.reset_failed err=carlife_half_not_running");
-            json_answer(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                json!({ "error": "CarLife 未在运行，无法重连" }),
-            )
-        }
-    }
-}
-
-/// A JSON answer, never cached: both of these are about a file that changes.
-fn json_answer(status: StatusCode, body: serde_json::Value) -> Response {
+/// A JSON answer, never cached: all of these are about something that changes.
+pub(crate) fn json_answer(status: StatusCode, body: serde_json::Value) -> Response {
     (
         [
             (header::CONTENT_TYPE, JSON),
@@ -258,161 +130,6 @@ fn json_answer(status: StatusCode, body: serde_json::Value) -> Response {
         (status, body.to_string()),
     )
         .into_response()
-}
-
-/// The picture on the car's panel, which is the one answer here that is not
-/// JSON.
-///
-/// Its own path rather than a field in the snapshot: the page already has the
-/// picture it drew, and a status poll every two seconds is no place for thirty
-/// kilobytes of JPEG. The bytes are copied out from under the lock so the page
-/// can be answered without holding it.
-///
-/// Asked for by name, and answered only under the name of the picture that is
-/// held. A name that is not the current one is a page asking for a cover it
-/// drew before the song changed, and those bytes are gone — so it is answered
-/// with nothing rather than with whatever is here now, which would put one
-/// song's picture under another song's name and leave it in a cache that never
-/// expires.
-async fn cover(State(status): State<Arc<Status>>, RawQuery(query): RawQuery) -> Response {
-    let Some(cover) = status.artwork() else {
-        return (StatusCode::NOT_FOUND, "no cover\n").into_response();
-    };
-    if named(&query) != Some(cover.id) {
-        return (StatusCode::NOT_FOUND, "no cover\n").into_response();
-    }
-    (
-        [
-            (header::CONTENT_TYPE, JPEG),
-            (header::CACHE_CONTROL, COVER_CACHE),
-        ],
-        (*cover.bytes).clone(),
-    )
-        .into_response()
-}
-
-/// The copy of the log, from the byte the page has read up to.
-///
-/// Asked for by offset rather than in full: the copy is written continuously
-/// and the page asks every two seconds, so what goes over the wire is only
-/// what has been written since the last answer.
-///
-/// `reset` is the one way an offset can turn out to be nowhere: the copy was
-/// rolled over and is now shorter than where the page had got to, or the
-/// program has run again. Either way the page is told to drop what it had, and
-/// is given the copy from its beginning — which is what a page that asks for
-/// nothing at all is given too.
-async fn log(RawQuery(query): RawQuery) -> Response {
-    let (reset, from, text, read) = copied(Path::new(logging::PATH), from(&query)).await;
-    (
-        [
-            (header::CONTENT_TYPE, JSON),
-            (header::CACHE_CONTROL, "no-store"),
-        ],
-        json!({
-            "reset": reset,
-            "from": from,
-            "next": from + read,
-            "text": text,
-        })
-        .to_string(),
-    )
-        .into_response()
-}
-
-/// What has been written to the copy since `from`, which is `None` when the
-/// page has not asked for a place in it yet.
-///
-/// No offset means the whole of the copy, not the end of it. The copy is capped
-/// at four megabytes, so handing all of it over is bounded, and a page that
-/// opens at the tail would only ever be able to read forward from wherever it
-/// was opened.
-///
-/// The last part is how many bytes were handed over, which is the offset the
-/// next answer starts at. It is counted from the bytes rather than taken from
-/// the text: a copy is not promised to be valid UTF-8, and a lossy reading of
-/// what is not spells one or more bytes as a three-byte `U+FFFD`, so the text
-/// is longer than what it was read from and its length is no offset at all.
-async fn copied(path: &Path, from: Option<u64>) -> (bool, u64, String, u64) {
-    // No copy yet, or one that cannot be read, is an empty one: the page shows
-    // nothing and asks again.
-    let Ok(mut file) = tokio::fs::File::open(path).await else {
-        return (true, 0, String::new(), 0);
-    };
-    let written = file.metadata().await.map(|m| m.len()).unwrap_or(0);
-    let (reset, from) = match from {
-        Some(at) if at <= written => (false, at),
-        // Nowhere in this copy: either it was rolled over and is shorter than
-        // where the page had got to, or the program has run again.
-        _ => (true, 0),
-    };
-
-    let mut bytes = Vec::new();
-    if file.seek(std::io::SeekFrom::Start(from)).await.is_ok() {
-        let _ = file.read_to_end(&mut bytes).await;
-    }
-    let read = bytes.len() as u64;
-    (reset, from, String::from_utf8_lossy(&bytes).into_owned(), read)
-}
-
-/// Everything the board still has of the log, for taking away.
-///
-/// The page keeps up with the copy a chunk at a time and draws it with whatever
-/// level is being looked at, which is what watching a run go by wants — and not
-/// what is wanted by someone asking afterwards what happened. This answers with
-/// both chunks as they were written: the one that was rolled over, since it is
-/// the older of the two, then the one being added to.
-async fn download() -> Response {
-    let bytes = both(Path::new(logging::PREVIOUS), Path::new(logging::PATH)).await;
-    if bytes.is_empty() {
-        return (StatusCode::NOT_FOUND, "no log\n").into_response();
-    }
-    (
-        [
-            (header::CONTENT_TYPE, PLAIN),
-            (header::CONTENT_DISPOSITION, "attachment; filename=cp2cl.log"),
-            (header::CACHE_CONTROL, "no-store"),
-        ],
-        bytes,
-    )
-        .into_response()
-}
-
-/// The two chunks of the copy as one answer, the older one first.
-///
-/// A chunk that cannot be read is not a reason to answer with nothing: what is
-/// there is still the log, and the one that could be read is better than none
-/// of it.
-async fn both(first: &Path, then: &Path) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    for path in [first, then] {
-        if let Ok(mut file) = tokio::fs::File::open(path).await {
-            let _ = file.read_to_end(&mut bytes).await;
-        }
-    }
-    bytes
-}
-
-/// The offset a request asks for out of its query string.
-///
-/// One parameter, like `named`: `from=<bytes>`, which is where the last answer
-/// left the page. Anything else is no offset, and no offset is the beginning.
-fn from(query: &Option<String>) -> Option<u64> {
-    let asked = query.as_deref()?;
-    let at = asked.split('&').find_map(|pair| pair.strip_prefix("from="))?;
-    at.parse().ok()
-}
-
-/// The name a request asks for, out of its query string.
-///
-/// One parameter, so one split rather than a parser: `id=<name>`, sixteen hex
-/// digits as the snapshot writes them. Anything else — another parameter, a
-/// page's own `undefined`, nothing at all — is no name, and no name is no
-/// cover.
-fn named(query: &Option<String>) -> Option<u64> {
-    let asked = query.as_deref()?;
-    let name = asked.split('&').find_map(|pair| pair.strip_prefix("id="))?;
-    u64::from_str_radix(name, 16).ok()
 }
 
 /// Anything else, including the `/favicon.ico` every browser asks for.
@@ -424,18 +141,11 @@ async fn not_found() -> impl IntoResponse {
 mod tests {
     use super::*;
 
-    use carlife_md::report::Geometry;
-
-    /// A page with both halves empty and nothing sampled yet: what is served
-    /// before a run has learned anything.
-    fn empty_status() -> Status {
-        Status::new(Arc::new(carplay_hu::report::Report::new()))
-    }
-
     /// The page and its stylesheet, as the binary carries them.
     fn page_text() -> &'static str {
         embedded(PAGE_NAME)
     }
+
     fn weui_text() -> &'static str {
         embedded(WEUI_NAME)
     }
@@ -520,59 +230,27 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn the_page_restart_asks_for_one_replug() {
-        let (replug, mut asked) = mpsc::channel(1);
-        let answer = restart_service(Extension(replug)).await;
-        assert_eq!(answer.status(), StatusCode::OK);
-        assert_eq!(asked.try_recv(), Ok(()), "one replug was asked for");
-
-        let (replug, mut asked) = mpsc::channel(1);
-        replug.try_send(()).expect("room for one");
-        let answer = restart_service(Extension(replug)).await;
-        assert_eq!(answer.status(), StatusCode::OK);
-        assert_eq!(asked.try_recv(), Ok(()), "and not a second one");
-
-        let (replug, asked) = mpsc::channel(1);
-        drop(asked);
-        let answer = restart_service(Extension(replug)).await;
-        assert_eq!(answer.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    }
-
-    /// The reset removes pairings, so it is asked for twice: the page carries
-    /// its own dialog rather than leaving it to `confirm`, which a browser can
-    /// be told not to show.
+    /// The button that cannot be taken back asks through a dialog, which is part
+    /// of the markup rather than `confirm` — a browser can be set not to show
+    /// that one at all. It sits under the one that only puts the link back.
     #[test]
-    fn the_page_resets_every_pairing_behind_a_confirmation() {
-        assert!(
-            page_text().contains("恢复出厂设置"),
-            "the page names the button"
-        );
-        assert!(
-            page_text().contains("/api/reset"),
-            "and asks for the reset the button does"
-        );
-        for id in [
-            "confirm-mask",
-            "confirm-reset",
-            "confirm-ok",
-            "confirm-cancel",
+    fn the_page_asks_before_a_reset() {
+        for (label, path) in [
+            ("重启服务", "/api/restart"),
+            ("恢复出厂设置", "/api/reset"),
         ] {
+            assert!(page_text().contains(label), "the page names {label}");
+            assert!(page_text().contains(path), "and asks for it through {path}");
+        }
+        let restart = page_text().find("id=\"set-restart\"").expect("the restart button");
+        let reset = page_text().find("id=\"set-reset-all\"").expect("the reset button");
+        assert!(restart < reset, "restart, then reset");
+        for id in ["confirm-mask", "confirm-reset", "confirm-ok", "confirm-cancel"] {
             assert!(
                 page_text().contains(&format!("id=\"{id}\"")),
                 "the dialog has {id}"
             );
         }
-    }
-
-    /// What the handler is answerable for is the replug: the unpairing goes to
-    /// BlueZ, which no test has, so what these answer with here is the failure
-    /// — see the handler's own arms for what a page is told.
-    #[tokio::test]
-    async fn the_page_reset_asks_for_one_replug() {
-        let (replug, mut asked) = mpsc::channel(1);
-        let _ = factory_reset(Extension(replug), Extension("hci0".to_string())).await;
-        assert_eq!(asked.try_recv(), Ok(()), "one replug was asked for");
     }
 
     /// The page is three tabs, and the log one is the copy on disk read
@@ -615,445 +293,5 @@ mod tests {
             page_text().contains("/api/log/download"),
             "and the whole of it can be taken away"
         );
-    }
-
-    /// The page is one document and reads one key per part, so the snapshot has
-    /// to keep answering under those names.
-    #[test]
-    fn the_endpoint_answers_with_every_part() {
-        let status = empty_status();
-        let body = status.json();
-        assert!(body.get("carlife").is_some());
-        assert!(body.get("carplay").is_some());
-        assert!(body.get("now_playing").is_some());
-        assert!(body.get("device").is_some());
-    }
-
-    /// What is playing is its own part of the page, and its cover comes from a
-    /// path of its own: a picture is drawn, not read out of the JSON.
-    #[test]
-    fn the_page_reads_the_song_from_its_own_part() {
-        assert!(
-            page_text().contains("data.now_playing"),
-            "the page reads the part"
-        );
-        assert!(
-            page_text().contains("/api/cover?id="),
-            "and fetches the cover itself, by the name it was given"
-        );
-        assert!(
-            page_text().contains("BOTH_UP"),
-            "and shows the section only while both ends are up"
-        );
-        assert!(
-            page_text().contains("duration_s"),
-            "the page writes the length itself, from seconds"
-        );
-        let body = empty_status().json();
-        assert!(body["now_playing"]["duration_s"].is_null());
-    }
-
-    /// The bar and the play state on the page are the ones the car was given.
-    /// A number worked out again for the page could differ from the one on the
-    /// wire, and then the page would be describing a bar that is not there.
-    #[test]
-    fn the_page_shows_the_bar_the_car_was_given() {
-        let status = empty_status();
-        assert!(status.json()["now_playing"]["progress_ms"].is_null());
-        assert!(status.json()["now_playing"]["playing"].is_null());
-
-        status.carlife().with(|s| {
-            s.now_playing.progress_ms = Some(20_000);
-            s.now_playing.playing = Some(true);
-        });
-        assert_eq!(status.json()["now_playing"]["progress_ms"], 20_000);
-        assert_eq!(status.json()["now_playing"]["playing"], true);
-
-        // A new session starts having told the car nothing at all.
-        status.carlife().song_cleared();
-        assert!(status.json()["now_playing"]["progress_ms"].is_null());
-        assert!(status.json()["now_playing"]["playing"].is_null());
-
-        assert!(
-            page_text().contains("playing.progress_ms"),
-            "the bar is drawn from the position the car was given"
-        );
-        // Before a position is sent the row is still drawn, at the start of the
-        // song, so the length is on the page from the moment there is a song.
-        assert!(
-            !page_text().contains("progressLine.style.display"),
-            "the bar is never taken out of the page"
-        );
-        assert!(
-            page_text().contains("播放中"),
-            "and the state is shown as one"
-        );
-    }
-
-    /// A cover is served until another replaces it, and it is named by what is
-    /// in it: the same picture twice costs the page one fetch, a different one
-    /// never reuses the name, and an empty one is no picture at all.
-    #[test]
-    fn a_cover_is_named_by_what_is_in_it() {
-        let status = empty_status();
-        assert!(status.artwork().is_none(), "nothing to draw yet");
-
-        status.carlife().artwork_changed(vec![0xff, 0xd8, 0xff]);
-        let first = status.json()["now_playing"]["cover"]["id"].clone();
-        assert_eq!(status.artwork().map(|c| c.bytes.len()), Some(3));
-
-        // The same bytes again are the same picture, so the page keeps it.
-        status.carlife().artwork_changed(vec![0xff, 0xd8, 0xff]);
-        assert_eq!(status.json()["now_playing"]["cover"]["id"], first);
-
-        // Another picture is another name.
-        status.carlife().artwork_changed(vec![0x42]);
-        assert_ne!(status.json()["now_playing"]["cover"]["id"], first);
-
-        // An empty one is the phone saying this song has no picture.
-        status.carlife().artwork_changed(Vec::new());
-        assert!(status.artwork().is_none());
-        assert!(status.json()["now_playing"]["cover"].is_null());
-
-        // And a new session starts with nothing, which lets the bytes go.
-        status.carlife().artwork_changed(vec![1, 2, 3]);
-        status.carlife().song_cleared();
-        assert!(status.artwork().is_none());
-        assert!(status.json()["now_playing"]["song"].is_null());
-    }
-
-    /// A cover is answered only under the name of the picture that is held.
-    ///
-    /// The name is the picture, so an answer under another name would be one
-    /// song's cover drawn as another's — and kept under that name for a year by
-    /// the browser. A page whose cover had no name asks for `id=undefined`; one
-    /// that kept a name from a song that has finished asks for that. Neither is
-    /// this picture, so neither is given it.
-    #[tokio::test]
-    async fn a_cover_is_only_served_under_its_own_name() {
-        use axum::body::to_bytes;
-
-        let status = Arc::new(empty_status());
-        let ask = |query: Option<&str>| {
-            cover(State(status.clone()), RawQuery(query.map(str::to_owned)))
-        };
-
-        // Nothing to draw yet, whatever is asked for.
-        assert_eq!(ask(Some("id=0")).await.status(), StatusCode::NOT_FOUND);
-
-        status.carlife().artwork_changed(vec![0xff, 0xd8, 0xff]);
-        let name = format!("{:016x}", status.artwork().unwrap().id);
-
-        let answer = ask(Some(&format!("id={name}"))).await;
-        assert_eq!(answer.status(), StatusCode::OK);
-        let bytes = to_bytes(answer.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(&bytes[..], &[0xff, 0xd8, 0xff]);
-
-        for query in [Some("id=undefined"), Some("n=0"), Some("id=0"), None] {
-            assert_eq!(
-                ask(query).await.status(),
-                StatusCode::NOT_FOUND,
-                "{query:?} is not the name of the cover"
-            );
-        }
-    }
-
-    /// A coding is a constant of the receiver, not of the page: the answer has to
-    /// carry it, and the page has to read it from there. The profile and the
-    /// level are the stream's own, so both halves say the same ones — there is
-    /// one video stream and the car is given it unchanged.
-    #[test]
-    fn the_page_reads_the_coding_from_the_answer() {
-        assert!(page_text().contains("d.video"), "the page reads the field");
-        assert!(!page_text().contains("H.264"), "and names no coding itself");
-        let report = Arc::new(carplay_hu::report::Report::new());
-        let status = Status::new(report.clone());
-        let body = status.json();
-        assert_eq!(
-            body["carplay"]["video"]["codec"],
-            carplay_hu::CODEC,
-            "which is what the snapshot carries"
-        );
-        assert!(body["carplay"]["video"]["profile"].is_null(), "nothing described yet");
-        assert_eq!(
-            body["carlife"]["video"]["codec"],
-            carplay_hu::CODEC
-        );
-
-        report.with(|s| {
-            s.video.profile = Some("Baseline".to_string());
-            s.video.level = Some("3.1".to_string());
-        });
-        let body = status.json();
-        for half in ["carplay", "carlife"] {
-            assert_eq!(body[half]["video"]["profile"], "Baseline");
-            assert_eq!(body[half]["video"]["level"], "3.1");
-        }
-    }
-
-    /// A PCM stream is described the same way on both halves, so the answer
-    /// carries the sample width and the page reads it rather than naming one.
-    #[test]
-    fn the_page_reads_the_sample_width_from_the_answer() {
-        assert!(page_text().contains("bits(a.bits)"), "the phone's half reads the field");
-        assert!(page_text().contains("bits(d.media.bits)"), "the car's half reads the field");
-        assert!(!page_text().contains("16-bit"), "and names no width itself");
-
-        let report = Arc::new(carplay_hu::report::Report::new());
-        report.with(|s| {
-            s.carplay.audio.push(carplay_hu::report::Audio {
-                name: "media".into(),
-                codec: "PCM".into(),
-                bits: Some(16),
-                rate: 48_000,
-                channels: 2,
-                ..Default::default()
-            });
-        });
-        let body = Status::new(report).json();
-        assert_eq!(body["carplay"]["audio"][0]["bits"], 16);
-    }
-
-    /// The panel is the car's, so the page shows its physical size on the car's
-    /// side, next to the size the car named, and reads it from the answer.
-    #[test]
-    fn the_page_reads_the_panel_size_from_the_cars_half() {
-        assert!(
-            page_text().contains("d.physical"),
-            "the page reads the field"
-        );
-        let status = empty_status();
-        status.carlife().with(|s| s.carlife.physical = Some((407, 229)));
-        let body = status.json();
-        assert_eq!(body["carlife"]["physical"]["width_mm"], 407);
-        assert_eq!(body["carlife"]["physical"]["height_mm"], 229);
-    }
-
-    /// The size in force is the `agreed` one, whoever named it: a number the
-    /// channel table preconfigures has the table's size stored where the car's
-    /// would be, so the page reads one field and the table is where the number
-    /// comes from.
-    #[test]
-    fn the_page_shows_the_size_in_force() {
-        assert!(
-            page_text().contains("size(d.agreed)"),
-            "the page reads the one field"
-        );
-        assert!(
-            embedded(CHANNELS_NAME).contains("\"video\""),
-            "and the table is where the number comes from"
-        );
-
-        let status = empty_status();
-        assert!(
-            status.json()["carlife"]["agreed"].is_null(),
-            "no screen has been named yet"
-        );
-
-        status.carlife().with(|s| {
-            s.carlife.agreed = Some(Geometry {
-                width: 1920,
-                height: 720,
-                fps: 30,
-            });
-        });
-        let body = status.json();
-        assert_eq!(body["carlife"]["agreed"]["width"], 1920);
-        assert_eq!(body["carlife"]["agreed"]["height"], 720);
-        assert_eq!(body["carlife"]["agreed"]["fps"], 30);
-    }
-
-    /// The car's position is a section of its own, and it is the car's: the page
-    /// shows it while the car reports one and reads it from the car's half.
-    #[test]
-    fn the_page_reads_the_cars_position_from_its_own_part() {
-        assert!(
-            page_text().contains("车载数据 · GPS"),
-            "it has a heading of its own"
-        );
-        assert!(
-            page_text().contains("data.carlife.gps"),
-            "and the page reads the fix"
-        );
-
-        let status = empty_status();
-        assert!(
-            status.json()["carlife"]["gps"].is_null(),
-            "a car that has not reported a position yet is not one at zero degrees"
-        );
-
-        status.carlife().with(|s| {
-            s.carlife.gps = Some(carlife_md::CarGps {
-                antenna_state: 1,
-                latitude: 30_317_880,
-                longitude: 120_128_094,
-                ..Default::default()
-            });
-        });
-        let body = status.json();
-        assert_eq!(body["carlife"]["gps"]["latitude"], 30_317_880);
-        assert_eq!(body["carlife"]["gps"]["longitude"], 120_128_094);
-    }
-
-    /// The speed is a section of its own as well, and it is the car's for the same
-    /// reason: no speed reported yet is not a car standing still.
-    #[test]
-    fn the_page_reads_the_cars_speed_from_its_own_part() {
-        assert!(
-            page_text().contains("车载数据 · 车速"),
-            "it has a heading of its own"
-        );
-        assert!(
-            page_text().contains("data.carlife.speed"),
-            "and the page reads the speed"
-        );
-
-        let status = empty_status();
-        assert!(
-            status.json()["carlife"]["speed"].is_null(),
-            "a car that has not reported a speed yet is not one at zero"
-        );
-
-        // Zero is a speed the car has reported, and it is shown as one.
-        status.carlife().with(|s| s.carlife.speed = Some(0));
-        assert_eq!(status.json()["carlife"]["speed"], 0);
-    }
-
-    /// The log is a file that is always being added to, so the page asks for
-    /// what it has not read rather than for all of it: an answer carries what
-    /// was written since the offset, and the offset to ask from next.
-    ///
-    /// An offset that is nowhere in the copy — a copy that has been rolled over
-    /// and is shorter than where the page had got to — is answered with the
-    /// copy from the beginning, and with `reset` so the page knows to drop what
-    /// it had rather than carry on from the end of another run.
-    #[tokio::test]
-    async fn the_log_is_read_from_where_the_page_left_off() {
-        let path = std::env::temp_dir().join(format!("cp2cl-log-{}", std::process::id()));
-        std::fs::write(&path, "one\ntwo\n").unwrap();
-
-        let (reset, from, text, read) = copied(&path, None).await;
-        assert!(reset, "no offset is the beginning");
-        assert_eq!((from, text.as_str(), read), (0, "one\ntwo\n", 8));
-
-        // The next answer starts where that one ended, and carries nothing new.
-        let (reset, from, text, read) = copied(&path, Some(read)).await;
-        assert!(!reset, "an offset in the copy is kept");
-        assert_eq!((from, text.as_str(), read), (8, "", 0));
-
-        // Half way in is the rest of it, from there.
-        let (reset, from, text, read) = copied(&path, Some(4)).await;
-        assert!(!reset);
-        assert_eq!((from, text.as_str(), read), (4, "two\n", 4));
-
-        // Past the end is a copy that moved under the page: rolled, or written
-        // by another run.
-        let (reset, from, text, read) = copied(&path, Some(4096)).await;
-        assert!(reset);
-        assert_eq!((from, text.as_str(), read), (0, "one\ntwo\n", 8));
-
-        // A copy that is not there is an empty one, and is not an error.
-        let gone = std::env::temp_dir().join("cp2cl-log-not-here");
-        let (reset, from, text, read) = copied(&gone, Some(8)).await;
-        assert!(reset);
-        assert_eq!((from, text.as_str(), read), (0, "", 0));
-
-        std::fs::remove_file(&path).ok();
-    }
-
-    /// How far the page has read is a count of bytes, and a text is not one: a
-    /// byte the copy has that UTF-8 does not is spelled as a three-byte
-    /// `U+FFFD`, so an offset taken from the text would run ahead of the copy
-    /// and the lines after it would be read from the wrong place.
-    #[tokio::test]
-    async fn the_offset_counts_the_bytes_and_not_the_text() {
-        let path = std::env::temp_dir().join(format!("cp2cl-log-odd-{}", std::process::id()));
-        std::fs::write(&path, b"a\xffb\n").unwrap();
-
-        let (reset, from, text, read) = copied(&path, None).await;
-        assert!(reset);
-        assert_eq!(from, 0);
-        assert_eq!(read, 4, "four bytes in the copy");
-        assert_eq!(text.len(), 6, "and six in the text made of them");
-        assert!(text.ends_with("b\n"));
-
-        std::fs::remove_file(&path).ok();
-    }
-
-    /// A page that has just been opened is given the whole of the copy, not the
-    /// tail of it: the copy is capped at four megabytes, and a page that opened
-    /// at the tail could only ever read forward from there.
-    #[tokio::test]
-    async fn the_log_opens_at_its_beginning() {
-        let path = std::env::temp_dir().join(format!("cp2cl-tail-{}", std::process::id()));
-        let line = "x".repeat(99) + "\n";
-        std::fs::write(&path, line.repeat(3000)).unwrap();
-
-        let (reset, from, text, read) = copied(&path, None).await;
-        assert!(reset, "a page with no offset starts over");
-        assert_eq!(from, 0, "at the beginning of the copy");
-        assert_eq!(text.len(), 300_000, "and carries all of it");
-        assert_eq!(read, 300_000, "which is where the next one starts");
-
-        std::fs::remove_file(&path).ok();
-    }
-
-    /// Taking the copy away is the whole of it rather than what the page is
-    /// showing: both chunks, the older one first, and no level left out.
-    #[tokio::test]
-    async fn the_whole_copy_is_both_chunks_with_the_older_one_first() {
-        let dir = std::env::temp_dir();
-        let before = dir.join(format!("cp2cl-before-{}", std::process::id()));
-        let now = dir.join(format!("cp2cl-now-{}", std::process::id()));
-        std::fs::write(&before, "debug\nbefore\n").unwrap();
-        std::fs::write(&now, "now\n").unwrap();
-
-        assert_eq!(both(&before, &now).await, b"debug\nbefore\nnow\n".to_vec());
-
-        // A chunk that is not there is only the other one, not nothing.
-        std::fs::remove_file(&before).unwrap();
-        assert_eq!(both(&before, &now).await, b"now\n".to_vec());
-
-        // Neither of them is a copy at all.
-        assert!(both(&before, &before).await.is_empty());
-
-        std::fs::remove_file(&now).ok();
-    }
-
-    /// The board's own CPU and memory are their own part of the page, and the
-    /// page writes both rows itself: a percent from the share the answer gives
-    /// it, and memory from the two byte counts.
-    #[test]
-    fn the_page_reads_the_device_from_its_own_part() {
-        assert!(page_text().contains("设备端"), "it has a heading of its own");
-        assert!(page_text().contains("data.device"), "and the page reads the part");
-        assert!(
-            page_text().contains("d.cpu_percent"),
-            "the page writes the percentage, from the share the answer gives it"
-        );
-        assert!(
-            page_text().contains("d.software"),
-            "and writes the version the binary was built as"
-        );
-        assert!(
-            page_text().contains("d.firmware"),
-            "and names the distribution the board is running on"
-        );
-        assert!(page_text().contains("d.kernel"), "and the kernel under it");
-        let status = empty_status();
-        assert!(
-            status.json()["device"]["memory_total"].is_null(),
-            "nothing sampled yet is not zero"
-        );
-
-        status.with(|s| {
-            s.device.cpu_percent = Some(37);
-            s.device.memory_used = Some(100 * 1024 * 1024);
-            s.device.memory_total = Some(496 * 1024 * 1024);
-        });
-        let body = status.json();
-        assert_eq!(body["device"]["cpu_percent"], 37);
-        assert_eq!(body["device"]["memory_used"], 100 * 1024 * 1024);
-        assert_eq!(body["device"]["memory_total"], 496 * 1024 * 1024);
     }
 }

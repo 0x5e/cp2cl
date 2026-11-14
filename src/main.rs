@@ -19,8 +19,6 @@ mod guide;
 mod hooks;
 mod led;
 mod logging;
-mod reset;
-mod settings;
 mod sink;
 mod web;
 
@@ -79,7 +77,7 @@ async fn main() -> Result<()> {
         .with(
             tracing_subscriber::fmt::layer()
                 .event_format(logging::Line)
-                .with_filter(logging::filter(settings::log_filter())),
+                .with_filter(logging::filter(config::log_filter())),
         )
         .with(
             tracing_subscriber::fmt::layer()
@@ -95,13 +93,13 @@ async fn main() -> Result<()> {
 
     // Read once: what is saved while this run is up reaches the phone on the
     // next one.
-    let cfg = Arc::new(settings::load_or_create());
+    let cfg = Arc::new(config::load_or_create());
 
     tracing::info!("main.started name=cp2cl");
     // Which build this run is, said once and at the top: every question about a
     // log begins with "which build was that", and the answer is not in the lines
     // that follow. It is the same string the page shows, from the same place.
-    tracing::info!("main.version software={:?}", web::device::SOFTWARE);
+    tracing::info!("main.version software={:?}", web::status::SOFTWARE);
     tracing::info!("main.screen {}", cfg.screen);
 
     // The settings this run was handed. Which link a phone arrives on is not
@@ -111,7 +109,7 @@ async fn main() -> Result<()> {
         "main.config wifi_iface={} bt_adapter={} log_level={}",
         cfg.wifi_iface,
         cfg.bt_adapter,
-        settings::level_name(cfg.log_level)
+        config::level_name(cfg.log_level)
     );
 
     // One channel for the two things that ask the wired link to come back: the
@@ -175,7 +173,7 @@ async fn main() -> Result<()> {
 
     // The board's own CPU and memory, which nothing in the bridge measures: the
     // page's last section, and the only one sampled rather than reported.
-    tokio::spawn(web::device::watch(status.clone()));
+    tokio::spawn(web::status::watch(status.clone()));
 
     // Ask for a free port rather than picking one: whatever we get is what gets
     // advertised to the phone, so there is no way for the two to disagree.

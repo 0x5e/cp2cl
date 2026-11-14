@@ -88,7 +88,7 @@ pub async fn watch(adapter: String, replug: mpsc::Sender<()>) {
                 held_until = None;
                 // Nothing here can act on a failure: the lines it wrote are
                 // the whole of what a hold has to say.
-                let _ = crate::reset::reset(&adapter, &replug, "button").await;
+                let _ = crate::web::settings::reset(&adapter, &replug, "button").await;
             }
         }
     }

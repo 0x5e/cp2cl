@@ -80,7 +80,7 @@ impl Hooks {
     /// Read each time rather than kept: the page writes it while the program
     /// runs, and a copy taken at startup is a copy of what was there before.
     pub fn screen_chosen(&self) -> ScreenOverride {
-        let picked = crate::settings::load().screen;
+        let picked = crate::config::load().screen;
         ScreenOverride {
             size: picked.resolution.map(|size| Size {
                 width: size.width,
