@@ -19,6 +19,7 @@ mod guide;
 mod hooks;
 mod led;
 mod logging;
+mod reset;
 mod settings;
 mod sink;
 mod web;
@@ -162,7 +163,12 @@ async fn main() -> Result<()> {
     match TcpListener::bind(cfg.addr.as_str()).await {
         Ok(listener) => {
             tracing::info!("web.listening url=http://{}/", cfg.addr);
-            tokio::spawn(web::serve(listener, status.clone(), replug));
+            tokio::spawn(web::serve(
+                listener,
+                status.clone(),
+                replug,
+                cfg.bt_adapter.clone(),
+            ));
         }
         Err(e) => tracing::warn!("web.listen_failed addr={} err={e:#}", cfg.addr),
     }

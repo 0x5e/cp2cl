@@ -35,6 +35,10 @@
 //! The program reads it at the start of each session, so a save changes the next
 //! one.
 //!
+//! `/api/reset` is the page's copy of a three-second hold on the board's button:
+//! every phone unpaired, then one replug of the wired link. Both ask for it
+//! through `crate::reset`, so there is one implementation of it and not two.
+//!
 //! `axum` is here for `axum::serve` and its router, which is less code than
 //! parsing a request line by hand and less to get wrong. It used to be here for
 //! a WebSocket too, and that half went with the browser client that needed it —
@@ -63,6 +67,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
 use crate::logging;
+use crate::reset::Refusal;
 
 /// The page, and the stylesheet it names. Both live in `assets/web`, so they are
 /// built into the binary with everything else: there is nothing to install
@@ -97,11 +102,20 @@ const COVER_CACHE: &str = "public, max-age=31536000, immutable";
 /// by opening the board's address in a browser, and that address is a choice
 /// rather than something this side can know.
 ///
+/// `replug` is the channel the wired half is asked for one through, and
+/// `adapter` is the controller the pairings belong to — the two things a reset
+/// from the page needs. Both are the button's own: see `crate::reset`.
+///
 /// Never returns while the bridge is up: `axum::serve` runs until the listener
 /// fails, and a failure there is worth a line rather than the end of the
 /// program — the streams are what matter, and a page that has gone quiet is not
 /// a reason to take them down.
-pub async fn serve(listener: TcpListener, status: Arc<Status>, replug: mpsc::Sender<()>) {
+pub async fn serve(
+    listener: TcpListener,
+    status: Arc<Status>,
+    replug: mpsc::Sender<()>,
+    adapter: String,
+) {
     let app = Router::new()
         .route("/", get(page))
         .route("/index.html", get(page))
@@ -113,8 +127,10 @@ pub async fn serve(listener: TcpListener, status: Arc<Status>, replug: mpsc::Sen
         .route("/api/log/download", get(download))
         .route("/api/settings", get(settings).post(save))
         .route("/api/restart", post(restart_service))
+        .route("/api/reset", post(factory_reset))
         .fallback(not_found)
         .layer(Extension(replug))
+        .layer(Extension(adapter))
         .with_state(status);
     if let Err(e) = axum::serve(listener, app).await {
         tracing::warn!("web.serve_failed err={e}");
@@ -199,6 +215,34 @@ async fn restart_service(Extension(replug): Extension<mpsc::Sender<()>>) -> Resp
             json_answer(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 json!({ "error": "CarLife 未在运行，无法重启" }),
+            )
+        }
+    }
+}
+
+/// The reset a held button does, asked for from the page.
+///
+/// Answers success or the reason it did not work, and nothing else: what the
+/// page has to say about it is one line either way.
+async fn factory_reset(
+    Extension(replug): Extension<mpsc::Sender<()>>,
+    Extension(adapter): Extension<String>,
+) -> Response {
+    tracing::info!("web.reset_requested");
+    match crate::reset::reset(&adapter, &replug, "web").await {
+        Ok(()) => json_answer(StatusCode::OK, json!({ "ok": true })),
+        Err(Refusal::Unpair(e)) => {
+            tracing::warn!("web.reset_failed err={e}");
+            json_answer(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({ "error": format!("未能解除配对：{e}") }),
+            )
+        }
+        Err(Refusal::NotRunning) => {
+            tracing::warn!("web.reset_failed err=carlife_half_not_running");
+            json_answer(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({ "error": "CarLife 未在运行，无法重连" }),
             )
         }
     }
@@ -493,6 +537,42 @@ mod tests {
         drop(asked);
         let answer = restart_service(Extension(replug)).await;
         assert_eq!(answer.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// The reset removes pairings, so it is asked for twice: the page carries
+    /// its own dialog rather than leaving it to `confirm`, which a browser can
+    /// be told not to show.
+    #[test]
+    fn the_page_resets_every_pairing_behind_a_confirmation() {
+        assert!(
+            page_text().contains("恢复出厂设置"),
+            "the page names the button"
+        );
+        assert!(
+            page_text().contains("/api/reset"),
+            "and asks for the reset the button does"
+        );
+        for id in [
+            "confirm-mask",
+            "confirm-reset",
+            "confirm-ok",
+            "confirm-cancel",
+        ] {
+            assert!(
+                page_text().contains(&format!("id=\"{id}\"")),
+                "the dialog has {id}"
+            );
+        }
+    }
+
+    /// What the handler is answerable for is the replug: the unpairing goes to
+    /// BlueZ, which no test has, so what these answer with here is the failure
+    /// — see the handler's own arms for what a page is told.
+    #[tokio::test]
+    async fn the_page_reset_asks_for_one_replug() {
+        let (replug, mut asked) = mpsc::channel(1);
+        let _ = factory_reset(Extension(replug), Extension("hci0".to_string())).await;
+        assert_eq!(asked.try_recv(), Ok(()), "one replug was asked for");
     }
 
     /// The page is three tabs, and the log one is the copy on disk read
