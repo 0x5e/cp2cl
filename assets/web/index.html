@@ -88,7 +88,7 @@
     color:var(--weui-FG-0);background:none;-webkit-appearance:none;appearance:none}
   .weui-btn-area{margin-top:26px;display:flex;justify-content:center;gap:12px}
   .weui-btn-area .weui-btn{margin:0;min-width:0;width:136px}
-  #set-restart,#set-reset-all{width:284px}
+  #set-restart,#set-reboot,#set-reset-all{width:284px}
   /* The dialog is shown by taking `hidden` off, so the two rules that lay it
      out have to give way to it. */
   .weui-mask[hidden],.weui-dialog[hidden]{display:none}
@@ -156,23 +156,24 @@
       <button class="weui-btn weui-btn_default" id="set-restart">重启服务</button>
     </div>
     <div class="weui-btn-area">
+      <button class="weui-btn weui-btn_default" id="set-reboot">重启设备</button>
+    </div>
+    <div class="weui-btn-area">
       <button class="weui-btn weui-btn_warn" id="set-reset-all">恢复出厂设置</button>
     </div>
     <p class="stamp" id="set-stamp">正在读取…</p>
   </div>
 </div>
 <div class="weui-mask" id="confirm-mask" hidden></div>
-<div class="weui-dialog" id="confirm-reset" hidden role="dialog" aria-modal="true"
-     aria-labelledby="confirm-reset-title">
+<div class="weui-dialog" id="confirm-box" hidden role="dialog" aria-modal="true"
+     aria-labelledby="confirm-title">
   <div class="weui-dialog__hd">
-    <strong class="weui-dialog__title" id="confirm-reset-title">恢复出厂设置</strong>
+    <strong class="weui-dialog__title" id="confirm-title"></strong>
   </div>
-  <div class="weui-dialog__bd">
-    解除本机与所有手机的配对，并断开重连车机。之后每台手机都要重新配对才能用无线 CarPlay。
-  </div>
+  <div class="weui-dialog__bd" id="confirm-body"></div>
   <div class="weui-dialog__ft">
     <button class="weui-dialog__btn weui-dialog__btn_default" id="confirm-cancel">取消</button>
-    <button class="weui-dialog__btn weui-dialog__btn_warn" id="confirm-ok">恢复</button>
+    <button class="weui-dialog__btn weui-dialog__btn_warn" id="confirm-ok">确定</button>
   </div>
 </div>
 <div class="weui-toast weui-toast_text" id="toast" hidden>
@@ -855,13 +856,27 @@ async function restartService() {
   }
 }
 
-// The reset a held button does: every phone unpaired, then one replug of the
-// wired link. It is asked for twice, because what it removes is not something
-// the page can put back.
-function askReset(open) {
-  for (const id of ["confirm-mask", "confirm-reset"]) {
+// Two of the buttons below cannot be taken back, so both ask twice: the dialog
+// is the page's own rather than `confirm`, which a browser can be set to
+// suppress, and what is pending is whichever action named it last.
+let confirming = null;
+
+function showConfirm(open) {
+  for (const id of ["confirm-mask", "confirm-box"]) {
     document.getElementById(id).hidden = !open;
   }
+}
+
+function askConfirm(title, body, action) {
+  document.getElementById("confirm-title").textContent = title;
+  document.getElementById("confirm-body").textContent = body;
+  confirming = action;
+  showConfirm(true);
+}
+
+function cancelConfirm() {
+  confirming = null;
+  showConfirm(false);
 }
 
 async function factoryReset() {
@@ -879,15 +894,38 @@ async function factoryReset() {
   }
 }
 
+async function rebootDevice() {
+  const button = document.getElementById("set-reboot");
+  button.disabled = true;
+  try {
+    const response = await fetch("/api/reboot", { method: "POST" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "HTTP " + response.status);
+    showToast("设备正在重启，约半分钟后可用");
+  } catch (e) {
+    showToast("重启失败：" + e.message);
+  } finally {
+    setTimeout(() => { button.disabled = false; }, 5000);
+  }
+}
+
 document.getElementById("set-reset").addEventListener("click", () => shown(saved));
 document.getElementById("set-save").addEventListener("click", saveSettings);
 document.getElementById("set-restart").addEventListener("click", restartService);
-document.getElementById("set-reset-all").addEventListener("click", () => askReset(true));
-document.getElementById("confirm-cancel").addEventListener("click", () => askReset(false));
-document.getElementById("confirm-mask").addEventListener("click", () => askReset(false));
+document.getElementById("set-reboot").addEventListener("click", () => askConfirm(
+  "重启设备",
+  "设备将整机重启，车机画面会中断约半分钟。",
+  rebootDevice));
+document.getElementById("set-reset-all").addEventListener("click", () => askConfirm(
+  "恢复出厂设置",
+  "解除本机与所有手机的配对，并断开重连车机。之后每台手机都要重新配对才能用无线 CarPlay。",
+  factoryReset));
+document.getElementById("confirm-cancel").addEventListener("click", cancelConfirm);
+document.getElementById("confirm-mask").addEventListener("click", cancelConfirm);
 document.getElementById("confirm-ok").addEventListener("click", () => {
-  askReset(false);
-  factoryReset();
+  const action = confirming;
+  cancelConfirm();
+  if (action) action();
 });
 
 // ---------------------------------------------------------------- tabs ----

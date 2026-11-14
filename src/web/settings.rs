@@ -1,14 +1,14 @@
-//! The settings tab: the screen `config.json` holds, and the two buttons
+//! The settings tab: the screen `config.json` holds, and the three buttons
 //! under it that put the machine back to a known state.
 //!
 //! The file itself is read and written by [`crate::config`]; what is here is the
 //! page's face on it — the choices its two lists are built from, the check a
 //! body goes through before it becomes a file, and the actions that restart the
-//! link or clear every pairing at once.
+//! link, the board, or every pairing at once.
 //!
-//! The two actions differ in what they take away, and that is the order the
-//! page shows them in: the service (one replug), then every pairing (a replug
-//! after the pairings are gone).
+//! The three actions differ in what they take away, and that is the order the
+//! page shows them in: the service (one replug), the board (a reboot), every
+//! pairing (a replug after the pairings are gone).
 
 use axum::body::Bytes;
 use axum::extract::Extension;
@@ -31,6 +31,11 @@ const RESOLUTIONS: [(u32, u32, &str); 4] = [
 
 /// The rates the page offers.
 const RATES: [u32; 2] = [30, 60];
+
+/// How long the answer to a reboot has to get out before the machine goes down.
+/// The reply is written first and the reboot follows it, because a page that is
+/// answered after the fact is a page that never hears it.
+const REBOOT_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// The settings as they stand, and the choices the page builds its lists from.
 pub async fn get() -> Response {
@@ -108,6 +113,27 @@ pub async fn factory_reset(
     }
 }
 
+/// The whole board, not this program: the answer is written first and the
+/// reboot follows it, so the page hears an answer rather than a dropped
+/// connection.
+///
+/// Nothing is put back on the way down — no `stopping`, no lights, no channel
+/// closed on purpose. A reboot is not a stop, and the next start is the same as
+/// a power cut; what it does have is the flush, which [`now`] does.
+pub async fn reboot() -> Response {
+    tracing::info!("web.reboot_requested");
+    tokio::spawn(async {
+        tokio::time::sleep(REBOOT_DELAY).await;
+        // The last line this boot writes, and the reason it is a warn if it
+        // fails: the page has already been told the machine is going.
+        tracing::info!("main.reboot scope=device");
+        if let Err(e) = now() {
+            tracing::error!("main.reboot_failed err={e}");
+        }
+    });
+    json_answer(StatusCode::OK, json!({ "ok": true }))
+}
+
 /// Why a reset did not do what was asked.
 pub enum Refusal {
     /// BlueZ could not be asked to remove the pairings. The string is what it
@@ -158,6 +184,19 @@ pub async fn reset(adapter: &str, replug: &mpsc::Sender<()>, reason: &str) -> Re
     unpaired?;
     if !replugged {
         return Err(Refusal::NotRunning);
+    }
+    Ok(())
+}
+
+/// Reboots the board. On success this does not return.
+fn now() -> std::io::Result<()> {
+    // `RB_AUTOBOOT` is the ordinary restart. `sync` is what makes what was
+    // written to the card part of the next boot rather than lost with this one.
+    unsafe {
+        libc::sync();
+        if libc::reboot(libc::RB_AUTOBOOT) == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
     }
     Ok(())
 }

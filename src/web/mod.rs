@@ -92,6 +92,7 @@ pub async fn serve(
         .route("/api/settings", get(settings::get).post(settings::save))
         .route("/api/restart", post(settings::restart))
         .route("/api/reset", post(settings::factory_reset))
+        .route("/api/reboot", post(settings::reboot))
         .fallback(not_found)
         .layer(Extension(replug))
         .layer(Extension(adapter))
@@ -230,22 +231,25 @@ mod tests {
         );
     }
 
-    /// The button that cannot be taken back asks through a dialog, which is part
-    /// of the markup rather than `confirm` — a browser can be set not to show
-    /// that one at all. It sits under the one that only puts the link back.
+    /// The two buttons that cannot be taken back ask through one dialog, which
+    /// is part of the markup rather than `confirm` — a browser can be set not to
+    /// show that one at all. The order on the page is the order of how much each
+    /// takes away: the service, the board, every pairing.
     #[test]
-    fn the_page_asks_before_a_reset() {
+    fn the_page_asks_before_a_reboot_or_a_reset() {
         for (label, path) in [
             ("重启服务", "/api/restart"),
+            ("重启设备", "/api/reboot"),
             ("恢复出厂设置", "/api/reset"),
         ] {
             assert!(page_text().contains(label), "the page names {label}");
             assert!(page_text().contains(path), "and asks for it through {path}");
         }
         let restart = page_text().find("id=\"set-restart\"").expect("the restart button");
+        let reboot = page_text().find("id=\"set-reboot\"").expect("the reboot button");
         let reset = page_text().find("id=\"set-reset-all\"").expect("the reset button");
-        assert!(restart < reset, "restart, then reset");
-        for id in ["confirm-mask", "confirm-reset", "confirm-ok", "confirm-cancel"] {
+        assert!(restart < reboot && reboot < reset, "restart, reboot, reset");
+        for id in ["confirm-mask", "confirm-box", "confirm-ok", "confirm-cancel"] {
             assert!(
                 page_text().contains(&format!("id=\"{id}\"")),
                 "the dialog has {id}"
