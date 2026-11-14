@@ -370,10 +370,13 @@ pub(crate) async fn watch(hu: &Arc<Hu>) {
         }
         link.abort();
         livi_runtime::bt::let_go(&conn, &cfg.bt_adapter, &held).await;
-        // A signal ends the run. A round that ended for any other reason — the
-        // car went away and came back before the controllers were restored — is
-        // owed the next one, which starts by waiting for the car again.
-        if *stopping.borrow() || *gate.borrow() {
+        // Only a signal ends the run. Every other round is owed the next one,
+        // including the one a replug ends: the car's session goes while the
+        // controllers are being put back and returns before that finishes, and
+        // a round that gave up here left the board with nothing published and a
+        // controller no longer discoverable — a phone that cannot find it, for
+        // as long as the program runs.
+        if *stopping.borrow() {
             tracing::info!(
                 "bt.service_down adapter={} state=restored",
                 cfg.bt_adapter
