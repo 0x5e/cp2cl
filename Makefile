@@ -96,9 +96,9 @@ BR_UID   := 1000
 # its target, the image for its board, because every board's image is kept side
 # by side and no binary runs on another board.
 #
-# The image is named for the board and for this tree: the tag on the commit,
-# `dev` when it carries none, the short commit, and `-dirty` when the tree does
-# not match it — the same facts the page shows as `v0.12.0 (8582d5a-dirty)`.
+# The image is named for the board and for this tree: the tag when the commit
+# carries one, the short commit otherwise, and `-dirty` when the tree does not
+# match it — the same facts the page shows as `v0.12.0 (8582d5a-dirty)`.
 #
 # Every board is handed out as one filesystem image, uncompressed, under the name
 # the flashing tool is pointed at. The NanoPi's and the Zero 2W's are card images
@@ -111,8 +111,11 @@ BR_UID   := 1000
 # product carries it in its name, but a change of release empties the volume.
 DIST          := dist
 BR_VERSION    := $(shell sed -n 's/^ARG BUILDROOT_VERSION=//p' docker/buildroot.Dockerfile)
-CP2CL_VERSION := $(shell git describe --tags --exact-match 2>/dev/null || echo dev)
-CP2CL_COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+# One identifier, not two: a tagged commit is named by its tag, and a commit
+# without one by its short hash. The crate's version is not in the name — that
+# number is written in Cargo.toml and means the release, not the commit.
+CP2CL_NAME := $(shell git describe --tags --exact-match 2>/dev/null \
+	|| git rev-parse --short HEAD 2>/dev/null || echo dev)
 # The submodule carries our patches (see `patched`), so its worktree is always
 # dirty by design; only a different commit is a change worth naming.
 DIRTY         := $(shell git status --porcelain --ignore-submodules=dirty 2>/dev/null)
@@ -124,9 +127,9 @@ APP_OS   := $(word 3,$(subst -, ,$(TARGET)))
 APP_ARCH := $(word 1,$(subst -, ,$(TARGET)))
 APP      := $(DIST)/app/cp2cl-$(APP_OS)-$(APP_ARCH)
 
-# `dist/firmware/cp2cl-<version>-<commit>[-dirty]-<board>.img`.
+# `dist/firmware/cp2cl-<tag-or-commit>[-dirty]-<board>.img`.
 FW_DIR := $(DIST)/firmware
-FW     := $(FW_DIR)/cp2cl-$(CP2CL_VERSION)-$(CP2CL_COMMIT)$(if $(DIRTY),-dirty)-$(BOARD).img
+FW     := $(FW_DIR)/cp2cl-$(CP2CL_NAME)$(if $(DIRTY),-dirty)-$(BOARD).img
 
 # What post-image.sh left in the volume's images/, which is what crosses back. The
 # card boards write sdcard.img, because it is written over a card and has no other
