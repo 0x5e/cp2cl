@@ -7,12 +7,11 @@
 //! is what a head unit expects, since a car asks a device for a CarLife session
 //! and never the other way round.
 //!
-//! Two of the three requests a head unit sends are answered on the spot. The
-//! third asks the device to come back as an *accessory* rather than as the phone
-//! it found, and that is done by taking it off the bus and putting it back with
-//! the numbers and strings a switched phone carries: `usb::Usb::reidentify`. The
-//! interface itself does not change — a head unit takes the accessory's endpoints
-//! by position, and both forms have the same two.
+//! It presents itself as an accessory from the start, which is the one form a
+//! head unit talks CarLife to, so there is no phone to switch and no second
+//! enumeration to wait for. The one of the three requests that asks for the
+//! switch is answered as what the device already is, and followed by the edge
+//! the car asked to see: off the bus and back — see `SWITCH_GAP`.
 //!
 //! A car that boots after this program misses the device arriving, so a device
 //! it has configured and left silent is put back on the bus on a beat until a
@@ -22,11 +21,11 @@ use std::fs;
 use std::io;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context as TaskContext, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::mpsc;
 
@@ -39,11 +38,21 @@ use crate::report::Report;
 use crate::ports::Ports;
 use crate::machine::Machine;
 
-/// How long to let the answer to `start accessory` leave before the device is
+/// How long to let the answer to `start accessory` land before the device is
 /// taken away. The transfer is closed by `complete`, and the host takes its
 /// result a moment later; the device going away in the same breath is a race the
 /// host can lose even so.
 const SETTLE: Duration = Duration::from_millis(100);
+
+/// The shortest gap between two edges given to a car that asks for the accessory
+/// form.
+///
+/// The device is an accessory already, so nothing has to be switched — but a car
+/// can only tell a switch that worked from one that failed by watching the
+/// device go and come back, which is what a phone does when it switches. So the
+/// ask is answered with that edge. A car that asks again on every attach would
+/// otherwise be handed an edge for ever, which is a loop rather than a switch.
+const SWITCH_GAP: Duration = Duration::from_secs(30);
 
 /// What FunctionFS numbers its events. `uapi/linux/usb/functionfs.h`.
 const EVENT_ENABLE: u8 = 2;
@@ -66,16 +75,6 @@ enum Event {
     Enabled,
     /// It has gone.
     Disabled,
-    /// The device has been switched to the accessory form and is on its way back
-    /// to the host. What the host enumerates next is the same device under new
-    /// numbers.
-    Accessory,
-}
-
-/// What answering one request did.
-enum Answered {
-    Nothing,
-    Switched,
 }
 
 /// The CarLife half, ready to present itself to a head unit.
@@ -114,9 +113,8 @@ impl<'a> Md<'a> {
     /// Runs one CarLife session after another over the device this program
     /// composed.
     ///
-    /// The session outlives the form the device is in — the device stays up, and
-    /// only what it calls itself changes — so a session that ends leaves it
-    /// ready for the next head unit rather than needing to be rebuilt.
+    /// The device stays up for the life of the process, so a session that ends
+    /// leaves it ready for the next head unit rather than needing to be rebuilt.
     pub async fn serve(self) -> Result<()> {
         let Self {
             settings,
@@ -124,133 +122,136 @@ impl<'a> Md<'a> {
             mut replug,
             auth,
         } = self;
-        let identity = desc::Identity::phone(&settings.name, &settings.vendor);
-    let (usb, endpoints) = Usb::open(&identity)?;
-    let Endpoints {
-        control,
-        from_car,
-        to_car,
-    } = endpoints;
-    // A device that is on the controller and not yet enumerated is a cable, a
-    // port or a car, and saying so is what makes "nothing is happening" mean
-    // something specific.
-    ports.report.with(|s| {
-        s.carlife.usb.controller = Some(usb.controller().to_string());
-        s.carlife.usb.enumerated = Some(false);
-    });
-    describe_identity(&ports.report, &identity);
+        let identity = desc::Identity::accessory(&settings.name, &settings.vendor);
+        let (usb, endpoints) = Usb::open(&identity)?;
+        let Endpoints {
+            control,
+            from_car,
+            to_car,
+        } = endpoints;
+        // A device that is on the controller and not yet enumerated is a cable, a
+        // port or a car, and saying so is what makes "nothing is happening" mean
+        // something specific.
+        ports.report.with(|s| {
+            s.carlife.usb.controller = Some(usb.controller().to_string());
+            s.carlife.usb.enumerated = Some(false);
+        });
+        describe_identity(&ports.report, &identity);
 
-    tracing::info!("usb.waiting_for_host");
+        // The form is not something a head unit asks for here, so it is said
+        // once, where the device is put on the bus.
+        tracing::info!("usb.accessory_mode state=on");
+        tracing::info!("usb.waiting_for_host");
 
-    let (events_tx, mut events_rx) = mpsc::channel(4);
-    // Kept back from the task below, which owns the device: what the controller
-    // says about the link is read here, and only while an event is being
-    // reported — see `usb::Usb::link`.
-    let udc = usb.clone();
-    // The endpoint files come out of `usb` as they came from the kernel, and are
-    // wrapped here: a read on one of them waits for the host, which is what
-    // tokio's blocking pool is for.
-    let controlling = tokio::spawn(control_loop(
-        usb,
-        identity,
-        tokio::fs::File::from_std(control),
-        events_tx,
-        ports.report.clone(),
-    ));
+        let (events_tx, mut events_rx) = mpsc::channel(4);
+        // When the last edge was given to a car that asked for the accessory
+        // form. Kept where the answers are given, since that is the only place
+        // that asks.
+        let edges = Arc::new(Mutex::new(None::<Instant>));
+        // The endpoint files come out of `Usb::open` as they came from the
+        // kernel, and are wrapped here: a read on one of them waits for the host,
+        // which is what tokio's blocking pool is for. The device goes back to
+        // `serve` and is cloned here because an answer to one of the three
+        // requests can put it off the bus and back.
+        let controlling = tokio::spawn(control_loop(
+            usb.clone(),
+            tokio::fs::File::from_std(control),
+            events_tx,
+            ports.report.clone(),
+            edges,
+        ));
 
-    let bus = udc.clone();
-    tokio::spawn(async move {
-        while replug.recv().await.is_some() {
-            tracing::info!("usb.replug action=disconnect");
-            if let Err(e) = bus.replug().await {
-                tracing::error!("usb.replug_failed err={e:#}");
-            }
-        }
-    });
-
-    // A car that came up after this program did missed the attach, and a car
-    // that is not talking on a device it configured is the one symptom of it
-    // there is. Until a session is up, the device is put back on the bus on this
-    // beat — which is the attach it missed, once every `RETRY`.
-    let bouncing = udc.clone();
-    let state = ports.report.clone();
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(RETRY);
-        // A replug takes half a second, and the ticks it covers are not owed:
-        // catching up on them would be a second replug in a row.
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tick.tick().await;
-            // Nothing has been enumerated, so there is no car to make look
-            // again, and one is talking, so there is nothing to fix.
-            if !state.usb_enumerated() || state.session_up() {
-                continue;
-            }
-            tracing::info!("usb.replug reason=no_carlife_session");
-            if let Err(e) = bouncing.replug().await {
-                tracing::error!("usb.replug_failed err={e:#}");
-            }
-        }
-    });
-
-    while let Some(event) = events_rx.recv().await {
-        match event {
-            // A session runs in either form. A head unit that does the handshake
-            // gets one once it has enumerated the accessory; one that talks
-            // CarLife straight away gets one here. Until the car says the first
-            // thing on the channel, a session is silent, so the one that turns out
-            // not to be needed costs nothing.
-            Event::Enabled => {
-                ports.report.with(|s| s.carlife.usb.enumerated = Some(true));
-                match bulk(&from_car, &to_car) {
-                    Ok(pair) => {
-                        // What the car negotiated, beside the fact that it
-                        // configured the device: the two are what a session that
-                        // never says anything has to be read against.
-                        tracing::info!("usb.enumerated action=start_session {}", udc.link());
-                        // The page can change the size while the program runs, so
-                        // it is read again for each session.
-                        let mut settings = settings.clone();
-                        settings.screen = ports.delegate.screen_chosen();
-                        if let Err(e) =
-                            session::run(pair, &settings, auth.clone(), ports).await
-                        {
-                            // A session that ends because the device left the
-                            // bus is not one that failed: every transfer on a
-                            // disabled endpoint comes back with `ESHUTDOWN`, and
-                            // what took the device away — the switch to
-                            // accessory, or the car unplugging — reports itself
-                            // where it happens.
-                            if !off_bus(&e) {
-                                tracing::warn!("usb.session_failed err={e:#}");
-                            }
-                        }
-                    }
-                    Err(e) => tracing::error!("usb.endpoints_unusable err={e:#}"),
+        // What the controller says about the link is read while an event is being
+        // reported — see `usb::Usb::link` — and a replug is asked for through the
+        // same handle.
+        let bus = usb.clone();
+        tokio::spawn(async move {
+            while replug.recv().await.is_some() {
+                tracing::info!("usb.replug action=disconnect");
+                if let Err(e) = bus.replug().await {
+                    tracing::error!("usb.replug_failed err={e:#}");
                 }
             }
-            Event::Disabled => {
-                ports.report.with(|s| s.carlife.usb.enumerated = Some(false));
-                tracing::info!("usb.host_gone");
+        });
+
+        // A car that came up after this program did missed the attach, and a car
+        // that is not talking on a device it configured is the one symptom of it
+        // there is. Until a session is up, the device is put back on the bus on
+        // this beat — which is the attach it missed, once every `RETRY`.
+        let bouncing = usb.clone();
+        let state = ports.report.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(RETRY);
+            // A replug takes half a second, and the ticks it covers are not owed:
+            // catching up on them would be a second replug in a row.
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                // Nothing has been enumerated, so there is no car to make look
+                // again, and one is talking, so there is nothing to fix.
+                if !state.usb_enumerated() || state.session_up() {
+                    continue;
+                }
+                tracing::info!("usb.replug reason=no_carlife_session");
+                if let Err(e) = bouncing.replug().await {
+                    tracing::error!("usb.replug_failed err={e:#}");
+                }
             }
-            Event::Accessory => {
-                ports.report.with(|s| s.carlife.accessory = true);
-                tracing::info!("usb.accessory_mode state=on")
+        });
+
+        while let Some(event) = events_rx.recv().await {
+            match event {
+                // A session starts the moment a head unit has configured the
+                // device, and nothing here waits for a greeting first: an
+                // accessory is what the car came to find. Until the car says the
+                // first thing on the channel a session is silent, so a car that
+                // configured the device and has not spoken yet costs nothing.
+                Event::Enabled => {
+                    ports.report.with(|s| s.carlife.usb.enumerated = Some(true));
+                    match bulk(&from_car, &to_car) {
+                        Ok(pair) => {
+                            // What the car negotiated, beside the fact that it
+                            // configured the device: the two are what a session that
+                            // never says anything has to be read against.
+                            tracing::info!("usb.enumerated action=start_session {}", usb.link());
+                            // The page can change the size while the program runs, so
+                            // it is read again for each session.
+                            let mut settings = settings.clone();
+                            settings.screen = ports.delegate.screen_chosen();
+                            if let Err(e) =
+                                session::run(pair, &settings, auth.clone(), ports).await
+                            {
+                                // A session that ends because the device left the
+                                // bus is not one that failed: every transfer on a
+                                // disabled endpoint comes back with `ESHUTDOWN`, and
+                                // what took the device away — a replug, or the car
+                                // unplugging — reports itself where it happens.
+                                if !off_bus(&e) {
+                                    tracing::warn!("usb.session_failed err={e:#}");
+                                }
+                            }
+                        }
+                        Err(e) => tracing::error!("usb.endpoints_unusable err={e:#}"),
+                    }
+                }
+                Event::Disabled => {
+                    ports.report.with(|s| s.carlife.usb.enumerated = Some(false));
+                    tracing::info!("usb.host_gone");
+                }
             }
         }
-    }
 
-    controlling.abort();
-    tracing::info!("usb.control_closed");
-    Ok(())
+        controlling.abort();
+        tracing::info!("usb.control_closed");
+        Ok(())
     }
 }
 
 /// Whether a session ended because the device left the bus.
 ///
 /// FunctionFS answers every transfer on an endpoint that is no longer active with
-/// `ESHUTDOWN`, whether the host went away or the gadget was unbound for its
-/// other form; there is no third way to get it. So this is the pipe ending, not a
+/// `ESHUTDOWN`, whether the host went away or the gadget was unbound for a
+/// replug; there is no third way to get it. So this is the pipe ending, not a
 /// fault in it.
 fn off_bus(e: &anyhow::Error) -> bool {
     e.root_cause()
@@ -265,10 +266,10 @@ fn off_bus(e: &anyhow::Error) -> bool {
 /// interleave with them.
 async fn control_loop(
     usb: Usb,
-    mut identity: desc::Identity,
     mut ep0: tokio::fs::File,
     events: mpsc::Sender<Event>,
     status: Arc<Report>,
+    edges: Arc<Mutex<Option<Instant>>>,
 ) {
     loop {
         // The whole event is twelve bytes: the eight of a `usb_ctrlrequest`, the
@@ -289,16 +290,8 @@ async fn control_loop(
                 let _ = events.send(Event::Disabled).await;
             }
             EVENT_SETUP => {
-                match answer(&usb, &mut identity, &mut ep0, &raw, &status).await {
-                    Ok(Answered::Switched) => {
-                        if events.send(Event::Accessory).await.is_err() {
-                            return;
-                        }
-                    }
-                    Ok(Answered::Nothing) => {}
-                    Err(e) => {
-                        tracing::warn!("usb.control_unanswered err={e:#}")
-                    }
+                if let Err(e) = answer(&usb, &mut ep0, &raw, &status, &edges).await {
+                    tracing::warn!("usb.control_unanswered err={e:#}")
                 }
             }
             other => tracing::debug!("usb.control_event event={other}"),
@@ -316,11 +309,11 @@ async fn control_loop(
 /// is, because a device that ignores it leaves the host waiting.
 async fn answer(
     usb: &Usb,
-    identity: &mut desc::Identity,
     ep0: &mut tokio::fs::File,
     raw: &[u8; 12],
     status: &Report,
-) -> Result<Answered> {
+    edges: &Mutex<Option<Instant>>,
+) -> Result<()> {
     let setup = desc::Setup::decode(raw).ok_or_else(|| anyhow!("a setup event with no setup packet"))?;
 
     match setup.accessory() {
@@ -333,7 +326,7 @@ async fn answer(
             ep0.flush().await?;
             status.with(|s| s.carlife.aoa_version = Some(desc::AOA_VERSION));
             exchange(&setup, format_args!("version={}", desc::AOA_VERSION));
-            Ok(Answered::Nothing)
+            Ok(())
         }
         // One of the six strings the host wants the device to call itself.
         Some(desc::Accessory::Identify { index }) => {
@@ -344,28 +337,36 @@ async fn answer(
             // The six are the car's own CarLife application naming itself, and
             // they are worth keeping: they are the only description of the head
             // unit anything here ever sees. They go to the page and no further —
-            // the device keeps the name it was enumerated under, as a phone does.
+            // the device keeps the name it enumerated under.
             status.with(|s| {
                 if let Some(slot) = s.carlife.asked.get_mut(index) {
                     *slot = Some(text);
                 }
             });
-            Ok(Answered::Nothing)
+            Ok(())
         }
         // "Switch to accessory mode and re-enumerate."
+        //
+        // The device has been the accessory since it was put on the bus, so
+        // there is nothing to write and nothing to call itself. The
+        // re-enumeration is what the request is for, though, and a car that is
+        // never shown the device go and come back has no way to tell a switch
+        // that worked from one that failed. So the edge is given: off the bus and
+        // back under the same numbers, which is what a phone does. The request is
+        // ended first, because the host is sitting in the transfer and it is the
+        // device that closes it — see `complete`.
         Some(desc::Accessory::Start) => {
-            // The request has to be ended before the device is taken away: the
-            // host is sitting in this transfer, and it is the device that closes
-            // it. See `complete`.
             complete(ep0).await?;
-            if identity.is_accessory() {
+            if !give_edge(edges) {
                 exchange(&setup, format_args!("result=already_accessory"));
-                return Ok(Answered::Nothing);
+                return Ok(());
             }
-            switch(usb, identity).await?;
-            describe_identity(status, identity);
-            exchange(&setup, format_args!("result=ok identity={:?}", identity.describe()));
-            Ok(Answered::Switched)
+            exchange(&setup, format_args!("result=already_accessory edge=replug"));
+            tokio::time::sleep(SETTLE).await;
+            if let Err(e) = usb.replug().await {
+                tracing::error!("usb.replug_failed err={e:#}");
+            }
+            Ok(())
         }
         // Not one of the three. Where it carries data, the data is still read.
         None => {
@@ -388,7 +389,7 @@ async fn answer(
                 complete(ep0).await?;
                 exchange(&setup, format_args!("result=ignored"));
             }
-            Ok(Answered::Nothing)
+            Ok(())
         }
     }
 }
@@ -432,32 +433,28 @@ async fn complete(ep0: &mut tokio::fs::File) -> Result<()> {
     Ok(())
 }
 
-/// Switches the device to the accessory form.
+/// Whether a car may be given another edge now, and records it if so.
 ///
-/// What the host asked for is not a new device but the same one coming back as
-/// an accessory, which is the only way it can see a device it did not enumerate:
-/// off the bus, new numbers, back on. The request itself is ended before any of
-/// that, and `usb` holds the device off the bus long enough for the host to see
-/// it go. Nothing is reported here: the exchange that asked for it reports the
-/// identity it came back with.
-async fn switch(usb: &Usb, identity: &mut desc::Identity) -> Result<()> {
-    tokio::time::sleep(SETTLE).await;
-
-    let accessory = identity.accessory();
-    usb.reidentify(&accessory)
-        .await
-        .context("switching the device to its accessory form")?;
-    *identity = accessory;
-    Ok(())
+/// One per `SWITCH_GAP`. The answer to `start accessory` never changes, so a car
+/// that asks it again — on every attach, say — would be put off the bus and back
+/// each time, and a device that keeps leaving is worse than one that never did.
+fn give_edge(last: &Mutex<Option<Instant>>) -> bool {
+    let mut slot = last.lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    if slot.is_some_and(|at| now.duration_since(at) < SWITCH_GAP) {
+        return false;
+    }
+    *slot = Some(now);
+    true
 }
 
 /// The numbers and strings of the device descriptor, as a host reads them.
 ///
-/// Reported wherever the identity changes rather than once: the device presents
-/// two of them, and which one is on the wire is the difference between a car
-/// seeing a phone and a car seeing an accessory.
+/// Reported once, where the device is put on the bus: it has one form, and a
+/// head unit reads it off the wire before this program has heard from it.
 fn describe_identity(status: &Report, identity: &desc::Identity) {
     status.with(|s| {
+        s.carlife.accessory = true;
         s.carlife.usb.vid = Some(identity.vid);
         s.carlife.usb.pid = Some(identity.pid);
         s.carlife.usb.manufacturer = Some(identity.manufacturer.clone());

@@ -187,16 +187,14 @@ pub fn version_reply() -> [u8; 2] {
 }
 
 /// The numbers the device carries: the accessory's own, which a head unit checks
-/// before it will talk CarLife at all, and the pair it has before one has
-/// switched it.
+/// before it will talk CarLife at all.
+///
+/// One pair, not two. A phone comes up as itself and is switched by a `start
+/// accessory` request; this device is the accessory from the moment it is on the
+/// bus, so a head unit that decides by numbers finds what it is looking for on
+/// the first enumeration rather than on the second.
 const ACCESSORY_VID: u16 = 0x18d1;
 const ACCESSORY_PID: u16 = 0x2d00;
-/// Google's vendor number, and the product number an Android phone presents in
-/// file-transfer mode — which is what a phone on a head unit's port is when a
-/// head unit first looks at it. Nothing here transfers files; the pair is there
-/// so that a host which decides by numbers rather than by shape finds a phone.
-const PHONE_VID: u16 = 0x18d1;
-const PHONE_PID: u16 = 0x4ee1;
 
 /// What a host reads before it reads anything else: the numbers and the three
 /// strings of a USB device descriptor. The interface it also reads comes from
@@ -210,55 +208,20 @@ pub struct Identity {
 }
 
 impl Identity {
-    /// What the device presents before any handshake, which is what a head unit
-    /// expects to find on its port and what it does the handshake with. The maker
-    /// is the caller's: hosts that decide what they are looking at by the strings
-    /// read that one.
+    /// What the device presents from the moment it is on the bus: the accessory
+    /// a head unit talks CarLife to, with no handshake in front of it.
     ///
     /// The product and the serial are what the machine is called: a head unit
     /// that keeps a device apart from the next one it sees has these strings to
     /// do it with, and a name that is the same on every board is no use for that.
-    pub fn phone(name: &str, manufacturer: &str) -> Self {
+    pub fn accessory(name: &str, manufacturer: &str) -> Self {
         Self {
-            vid: PHONE_VID,
-            pid: PHONE_PID,
+            vid: ACCESSORY_VID,
+            pid: ACCESSORY_PID,
             manufacturer: manufacturer.to_string(),
             product: name.to_string(),
             serial: name.to_string(),
         }
-    }
-
-    /// What it presents afterwards: the same device under the accessory's
-    /// numbers.
-    ///
-    /// Only the two numbers change. A phone is the case this is copied from:
-    /// checked against a Pixel 7a, its accessory form still reports Google /
-    /// Pixel 7a / its own hardware serial, not the six strings the head unit
-    /// sent. FunctionFS keeps the accessory function away from a device
-    /// descriptor's strings for the same reason — the protocol's `send string`
-    /// writes into the function, and the identity a host enumerated is left
-    /// alone.
-    ///
-    /// So what a head unit sends here is recorded for the page and goes no
-    /// further. What the host is left with is one device whose numbers changed,
-    /// which is all a switch is. A device whose *name* changed looks like a
-    /// different device to whatever was watching it before, and a head unit that
-    /// matches the accessory it finds against the phone it just switched is
-    /// entitled to match on the name.
-    pub fn accessory(&self) -> Self {
-        Self {
-            vid: ACCESSORY_VID,
-            pid: ACCESSORY_PID,
-            manufacturer: self.manufacturer.clone(),
-            product: self.product.clone(),
-            serial: self.serial.clone(),
-        }
-    }
-
-    /// Whether the device is already in the form a `start accessory` request asks
-    /// for, which is what makes a second one nothing to do.
-    pub fn is_accessory(&self) -> bool {
-        self.vid == ACCESSORY_VID && self.pid == ACCESSORY_PID
     }
 
     /// For a line in the log.
@@ -389,21 +352,22 @@ mod tests {
     }
 
     #[test]
-    fn the_accessory_form_is_the_same_device_under_other_numbers() {
-        let phone = Identity::phone("nanopi-duo2", "friendlyarm");
-        assert!(!phone.is_accessory(), "a phone is not an accessory yet");
+    fn the_device_is_an_accessory_before_anyone_asks() {
+        let identity = Identity::accessory("nanopi-duo2", "friendlyarm");
 
-        let accessory = phone.accessory();
-        assert_eq!((accessory.vid, accessory.pid), (0x18d1, 0x2d00));
-        assert!(accessory.is_accessory());
         assert_eq!(
-            accessory.manufacturer, "friendlyarm",
-            "a phone keeps its manufacturer across the switch, and so does this"
+            (identity.vid, identity.pid),
+            (0x18d1, 0x2d00),
+            "the numbers a head unit checks before it talks CarLife"
         );
         assert_eq!(
-            accessory.product, "nanopi-duo2",
-            "and the name it enumerated under"
+            identity.manufacturer, "friendlyarm",
+            "the maker is the caller's, since hosts read that string"
         );
-        assert_eq!(accessory.serial, "nanopi-duo2", "and the serial");
+        assert_eq!(
+            identity.product, "nanopi-duo2",
+            "and the name it enumerates under"
+        );
+        assert_eq!(identity.serial, "nanopi-duo2", "and the serial");
     }
 }
