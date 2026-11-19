@@ -13,6 +13,10 @@
 //! the numbers and strings a switched phone carries: `usb::Usb::reidentify`. The
 //! interface itself does not change — a head unit takes the accessory's endpoints
 //! by position, and both forms have the same two.
+//!
+//! A car that boots after this program misses the device arriving, so a device
+//! it has configured and left silent is put back on the bus on a beat until a
+//! session is up — see `RETRY`.
 
 use std::fs;
 use std::io;
@@ -45,6 +49,16 @@ const SETTLE: Duration = Duration::from_millis(100);
 const EVENT_ENABLE: u8 = 2;
 const EVENT_DISABLE: u8 = 3;
 const EVENT_SETUP: u8 = 4;
+
+/// How often a device a car has configured and left silent is taken off the bus
+/// and put back.
+///
+/// A head unit starts CarLife when it sees a device arrive, and one that boots
+/// after this program has nothing left to notice: the attach it should have
+/// reacted to is in the past, and no amount of waiting brings it back. Putting
+/// the device back on the bus is a second attach, so this is tried again for as
+/// long as a car configures the device and runs nothing on it.
+const RETRY: Duration = Duration::from_secs(3);
 
 /// What the control endpoint tells the session loop.
 enum Event {
@@ -149,6 +163,31 @@ impl<'a> Md<'a> {
         while replug.recv().await.is_some() {
             tracing::info!("usb.replug action=disconnect");
             if let Err(e) = bus.replug().await {
+                tracing::error!("usb.replug_failed err={e:#}");
+            }
+        }
+    });
+
+    // A car that came up after this program did missed the attach, and a car
+    // that is not talking on a device it configured is the one symptom of it
+    // there is. Until a session is up, the device is put back on the bus on this
+    // beat — which is the attach it missed, once every `RETRY`.
+    let bouncing = udc.clone();
+    let state = ports.report.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(RETRY);
+        // A replug takes half a second, and the ticks it covers are not owed:
+        // catching up on them would be a second replug in a row.
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            // Nothing has been enumerated, so there is no car to make look
+            // again, and one is talking, so there is nothing to fix.
+            if !state.usb_enumerated() || state.session_up() {
+                continue;
+            }
+            tracing::info!("usb.replug reason=no_carlife_session");
+            if let Err(e) = bouncing.replug().await {
                 tracing::error!("usb.replug_failed err={e:#}");
             }
         }

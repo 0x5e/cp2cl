@@ -1,9 +1,12 @@
 //! What the page shows about the car, and the one place the CarLife half
 //! reports into.
 //!
-//! A write is a report, never a decision: nothing here is read back, so a field
-//! that is stale costs a page and nothing else. The lock is never held across a
-//! wait, which is what makes a plain `Mutex` the right one.
+//! A write is a report, never a decision: no field here steers a session, so a
+//! value that is stale costs a page and nothing else. The one reader is the USB
+//! half, which asks whether a car has configured the device and whether it is
+//! talking on it — see `Report::usb_enumerated` and `Report::session_up`. The
+//! lock is never held across a wait, which is what makes a plain `Mutex` the
+//! right one.
 
 use std::sync::{Arc, Mutex};
 
@@ -33,6 +36,25 @@ impl Report {
         // behind it is still the best account anyone has.
         let mut held = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         report(&mut held);
+    }
+
+    /// Whether a head unit has configured the device.
+    ///
+    /// This and `session_up` are the two bits the USB half reads back rather
+    /// than only writes: a car that configured the device and then said nothing
+    /// on it is a car that did not notice the device arrive, and taking it off
+    /// the bus and putting it back is the only thing that can make it look
+    /// again.
+    pub fn usb_enumerated(&self) -> bool {
+        let held = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        held.carlife.usb.enumerated == Some(true)
+    }
+
+    /// Whether a car has a CarLife session up, which it has from the moment it
+    /// has been given our device information until the session ends.
+    pub fn session_up(&self) -> bool {
+        let held = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        held.carlife.session_up
     }
 
     /// The car's half of the page. `video` is the stream's coding, which the
@@ -343,6 +365,12 @@ mod tests {
             json!({ "width": 1280, "height": 720, "fps": 30 })
         );
         assert_eq!(report.song_json()["song"], json!("a song"));
+        // The two bits the USB half reads back rather than the page.
+        assert!(report.session_up());
+        assert!(
+            !report.usb_enumerated(),
+            "nothing has configured the device yet"
+        );
     }
 
     #[test]
