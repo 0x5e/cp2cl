@@ -198,7 +198,7 @@ mod tests {
         let mercedes = Preset {
             width: 1920,
             height: 720,
-            fps: 30,
+            fps: 60,
         };
         assert_eq!(
             of(Some("20062104")),
@@ -227,8 +227,8 @@ mod tests {
             }
         );
 
-        assert_eq!(parse_preset("1920x720@30"), Some(mercedes));
-        assert_eq!(parse_preset(" 1920 X 720 @ 30 "), Some(mercedes));
+        assert_eq!(parse_preset("1920x720@60"), Some(mercedes));
+        assert_eq!(parse_preset(" 1920 X 720 @ 60 "), Some(mercedes));
         for bad in ["1920x720", "1920x720@", "x720@30", "1920x@30", "1920x720@0", ""] {
             assert_eq!(parse_preset(bad), None, "{bad:?} is not a size and a rate");
         }
