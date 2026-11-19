@@ -521,7 +521,7 @@ mod tests {
     #[test]
     fn the_area_is_the_first_segment_of_the_event_name() {
         assert_eq!(area_of("carlife.encoder state=started"), Some("carlife"));
-        assert_eq!(area_of("usb.msg.recv request=51"), Some("usb"));
+        assert_eq!(area_of("usb.msg.recv code=51"), Some("usb"));
         assert_eq!(area_of("main.started name=cp2cl"), Some("main"));
         assert_eq!(
             area_of("carlife.msg.recv service_type=0x00018003"),
@@ -555,7 +555,7 @@ mod tests {
     fn the_event_name_starts_in_the_same_column_whatever_the_area() {
         // A short name, which the column pads out, and the longest one, which
         // it does not.
-        let short = expand(&plain(&render("usb.msg.recv request=51")));
+        let short = expand(&plain(&render("usb.msg.recv code=51")));
         let long = expand(&plain(&render("carplay.airplay.held reason=car_session_not_up")));
         // Measured from the bracket, since the stamp is as wide as the uptime
         // makes it and both lines need not have been written in the same second.

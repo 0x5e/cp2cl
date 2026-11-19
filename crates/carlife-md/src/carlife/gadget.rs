@@ -301,12 +301,12 @@ async fn control_loop(
 
 /// Answers one setup event.
 ///
-/// Every request is reported, understood or not: which ones a given head unit
-/// sends is not settled, and a line per request is the cheapest way to find out.
-/// A request and whatever its data stage carries are one exchange, so they are
-/// one line — the data is read first and reported on the line that requests it.
-/// The data stage of a request that has one is always read, whatever the request
-/// is, because a device that ignores it leaves the host waiting.
+/// Every request is reported twice, understood or not: once as it arrives
+/// (`received`) and once with what came of it (`exchange`). Which ones a given
+/// head unit sends is not settled, and two lines per request is the cheapest way
+/// to find out without losing the ones that go wrong. The data stage of a
+/// request that has one is always read, whatever the request is, because a
+/// device that ignores it leaves the host waiting.
 async fn answer(
     usb: &Usb,
     ep0: &mut tokio::fs::File,
@@ -315,6 +315,7 @@ async fn answer(
     edges: &Mutex<Option<Instant>>,
 ) -> Result<()> {
     let setup = desc::Setup::decode(raw).ok_or_else(|| anyhow!("a setup event with no setup packet"))?;
+    received(&setup);
 
     match setup.accessory() {
         // "What version of the accessory protocol do you speak?"
@@ -398,16 +399,29 @@ async fn answer(
 ///
 /// The direction bit says which way the data stage goes, and that is the whole
 /// of the name: data arriving is a receive, data going out is a send, the same
-/// two words the CarLife lines use. What came of it ends the same line, so a
-/// request and its data stage are never two lines that have to be read
-/// together.
+/// two words the CarLife lines use. It is the second of the two lines a request
+/// gets — `received` is the first — so it carries only the code and what came
+/// of it.
 fn exchange(setup: &desc::Setup, outcome: std::fmt::Arguments<'_>) {
     let name = match setup.direction() {
         "in" => "usb.msg.send",
         _ => "usb.msg.recv",
     };
+    tracing::info!("{name} code={} {outcome}", setup.request);
+}
+
+/// Reports one control request as it arrives.
+///
+/// A request and what came of it are two moments, not one: the transfer is
+/// opened here and closed by `exchange`, and one that the exchange never closes
+/// — a write that failed, a host that stalled — is a line with nothing after it
+/// rather than a request that was never seen. The fields are the setup packet's,
+/// which is the only place they are still whole. `code` is the packet's
+/// `bRequest`: a number that names what the host is asking for, not a request
+/// this program makes.
+fn received(setup: &desc::Setup) {
     tracing::info!(
-        "{name} request={} type={:#04x} value={} index={} length={} {outcome}",
+        "usb.msg.recv code={} type={:#04x} value={} index={} length={}",
         setup.request,
         setup.request_type,
         setup.value,
