@@ -118,15 +118,16 @@ BR2_PACKAGE_BUSYBOX_SHOW_OTHERS=y
 BR2_PACKAGE_DBUS=y
 BR2_PACKAGE_BLUEZ5_UTILS=y
 BR2_PACKAGE_BLUEZ5_UTILS_CLIENT=y
+# sdptool reads the RFCOMM channel out of the phone's SDP record, and BlueZ
+# builds it in Makefile.tools under `if DEPRECATED`, so this switch is what
+# puts it on the image. gatttool -- the file Buildroot's install hook copies --
+# needs TOOLS as well: it sits under `if TOOLS` and `if READLINE`.
 BR2_PACKAGE_BLUEZ5_UTILS_DEPRECATED=y
 BR2_PACKAGE_BLUEZ5_UTILS_TOOLS=y
 # No console and no screen on this board, so a phone that will not pair leaves
 # nothing behind: bluetoothd's own log says what it decided, not what the
 # controller did. btmon reads the latter off the kernel's monitor channel --
 # the HCI frames of a pairing, and the reason code it failed with.
-#
-# Not the deprecated tools: bluez 5.79 dropped attrib/gatttool and the install
-# step still expects it, so `--enable-deprecated` fails the build.
 BR2_PACKAGE_BLUEZ5_UTILS_MONITOR=y
 BR2_PACKAGE_HOSTAPD=y
 BR2_PACKAGE_HOSTAPD_DRIVER_NL80211=y
