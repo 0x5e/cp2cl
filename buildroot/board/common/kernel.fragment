@@ -16,6 +16,12 @@ CONFIG_USB_GADGET=y
 CONFIG_USB_LIBCOMPOSITE=y
 CONFIG_USB_CONFIGFS=y
 CONFIG_USB_CONFIGFS_F_FS=y
+# The network functions. Not used by the CarPlay side, which is FunctionFS
+# alone, but the image is also the one a probe program runs from, and that
+# program reaches the head unit by presenting the board as a network device
+# to it: NCM first, RNDIS as the fallback for a host that has no NCM driver.
+CONFIG_USB_CONFIGFS_NCM=y
+CONFIG_USB_CONFIGFS_RNDIS=y
 
 CONFIG_MMC=y
 
