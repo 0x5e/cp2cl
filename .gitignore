@@ -9,8 +9,10 @@ guide/.tmp/
 
 # Credentials — private keys, never commit these. The cp2cl package installs the
 # MFi pair into the firmware's /etc/cp2cl/ and the program reads them there; the
-# CarLife key is put into the binary at build time from `CARLIFE_PRIVATE_KEY`.
-# A clone without any of them builds and runs, just without authentication.
+# CarLife key goes into the binary at build time, out of `CARLIFE_PRIVATE_KEY` or
+# this directory's `carlife_md_rsa_private.pem`. The MFi pair is optional — a
+# clone without it builds and runs, just without CarPlay authentication — and the
+# CarLife key is not: a clone with neither does not compile.
 authentication/
 *.pk8
 *.p7b

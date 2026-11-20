@@ -37,8 +37,9 @@ CP2CL_INSTALL_STAGING = NO
 # images — and not in the binary either, so they come straight from the checkout,
 # by the names the program asks for them: the MFi pair. The CarLife key is not
 # one of them any more — the binary carries it, put there at build time from
-# `CARLIFE_PRIVATE_KEY` — and its public half is a test fixture, written into the
-# test itself rather than read from here.
+# `CARLIFE_PRIVATE_KEY` or `authentication/carlife_md_rsa_private.pem` — and its
+# public half is a test fixture, written into the test itself rather than read
+# from here.
 CP2CL_CREDENTIALS = $(BR2_EXTERNAL_CP2CL_PATH)/../authentication
 CP2CL_CREDENTIAL_FILES = \
 	$(addprefix $(CP2CL_CREDENTIALS)/,identity.pk8 certificate.p7b)

@@ -132,6 +132,8 @@ TODO
 在项目根目录运行：
 
 ```shell
+# 编译前必须提供 CarLife 私钥：优先读取环境变量 CARLIFE_PRIVATE_KEY，
+# 其次读取 authentication/carlife_md_rsa_private.pem，两者都没有则编译失败。
 # 可从 com.baidu.carlife_8.9.0_base.apk/classes2.dex 中获取。
 # com/baidu/carlife/authorization/PrivateKeyManager.java:37
 export CARLIFE_PRIVATE_KEY="MIICdwIBAD..........gHdvNpcqA="

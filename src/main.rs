@@ -530,28 +530,24 @@ fn mfi_signer() -> Result<Box<dyn AuthCoprocessor + Send>> {
     Ok(Box::new(signer))
 }
 
+/// The CarLife key this build carries, as `build.rs` wrote it out.
+///
+/// The text stops here: what the program keeps is the parsed key. A build that
+/// was handed no key does not reach this line — see `build.rs`.
+const CARLIFE_KEY: &str = include_str!(concat!(env!("OUT_DIR"), "/carlife.pem"));
+
 /// The CarLife key the car's challenge is answered with.
 ///
 /// Not a credential of ours: it is the CarLife app's own private key, extracted
 /// from `com.baidu.carlife`, and the car accepts answers made with it because
-/// Baidu made the matching public half. The build hands it over in
-/// `CARLIFE_PRIVATE_KEY` — a PEM block, or the bare Base64 the app's own constant
-/// is — and what the program keeps is the parsed key rather than the text.
+/// Baidu made the matching public half. It is in the binary rather than in the
+/// data directory, so what the board carries is the program alone.
 ///
-/// `None` is a build that was given none, which leaves the car unauthenticated
-/// rather than failed: the challenge is skipped, the head unit asks again in half
-/// a minute, and the streams run either way. Said once, here.
+/// `None` is a key that was handed over and could not be read: the challenge is
+/// skipped, the head unit asks again in half a minute, and the streams run
+/// either way. Said once, by the crate that reads it.
 fn carlife_signer() -> Option<carlife_md::Signer> {
-    let Some(pem) = option_env!("CARLIFE_PRIVATE_KEY")
-        .map(str::trim)
-        .filter(|pem| !pem.is_empty())
-    else {
-        tracing::warn!(
-            "carlife.auth.key_absent env=CARLIFE_PRIVATE_KEY consequence=carlife_auth_skipped"
-        );
-        return None;
-    };
-    carlife_md::Signer::from_pem(pem)
+    carlife_md::Signer::from_pem(CARLIFE_KEY.trim())
 }
 
 #[cfg(test)]
@@ -577,17 +573,13 @@ ZsBPOOMVom04I7KWPQIDAQAB
 -----END PUBLIC KEY-----
 ";
 
-    /// The two halves the car will be answered with and checks with, when this
-    /// build has one: the key it was given, and the public half the extraction
-    /// report printed, including whether the two are really one pair.
-    ///
-    /// A build without the key asserts nothing, because running without one is a
-    /// supported way to run.
+    /// The two halves the car will be answered with and checks with: the key
+    /// this build carries — every build carries one, since one without it is
+    /// refused — and the public half the extraction report printed, including
+    /// whether the two are really one pair.
     #[test]
     fn the_key_the_build_was_given_is_one_the_car_accepts() {
-        let Some(signer) = carlife_signer() else {
-            return;
-        };
+        let signer = carlife_signer().expect("the key this build carries is one that reads");
 
         // The challenge the extraction report verified its own round trip with.
         let challenge = "1234567890_1.0.0";

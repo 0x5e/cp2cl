@@ -88,10 +88,10 @@ pub struct Md<'a> {
     /// The key the car's challenge is answered with, parsed by the program.
     ///
     /// Once rather than per session: it is one key, and a car plugged out and
-    /// back in finds what the session before it had. `None` is a program built
-    /// without one, which leaves the car unauthenticated rather than failed —
-    /// the challenge is skipped, the head unit asks again in half a minute, and
-    /// the streams run either way.
+    /// back in finds what the session before it had. `None` is a caller that
+    /// holds no key it could read, which leaves the car unauthenticated rather
+    /// than failed — the challenge is skipped, the head unit asks again in half
+    /// a minute, and the streams run either way.
     auth: Option<auth::Signer>,
 }
 

@@ -16,6 +16,10 @@
 //! version is a name given to a commit, so the commit being built is what knows
 //! what the build is called, and a file holding it would only be right until
 //! the next commit.
+//!
+//! The CarLife key is chosen here too — the environment first, the extracted
+//! file in the checkout second — and written out for the program to include. A
+//! build handed neither is stopped here rather than on the board.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -38,8 +42,20 @@ fn main() {
     }
     table.push_str("];\n");
 
-    let out = Path::new(&std::env::var("OUT_DIR").expect("cargo sets this")).join("assets.rs");
-    std::fs::write(out, table).expect("the generated table is writable");
+    let out = Path::new(&std::env::var("OUT_DIR").expect("cargo sets this")).to_path_buf();
+    std::fs::write(out.join("assets.rs"), table).expect("the generated table is writable");
+
+    // Two places, the environment first: a build that was handed the key — how
+    // the image is built on a machine that never had the extracted file — is a
+    // build whose checkout need not hold it. The file is watched only when it is
+    // there, like the git paths below: a path that does not exist makes this
+    // script run on every build, and that build is exactly the one without it.
+    println!("cargo:rerun-if-env-changed=CARLIFE_PRIVATE_KEY");
+    if manifest.join(KEY_FILE).exists() {
+        println!("cargo:rerun-if-changed={KEY_FILE}");
+    }
+    let key = carlife_key(&manifest);
+    std::fs::write(out.join("carlife.pem"), key).expect("the generated key file is writable");
 
     // Watched file by file, not as `.git` itself. The `git status` below creates
     // and deletes `.git/index.lock` and rewrites `.git/index`, and a create or a
@@ -75,6 +91,40 @@ fn main() {
     }
     println!("cargo:rustc-env=CP2CL_VERSION={version}");
     println!("cargo:rustc-env=CP2CL_COMMIT={commit}");
+}
+
+/// Where a checkout keeps the extracted CarLife key, from its root.
+const KEY_FILE: &str = "authentication/carlife_md_rsa_private.pem";
+
+/// The CarLife key the program answers the car's challenge with.
+///
+/// Not a credential of ours: it is the CarLife app's own private key, extracted
+/// from `com.baidu.carlife`, and the car accepts an answer made with it because
+/// Baidu made the matching public half. `CARLIFE_PRIVATE_KEY` is asked first —
+/// how a build whose checkout holds no extracted file is handed one, as a PEM
+/// block or as the bare Base64 of the app's own constant — and `KEY_FILE`
+/// second, which is where an extraction leaves it in the checkout. An empty
+/// variable counts as none: `-e CARLIFE_PRIVATE_KEY` in a makefile that was not
+/// given one passes the empty string rather than dropping the variable.
+///
+/// A build with neither is refused here. Running without one is not a way to
+/// run any more: the car goes unanswered, asks again every half minute, and the
+/// sessions are unauthenticated throughout — a fault to find at compile time
+/// rather than on the board.
+fn carlife_key(manifest: &Path) -> String {
+    let given = std::env::var("CARLIFE_PRIVATE_KEY")
+        .ok()
+        .map(|pem| pem.trim().to_string())
+        .filter(|pem| !pem.is_empty());
+    if let Some(pem) = given {
+        return pem;
+    }
+    if let Ok(pem) = std::fs::read_to_string(manifest.join(KEY_FILE)) {
+        if !pem.trim().is_empty() {
+            return pem;
+        }
+    }
+    panic!("no CarLife key: set CARLIFE_PRIVATE_KEY, or put the extracted key at {KEY_FILE}");
 }
 
 /// What git says about the commit being built, or nothing when it cannot say.

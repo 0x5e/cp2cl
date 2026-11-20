@@ -65,10 +65,10 @@ TARGET   := $(TARGET_$(ARCH))
 CMAKE_TF := $(CMAKE_TF_$(ARCH))
 
 # The CarLife key is handed to the compiler rather than to the program: it is
-# written into the binary at build time, out of the environment, so what is set
-# in the calling shell is what the build carries. Unset, the build produces a
-# binary without one, which is a supported way to run — the car is left
-# unauthenticated and the streams run either way.
+# written into the binary at build time, so what the build carries is the key
+# this checkout or this shell has. `CARLIFE_PRIVATE_KEY` in the calling shell
+# wins over the extracted file the checkout keeps; a build with neither stops
+# before the compiler does, because a binary without one cannot answer the car.
 RUN    := docker run --rm -u "$$(id -u):$$(id -g)" \
             -e CMAKE_TOOLCHAIN_FILE=$(CMAKE_TF) -e CARLIFE_PRIVATE_KEY \
             -v "$(CURDIR)":/work -v cp2cl-cargo:/cargo $(IMAGE)

@@ -12,9 +12,9 @@
 //! through that private key. Answering is therefore a matter of holding the key,
 //! which is the app's own, extracted from the APK, because Baidu does not hand
 //! that half out. It reaches this crate already parsed: the program reads the
-//! key and hands over a `Signer`, which puts the challenge through it. A program
-//! built without one skips the challenge instead: the head unit is left
-//! unauthenticated, asks again every half minute, and the streams run either way.
+//! key and hands over a `Signer`, which puts the challenge through it. A key it
+//! cannot read is skipped instead: the head unit is left unauthenticated, asks
+//! again every half minute, and the streams run either way.
 //!
 //! The phone's half has no secret in it: the car sends its channel number along
 //! with its statistics, an app accepts it when it looks like one of the numbers

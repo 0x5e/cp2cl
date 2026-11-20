@@ -73,8 +73,8 @@ jobs:
           docker tag ghcr.io/0x5e/cp2cl-builder:latest cp2cl-builder
       - name: Build
         env:
-          # Read by `make` out of the environment and handed to the compiler by
-          # `option_env!`, so it is in the binary and not on the command line.
+          # Read by `build.rs` out of the environment and written into the
+          # binary, so it never appears on a command line.
           CARLIFE_PRIVATE_KEY: ${{ secrets.CARLIFE_PRIVATE_KEY }}
         run: |
           test -n "$CARLIFE_PRIVATE_KEY"
