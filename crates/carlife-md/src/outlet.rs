@@ -203,6 +203,7 @@ impl Outlet {
             voice: self.voice_tx.clone(),
             playing: self.playing_tx.clone(),
             stream: self.stream_tx.clone(),
+            no_video_reader: AtomicBool::new(false),
             no_media_reader: AtomicBool::new(false),
             media_behind: AtomicBool::new(false),
             no_navi_reader: AtomicBool::new(false),
@@ -299,6 +300,7 @@ pub struct Sink {
     stream: watch::Sender<bool>,
     /// Each of these is said once. A stream that keeps arriving with nowhere to
     /// go would otherwise print a line per frame.
+    no_video_reader: AtomicBool,
     no_media_reader: AtomicBool,
     media_behind: AtomicBool,
     no_navi_reader: AtomicBool,
@@ -333,6 +335,17 @@ impl Sink {
 
     /// One access unit, annex-B, and whether a decoder can start at it.
     pub fn video(&self, data: Vec<u8>, keyframe: bool) {
+        // Nothing holds the queue while no car has a session, which is the
+        // normal order now: the phone is asked to start before a car turns up,
+        // and its pictures have nowhere to go until a session takes the queue.
+        // Queueing them would fill it and report a drop per picture, for a car
+        // that is not there; the session asks for a keyframe when it starts.
+        if !self.video.taken.load(Ordering::Relaxed) {
+            if !self.no_video_reader.swap(true, Ordering::Relaxed) {
+                tracing::debug!("carlife.outlet_dropped channel=video reason=no_car");
+            }
+            return;
+        }
         self.video.push(Frame { data, keyframe });
     }
 
@@ -443,6 +456,32 @@ mod tests {
             sink.video(vec![n], true);
         }
         assert_eq!(video.recv().await.data, vec![1]);
+    }
+
+    /// A picture nobody is reading is not queued, and is not counted as a drop:
+    /// a phone that started before its car did is the ordinary case now.
+    #[tokio::test]
+    async fn a_picture_no_session_is_reading_is_not_queued() {
+        let outlet = Outlet::new();
+        let sink = outlet.sink();
+        let asks = outlet.keyframe_requests();
+
+        // More than the queue holds: had they gone in, the oldest would have
+        // been given up and a keyframe asked for.
+        for n in 0..=BACKLOG as u8 {
+            sink.video(vec![n], n == 0);
+        }
+        assert!(!asks.has_changed().unwrap_or(false), "nothing was dropped");
+
+        let video = outlet.take_video().expect("the video half");
+        assert!(
+            video.try_recv().is_none(),
+            "nothing was kept for a car that was not there"
+        );
+
+        // A session reading it is a session it is kept for.
+        sink.video(vec![9], true);
+        assert_eq!(video.recv().await.data, vec![9]);
     }
 
     #[tokio::test]

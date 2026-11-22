@@ -6,6 +6,10 @@
 //! channel table says about that number's panel. The presses the car makes go
 //! the other way, through the same sink the phone reads them from.
 //!
+//! Two of the three are written down for the next run rather than acted on: the
+//! size and the number are what a session started before a car is there answers
+//! `/info` with — see `crate::config::LastConnection`.
+//!
 //! The phone's half reports how far a phone got, which is the third fact the
 //! lights are drawn from, and says when its icon was tapped.
 //!
@@ -31,15 +35,17 @@ use crate::led;
 /// The one object both halves are given: it answers for each of them as the
 /// host that is told what happened, and as where a key goes.
 pub struct Hooks {
-    /// Whether the CarPlay half accepts anything at all. Shut until a head unit
-    /// has been told who this device is, and shut again when it goes.
+    /// Whether the CarPlay half accepts anything at all. Open from startup, so
+    /// that a phone can be connected before there is a car to render for; shut
+    /// again when the car goes, which ends the phone's session with it.
     carplay: watch::Sender<bool>,
+    /// Whether a head unit has a session. Not the same question as the one
+    /// above: the guide is drawn for this one, and nothing else reads it.
+    car: watch::Sender<bool>,
     /// Bumped when a running CarPlay session should read `/info` again.
     restart: watch::Sender<u64>,
     /// The size the car named, which is what `/info` answers with.
     screen: watch::Sender<Option<Geometry>>,
-    /// The channel number the car named, which picks the icon `/info` carries.
-    channel_id: watch::Sender<Option<String>>,
     /// Fired by the phone's half and waited on by the car's: on the phone our
     /// icon stands for the car's own interface.
     home: Arc<Notify>,
@@ -55,9 +61,9 @@ pub struct Hooks {
 impl Hooks {
     pub fn new(
         carplay: watch::Sender<bool>,
+        car: watch::Sender<bool>,
         restart: watch::Sender<u64>,
         screen: watch::Sender<Option<Geometry>>,
-        channel_id: watch::Sender<Option<String>>,
         home: Arc<Notify>,
         lights: Arc<led::Signals>,
         events: Arc<Events>,
@@ -65,9 +71,9 @@ impl Hooks {
     ) -> Arc<Self> {
         Arc::new(Self {
             carplay,
+            car,
             restart,
             screen,
-            channel_id,
             home,
             lights,
             events,
@@ -99,11 +105,15 @@ impl Hooks {
 
 impl Delegate for Hooks {
     fn session(&self, up: bool) {
+        // A gate that was already open is a phone that was already told to start
+        // — the one this program opened at startup. Only a gate that was shut is
+        // worth saying anything about, and only to start a session that has
+        // nothing yet: an iAP2 session is what tells a phone to begin.
+        let was_open = *self.carplay.borrow();
         let _ = self.carplay.send(up);
+        let _ = self.car.send(up);
         self.lights.carlife(up);
-        if up {
-            // The phone will not start CarPlay on its own — it has to be told
-            // again — and a fresh iAP2 session is how it is told.
+        if up && !was_open {
             self.changed();
         }
     }
@@ -112,6 +122,13 @@ impl Delegate for Hooks {
     /// session of its own — that is what `restart` is for — and a size that
     /// changes nothing is not worth saying twice.
     fn screen_named(&self, width: u32, height: u32, fps: u32) {
+        // Kept whether or not it is news: this is the size a session started
+        // before a car was there is answered with next time, and a size that did
+        // not change does not reach the file.
+        crate::config::note_screen(crate::config::Screen {
+            resolution: Some(crate::config::Resolution { width, height }),
+            fps: (fps > 0).then_some(fps),
+        });
         let wanted = Geometry {
             width,
             height,
@@ -126,8 +143,18 @@ impl Delegate for Hooks {
         self.changed();
     }
 
+    /// Which head unit this is, kept for the next run rather than sent on.
+    ///
+    /// The icon and the label `/info` carries are the ones the last head unit
+    /// named, deliberately: a phone that is already connected when a different
+    /// car turns up keeps the picture it started with, since an answer that
+    /// matched this car would cost it a session — and the session is the wait
+    /// this bridge exists to shorten. The number is reported to the page as it
+    /// arrives, so nothing is lost but the icon.
     fn channel_id(&self, channel: Option<&str>) {
-        let _ = self.channel_id.send(channel.map(str::to_string));
+        if let Some(channel) = channel {
+            crate::config::note_channel(channel);
+        }
     }
 
     /// Read again for each session, because the page can change it while the

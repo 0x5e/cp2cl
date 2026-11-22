@@ -149,7 +149,32 @@ impl Screen {
     }
 }
 
-/// Everything the operator can tune, and nothing that is not a choice.
+/// The connection the last head unit reached, kept for the next run.
+///
+/// A CarPlay session now starts before any car has asked for one — see `main` —
+/// and `GET /info` has to be answered from something. The best answer is what
+/// the last car was served and which head unit it was, and that is all this is:
+/// written when a car says so, read back once at startup. It is not a setting —
+/// the page does not offer it, and nothing reads it to decide anything.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LastConnection {
+    /// The head unit's channel number, which is what picks the icon and the
+    /// label `/info` carries.
+    pub channel: Option<String>,
+    /// What that head unit was served: the size and rate in force, not the ones
+    /// it named.
+    pub screen: Screen,
+}
+
+impl LastConnection {
+    /// Whether nothing has been recorded: a machine that has not had a car yet.
+    fn is_empty(&self) -> bool {
+        self.channel.is_none() && self.screen.is_empty()
+    }
+}
+
+/// Everything the file holds: what the operator can tune, and the one record the
+/// program keeps for itself — see [`LastConnection`].
 ///
 /// The field names are the file's: a field is `log_level`, `wifi_iface`,
 /// `bt_adapter` or `addr` in `config.json`, and absent from it is what `Default`
@@ -172,6 +197,10 @@ pub struct Config {
     /// The screen the settings page picked. `main` reads it at startup and
     /// `carlife::gadget` again for each session; empty is the car's own screen.
     pub screen: Screen,
+    /// What the last car that reached a session was served. Written by the run
+    /// that had one, read by the next run to answer `/info` before a car is
+    /// there; absent is a machine that has not had one.
+    pub last_carlife_conn: Option<LastConnection>,
 }
 
 impl Default for Config {
@@ -184,6 +213,7 @@ impl Default for Config {
             log_level: LevelFilter::INFO,
             addr: "0.0.0.0:80".to_string(),
             screen: Screen::default(),
+            last_carlife_conn: None,
         }
     }
 }
@@ -219,13 +249,70 @@ pub fn log_filter() -> LevelFilter {
 /// The file, written where it stands: in place rather than beside and renamed,
 /// which is what lets it be a link onto the board's volume.
 pub fn save(config: &Config) -> std::io::Result<()> {
-    let path = path();
+    write(&path(), config)
+}
+
+/// The same, at a path named by the caller rather than fixed.
+fn write(path: &Path, config: &Config) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let mut text = serde_json::to_string_pretty(&json(config))?;
     text.push('\n');
-    std::fs::write(&path, text)
+    std::fs::write(path, text)
+}
+
+/// Records the head unit that reached a session: the number it answers on.
+///
+/// Nothing happens when the file already says so, which is the usual case — the
+/// same car comes back run after run, and the board's file lives on a card.
+pub fn note_channel(channel: &str) {
+    let channel = channel.trim();
+    if channel.is_empty() {
+        return;
+    }
+    note(|conn| conn.channel = Some(channel.to_string()));
+}
+
+/// Records the size and rate a head unit was served.
+pub fn note_screen(screen: Screen) {
+    note(|conn| conn.screen = screen);
+}
+
+/// Reads the file, patches what the last car left, and writes it back.
+fn note(patch: impl FnOnce(&mut LastConnection)) {
+    note_in(&path(), patch)
+}
+
+/// The same, at a path named by the caller rather than fixed.
+///
+/// The read is repeated here rather than taken from what `main` holds: the page
+/// writes this file too, and a copy from startup would put back a screen the
+/// operator has since changed.
+fn note_in(path: &Path, patch: impl FnOnce(&mut LastConnection)) {
+    let mut config = read(path);
+    let before = config.last_carlife_conn.clone();
+    let mut conn = before.clone().unwrap_or_default();
+    patch(&mut conn);
+    // An empty record is no record: a machine that has not had a car is one with
+    // nothing to say about the last one.
+    let after = (!conn.is_empty()).then_some(conn);
+    if after == before {
+        return;
+    }
+    let said = format!(
+        "channel={} screen={}",
+        after
+            .as_ref()
+            .and_then(|conn| conn.channel.as_deref())
+            .unwrap_or("none"),
+        after.as_ref().map_or_else(Screen::default, |conn| conn.screen)
+    );
+    config.last_carlife_conn = after;
+    match write(path, &config) {
+        Ok(()) => tracing::info!("settings.connection_recorded {said}"),
+        Err(e) => tracing::warn!("settings.write_failed path={} err={e}", path.display()),
+    }
 }
 
 fn read(path: &Path) -> Config {
@@ -248,9 +335,23 @@ fn read(path: &Path) -> Config {
 /// offers: only half a pair or a zero is dropped, because those serve nothing.
 fn from_value(value: &Value) -> Config {
     let defaults = Config::default();
-    let screen = &value["screen"];
-    let width = number(screen, "width");
-    let height = number(screen, "height");
+    Config {
+        screen: screen_of(&value["screen"]),
+        last_carlife_conn: last_connection(&value["last_carlife_conn"]),
+        log_level: level(value, defaults.log_level),
+        wifi_iface: text(value, "wifi_iface", &defaults.wifi_iface),
+        bt_adapter: text(value, "bt_adapter", &defaults.bt_adapter),
+        addr: text(value, "addr", &defaults.addr),
+    }
+}
+
+/// A size and a rate, from an object that writes them as `width`, `height` and
+/// `fps`. The two are independent and either may be absent, which is why the
+/// top-level `screen` and the one in a recorded connection are read by the same
+/// function.
+fn screen_of(object: &Value) -> Screen {
+    let width = number(object, "width");
+    let height = number(object, "height");
     let resolution = match (width, height) {
         (Some(width), Some(height)) if width > 0 && height > 0 => {
             Some(Resolution { width, height })
@@ -261,7 +362,7 @@ fn from_value(value: &Value) -> Config {
             None
         }
     };
-    let fps = match number(screen, "fps") {
+    let fps = match number(object, "fps") {
         Some(fps) if fps > 0 => Some(fps),
         Some(fps) => {
             tracing::warn!("settings.ignored field=fps value={fps}");
@@ -269,13 +370,33 @@ fn from_value(value: &Value) -> Config {
         }
         None => None,
     };
-    Config {
-        screen: Screen { resolution, fps },
-        log_level: level(value, defaults.log_level),
-        wifi_iface: text(value, "wifi_iface", &defaults.wifi_iface),
-        bt_adapter: text(value, "bt_adapter", &defaults.bt_adapter),
-        addr: text(value, "addr", &defaults.addr),
+    Screen { resolution, fps }
+}
+
+/// The last connection, from the object [`json`] writes.
+///
+/// Nothing usable in it is the same as no record at all: a machine that has not
+/// had a car, or a file somebody has edited into something that cannot be used.
+fn last_connection(value: &Value) -> Option<LastConnection> {
+    if !value.is_object() {
+        if !value.is_null() {
+            tracing::warn!("settings.ignored field=last_carlife_conn value={value}");
+        }
+        return None;
     }
+    let channel = match &value["channel"] {
+        Value::Null => None,
+        Value::String(text) if !text.trim().is_empty() => Some(text.trim().to_string()),
+        other => {
+            tracing::warn!("settings.ignored field=last_carlife_conn.channel value={other}");
+            None
+        }
+    };
+    let conn = LastConnection {
+        channel,
+        screen: screen_of(value),
+    };
+    (!conn.is_empty()).then_some(conn)
 }
 
 /// The terminal's filter, from `log_level`.
@@ -342,6 +463,12 @@ pub(crate) fn json(config: &Config) -> Value {
             "height": config.screen.resolution.map(|r| r.height),
             "fps": config.screen.fps,
         },
+        "last_carlife_conn": config.last_carlife_conn.as_ref().map(|conn| json!({
+            "channel": conn.channel,
+            "width": conn.screen.resolution.map(|r| r.width),
+            "height": conn.screen.resolution.map(|r| r.height),
+            "fps": conn.screen.fps,
+        })),
         "log_level": level_name(config.log_level),
         "wifi_iface": config.wifi_iface,
         "bt_adapter": config.bt_adapter,
@@ -501,6 +628,86 @@ mod tests {
         let good = dir.join("good.json");
         std::fs::write(&good, json(&with(full())).to_string()).unwrap();
         assert_eq!(read(&good), with(full()));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 上次连接的记录：写下去的就是读回来的，缺的字段不编造。
+    #[test]
+    fn a_recorded_connection_is_read_back_as_it_was_written() {
+        let recorded = Config {
+            last_carlife_conn: Some(LastConnection {
+                channel: Some("20062104".to_string()),
+                screen: full(),
+            }),
+            ..Config::default()
+        };
+        assert_eq!(from_value(&json(&recorded)), recorded);
+        assert_eq!(
+            json(&Config::default())["last_carlife_conn"],
+            Value::Null,
+            "没有车机就什么都不写"
+        );
+
+        // 只有渠道号也算一条记录：尺寸那半可以缺。
+        let channel_only = from_value(&json!({ "last_carlife_conn": { "channel": "20062104" } }))
+            .last_carlife_conn
+            .expect("a channel is a record");
+        assert_eq!(channel_only.channel.as_deref(), Some("20062104"));
+        assert_eq!(channel_only.screen, Screen::default());
+
+        // 空对象、不是对象、半个尺寸、空渠道号，都是没有记录。
+        for nothing in [
+            json!({ "last_carlife_conn": {} }),
+            json!({ "last_carlife_conn": 3 }),
+            json!({ "last_carlife_conn": { "channel": "" } }),
+            json!({ "last_carlife_conn": { "width": 1920, "height": 0 } }),
+        ] {
+            assert_eq!(
+                from_value(&nothing).last_carlife_conn,
+                None,
+                "{nothing} is not a record"
+            );
+        }
+    }
+
+    /// 记录只在值变了才落盘：同一台车机回来一次不该动这张卡。
+    #[test]
+    fn a_connection_is_recorded_without_rewriting_what_did_not_change() {
+        let dir = std::env::temp_dir().join(format!("cp2cl-conn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("config.json");
+
+        note_in(&file, |conn| conn.channel = Some("20062104".into()));
+        assert_eq!(
+            read(&file)
+                .last_carlife_conn
+                .expect("a record")
+                .channel
+                .as_deref(),
+            Some("20062104")
+        );
+
+        // 手写进去的键还在，说明第二次没有重写整个文件。
+        std::fs::write(
+            &file,
+            r#"{"last_carlife_conn": {"channel": "20062104"}, "by_hand": 1}"#,
+        )
+        .unwrap();
+        note_in(&file, |conn| conn.channel = Some("20062104".into()));
+        assert!(
+            std::fs::read_to_string(&file).unwrap().contains("by_hand"),
+            "the same channel is not worth a write"
+        );
+
+        // 变了才写，写就是把整个文件按程序的意思写一遍。
+        note_in(&file, |conn| conn.screen = full());
+        let reread = read(&file);
+        assert_eq!(reread.last_carlife_conn.expect("both halves").screen, full());
+        assert!(
+            !std::fs::read_to_string(&file).unwrap().contains("by_hand"),
+            "a size that changed is a write"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

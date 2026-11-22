@@ -32,12 +32,13 @@ const DEFAULT_FPS: u32 = 30;
 /// phone has no picture of its own.
 ///
 /// Three things decide whether a frame goes out, and any of them can change
-/// while the wait for the next one is running: whether a car session is up,
+/// while the wait for the next one is running: whether a head unit has a
+/// session — being open for a phone is not the same thing, see `Hooks` —
 /// whether the phone's screen stream is open, and which size the car named —
 /// the last being what the picture is chosen by and how often it is sent.
 pub async fn run(
     outlet: Arc<Outlet>,
-    mut session: watch::Receiver<bool>,
+    mut car: watch::Receiver<bool>,
     mut screen: watch::Receiver<Option<Geometry>>,
 ) {
     let sink = outlet.sink();
@@ -71,8 +72,8 @@ pub async fn run(
             None => guide = None,
         }
 
-        if guide.is_none() || !*session.borrow() || *open.borrow() {
-            if !waited(&mut session, &mut screen, &mut open).await {
+        if guide.is_none() || !*car.borrow() || *open.borrow() {
+            if !waited(&mut car, &mut screen, &mut open).await {
                 return;
             }
             continue;
@@ -84,7 +85,7 @@ pub async fn run(
                 let frame = showing.next();
                 sink.video(frame.data, frame.keyframe);
             }
-            _ = waited(&mut session, &mut screen, &mut open) => {}
+            _ = waited(&mut car, &mut screen, &mut open) => {}
         }
     }
 }
@@ -92,12 +93,12 @@ pub async fn run(
 /// Waits for whichever of the three says something new, and whether the program
 /// is still there to be told.
 async fn waited(
-    session: &mut watch::Receiver<bool>,
+    car: &mut watch::Receiver<bool>,
     screen: &mut watch::Receiver<Option<Geometry>>,
     open: &mut watch::Receiver<bool>,
 ) -> bool {
     tokio::select! {
-        changed = session.changed() => changed.is_ok(),
+        changed = car.changed() => changed.is_ok(),
         changed = screen.changed() => changed.is_ok(),
         changed = open.changed() => changed.is_ok(),
     }

@@ -45,8 +45,19 @@ use carplay_hu::{Events, Geometry};
 use carplay_hu::report::Report;
 use carplay_hu::sink::StreamSink;
 
-use crate::config::hostname;
+use crate::config::{hostname, Resolution, Screen};
 use crate::sink::ClSink;
+
+/// The size a run presumes when neither the page nor the last car said: the
+/// shape this bridge is developed against and the one a head unit is most
+/// likely to take whole.
+const ASSUMED: Resolution = Resolution {
+    width: 1920,
+    height: 720,
+};
+
+/// The rate a run presumes, for the same reason.
+const ASSUMED_FPS: u32 = 60;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -183,13 +194,21 @@ async fn main() -> Result<()> {
 
     // What the phone is asked to render: the CarLife session writes it once a
     // head unit has said what its screen is, and `GET /info` is answered from it.
-    // Until then nothing has, and the default stands.
-    let (screen, screen_in) = watch::channel::<Option<Geometry>>(None);
+    // Seeded rather than empty, because apart from the gate below this is what
+    // lets a session start before there is a car — see `presumed_screen`.
+    let (presumed, size_source, rate_source) = presumed_screen(&cfg);
+    let (screen, screen_in) = watch::channel::<Option<Geometry>>(Some(presumed));
 
     // Which channel the head unit on the other end is, once it has said. `GET
     // /info` is answered from it, so the phone is shown the icon and the label
-    // that go with the car it is plugged into.
-    let (channel_id, channel_id_in) = watch::channel::<Option<String>>(None);
+    // that go with the car it is plugged into — the one the last run ended with,
+    // since a read from this car would cost the session it is starting. The
+    // number itself is reported as it arrives; `Hooks::channel_id` keeps it.
+    let (_channel_id, channel_id_in) = watch::channel::<Option<String>>(
+        cfg.last_carlife_conn
+            .as_ref()
+            .and_then(|conn| conn.channel.clone()),
+    );
 
     // Fired when the phone's icon for us is tapped. The car can be plugged out
     // and back in, and whoever is waiting at the time is the one that matters:
@@ -269,10 +288,18 @@ async fn main() -> Result<()> {
     // longest one in a session's first seconds with no other line in it.
     tokio::spawn(ap::run(cfg.wifi_iface.clone()));
 
-    // Whether the CarPlay half is open for the phone at all. It starts shut and
-    // the car's session is the only thing that opens it: nothing is published
-    // and nothing is accepted until there is a head unit on the other end.
-    let (gateway, gate) = watch::channel(false);
+    // Whether the CarPlay half is open for the phone at all. Open from startup:
+    // the phone is the slow half — it has to be woken, associated, and then
+    // told to begin — so it is asked to start before there is a car to render
+    // for, with the size the last car was served. The car's session is the only
+    // thing that closes it again, and nothing opens it a second time: a run
+    // takes this head start once.
+    let (gateway, gate) = watch::channel(true);
+
+    // Whether a head unit has a session of its own, which is what the guide is
+    // drawn for. Not the gate above: being open for a phone that is not there
+    // yet is no reason to feed the video queue — there is no car reading it.
+    let (car_session, car_session_in) = watch::channel(false);
 
     // What the car is shown while the phone has nothing to show it: frames built
     // into the binary, pushed onto the video queue for as long as there is a car
@@ -280,21 +307,28 @@ async fn main() -> Result<()> {
     // half writes what reaches it and knows nothing about a guide.
     tokio::spawn(guide::run(
         outlet.clone(),
-        gateway.subscribe(),
+        car_session_in,
         screen.subscribe(),
     ));
-    tracing::debug!(
-        "main.bridge.carplay_side state={}",
-        if *gateway.borrow() { "open" } else { "shut" }
+    tracing::info!(
+        "carplay.preconnect width={} height={} fps={} channel={} size_source={size_source} \
+         rate_source={rate_source}",
+        presumed.width,
+        presumed.height,
+        presumed.fps,
+        cfg.last_carlife_conn
+            .as_ref()
+            .and_then(|conn| conn.channel.as_deref())
+            .unwrap_or("none"),
     );
 
     // The one object both halves are given: it answers as the host that is told
     // what happened, as the asset table, and as where a key goes.
     let hooks = hooks::Hooks::new(
         gateway.clone(),
+        car_session,
         restart.clone(),
         screen,
-        channel_id,
         home.clone(),
         led.clone(),
         press.clone(),
@@ -308,12 +342,7 @@ async fn main() -> Result<()> {
     // there is then no way for the two to disagree.
     let airplay_port = listener.local_addr().map(|addr| addr.port()).unwrap_or(0);
     tracing::info!(
-        "carplay.airplay.receiver port={airplay_port} state={}",
-        if *gateway.borrow() {
-            "listening"
-        } else {
-            "held"
-        }
+        "carplay.airplay.receiver port={airplay_port} state=listening reason=preconnect"
     );
 
     let phone = carplay_hu::Hu::new(carplay_hu::Ports {
@@ -334,10 +363,11 @@ async fn main() -> Result<()> {
         restart: restart.clone(),
     })?;
 
-    // The car comes first and CarPlay follows it: nothing is published and
-    // nothing is accepted until there is a head unit on the other end of the
-    // bridge, and both go away again when it does. Which of the two switched
-    // sides is open is the CarLife half's to say, and this is where it says it.
+    // The car comes first in the sense that matters: it is what the picture is
+    // for, and when its session ends the phone's goes with it. What no longer
+    // waits for it is the phone's own session, which was started above, on the
+    // size the last car left behind — a car that names the same one costs
+    // nothing, and one that does not costs a session to say so.
 
     // What the CarLife half is told about the machine. None of it is a choice:
     // the hostname is the name the device goes by, the device tree is its maker,
@@ -352,14 +382,14 @@ async fn main() -> Result<()> {
         data_dir,
     };
 
-    tracing::info!("main.bridge.carlife_up carplay_side=waiting");
+    tracing::info!("main.bridge.carlife_up carplay_side=preconnected");
     // Read once, here rather than in the task below: there is one key, and every
     // session the car gets is answered with it.
     let carlife_auth = carlife_signer();
-    // In the background, because the two sides are each other's condition: this
-    // task is what opens the gate, and the watcher below is the only thing that
-    // acts on it. Waiting for it to return here would leave nobody to answer the
-    // gate it opens.
+    // In the background, because the two sides are each other's condition: the
+    // car's session is what shuts the gate above and what the phone is restarted
+    // for, and waiting for this task to return here would leave nobody to act on
+    // either.
     let car = hooks.clone();
     let alone = gateway.clone();
     // The car's microphone is the one thing that travels the other way, and the
@@ -450,6 +480,42 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The screen this run presumes before a car names one, and where each half of
+/// it came from.
+///
+/// The page's choice where it made one, what the last head unit was served
+/// elsewhere, and [`ASSUMED`] where neither exists. Each half is taken on its
+/// own, the same way a session takes them: a resolution with no rate is a
+/// resolution and the presumed rate.
+fn presumed_screen(cfg: &config::Config) -> (Geometry, &'static str, &'static str) {
+    let seen = cfg
+        .last_carlife_conn
+        .as_ref()
+        .map_or(Screen::default(), |conn| conn.screen);
+    let size = cfg.screen.resolution.or(seen.resolution).unwrap_or(ASSUMED);
+    let geometry = Geometry {
+        width: size.width,
+        height: size.height,
+        fps: cfg.screen.fps.or(seen.fps).unwrap_or(ASSUMED_FPS),
+        ..Geometry::default()
+    };
+    let size_source = if cfg.screen.resolution.is_some() {
+        "page"
+    } else if seen.resolution.is_some() {
+        "record"
+    } else {
+        "default"
+    };
+    let rate_source = if cfg.screen.fps.is_some() {
+        "page"
+    } else if seen.fps.is_some() {
+        "record"
+    } else {
+        "default"
+    };
+    (geometry, size_source, rate_source)
 }
 
 /// One signal the program stops on, or why there is none.

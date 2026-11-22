@@ -156,6 +156,7 @@ CarLife 车机端 - macOS 版：[CarLifePort](https://github.com/0x5e/CarLifePor
 | `bt_adapter` | `hci0` | 蓝牙适配器名称 |
 | `addr` | `0.0.0.0:80` | Web后台监听地址与端口 |
 | `screen` | — | 屏幕自定义参数：`width`, `height`, `fps` |
+| `last_carlife_conn` | — | 程序自动记录的上一次车机连接（渠道号、生效尺寸），用于开机预连接，无需手工填写 |
 
 例子：
 ```json
