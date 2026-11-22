@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 /// The label under our icon when no channel has named one.
-pub const DEFAULT_LABEL: &str = "App";
+pub const DEFAULT_LABEL: &str = "Car";
 
 /// The density a panel is taken to have when the channel table says nothing about
 /// it: 120 pixels per inch, which is what the 8-inch panels these head units
