@@ -18,6 +18,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use livi_runtime::bringup::{run_accessory, CpConfig, OnCable};
 use livi_runtime::driver::LinkChannel;
@@ -207,6 +208,17 @@ pub(crate) fn session_params(
     })
 }
 
+/// How long the phone has to come back over Wi-Fi once it has been told where
+/// CarPlay is.
+///
+/// Nothing makes it come and this side cannot tell a phone that is thinking
+/// from one that never acted: measured from the channel opening it is 0.2 s
+/// when the phone is already awake and 4.6 s when it is not, and one boot sat
+/// on a live iAP2 session for minutes with no connection ever accepted. A link
+/// dropped and paged again is what has brought such a phone back every time it
+/// came back at all, and it costs a page rather than the entry.
+const AIRPLAY_WAIT: Duration = Duration::from_secs(10);
+
 /// Runs the iAP2 half of one wireless session on a channel that is already up,
 /// and says whether the phone should be asked back for another one.
 ///
@@ -284,7 +296,7 @@ pub(crate) async fn run_session(
         run_accessory(channel, auth, identity, cp, tx, feed).await
     });
 
-    let ended = run_bringup(
+    let bringup = run_bringup(
         peer,
         "bt",
         airplay_port,
@@ -296,8 +308,29 @@ pub(crate) async fn run_session(
         Side::Wireless,
         panel,
         status,
-    )
-    .await;
+    );
+    tokio::pin!(bringup);
+
+    // The phone is told where CarPlay is and then left to come: see
+    // `AIRPLAY_WAIT`. A bringup that is still running when the wait is up and
+    // has never had a receiver opened on it is one no phone is coming back to.
+    let finished = tokio::select! {
+        ended = &mut bringup => Some(ended),
+        _ = tokio::time::sleep(AIRPLAY_WAIT) => None,
+    };
+    let ended = match finished {
+        Some(ended) => ended,
+        // It came, and the session is running: from here on the bringup ends
+        // when the phone says so.
+        None if status.airplay_up() => bringup.await,
+        None => {
+            tracing::warn!(
+                "carplay.airplay_absent peer={peer} waited_s={} action=page_again",
+                AIRPLAY_WAIT.as_secs()
+            );
+            Ended::Restart
+        }
+    };
 
     // The session's handle to the link has to go for the link to close, and the
     // driver's own read half has to be let go with it — `Latched`, which the
